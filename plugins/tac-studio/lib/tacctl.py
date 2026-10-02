@@ -6,6 +6,7 @@
     tacctl submit <name> [--model M]   prepare, check, upload, poll status
     tacctl submit <name> --pr          fallback: print the GitHub fork/PR commands (--open-pr runs them)
     tacctl status <id>
+    tacctl mine                        your pieces: status, views, 7d, 28-day sparkline (private)
     tacctl fit [--sketch]              does a run fit the spare weekly window? (exit 3 = no)
     tacctl start <name> [--sketch]     create the work dir, record size sketch|full
     tacctl style [--print] [--log N]   open/create ~/.config/tac/style.md; --print / --log for the skill
@@ -570,6 +571,7 @@ def cmd_submit(a: argparse.Namespace) -> int:
         return die(f"status poll failed: {e}")
     final.setdefault("url", resp.get("url"))
     print_status(final)
+    print("track it with /tac:mine (status + views; only you see the counts)")
     return 0 if final.get("status") != "rejected" else 1
 
 
@@ -615,6 +617,54 @@ def pr_fallback(sub: Path, m: dict[str, Any], run: bool) -> int:
         print(f"$ {s}", flush=True)
         if subprocess.run(s, shell=True).returncode != 0:
             return die(f"step failed: {s}")
+    return 0
+
+
+# ── mine: your own pieces and their (private) view counts ──────────────────
+
+SPARK = "▁▂▃▄▅▆▇█"
+
+
+def sparkline(series: list[Any]) -> str:
+    vals = [int((v.get("views") if isinstance(v, dict) else v) or 0) for v in series]
+    if not vals:
+        return ""
+    top = max(vals)
+    if top == 0:
+        return SPARK[0] * len(vals)
+    return "".join(SPARK[min(len(SPARK) - 1, round(v / top * (len(SPARK) - 1)))] for v in vals)
+
+
+def cmd_mine(a: argparse.Namespace) -> int:
+    creds = load_creds()
+    if not creds:
+        print("not logged in — run /tac:login (or `tacctl login --start`) first")
+        return 1
+    base = api_base() if os.environ.get("TAC_API") else creds.get("api", api_base())
+    status, body = http("GET", f"{base}/v1/me/pieces",
+                        headers={"Authorization": f"Bearer {creds['access_token']}", "Accept": "application/json"})
+    if status == 401:
+        print("your login expired or was revoked — run /tac:login again")
+        return 1
+    if status != 200:
+        return die(f"HTTP {status} {body}")
+    pieces = body.get("pieces", []) if isinstance(body, dict) else body if isinstance(body, list) else []
+    print(f"@{creds.get('handle')} · your pieces (only you see these counts)")
+    if not pieces:
+        print("  none yet — /tac:create, then /tac:submit")
+        return 0
+    rows = []
+    for p in pieces:
+        series = next((p[k] for k in ("views_28d", "series_28d", "series") if isinstance(p.get(k), list)), [])
+        rows.append((str(p.get("title") or p.get("slug") or p.get("id")), str(p.get("status") or "?"),
+                     str(p.get("views_total") if p.get("views_total") is not None else "–"),
+                     str(p.get("views_7d") if p.get("views_7d") is not None else "–"), sparkline(series)))
+    hdr = ("piece", "status", "views", "7d", "last 28 days")
+    w = [max(len(hdr[i]), *(len(r[i]) for r in rows)) for i in range(4)]
+    fmt = f"  {{:<{w[0]}}}  {{:<{w[1]}}}  {{:>{w[2]}}}  {{:>{w[3]}}}  {{}}"
+    print(fmt.format(*hdr))
+    for r in rows:
+        print(fmt.format(*r))
     return 0
 
 
@@ -670,6 +720,7 @@ def main(argv: list[str] | None = None) -> int:
     sa = sp.add_parser("start", help="create tac-work/<name>/ and record the run size")
     sa.add_argument("name")
     sa.add_argument("--sketch", action="store_true")
+    sp.add_parser("mine", help="your pieces on the platform: status + private view counts")
     sy = sp.add_parser("style", help="open/create ~/.config/tac/style.md (your standing taste)")
     sy.add_argument("--print", action="store_true", help="print the style (nothing if absent)")
     sy.add_argument("--log", metavar="NAME", help="log its use under ## direction in NAME's notes.md")
@@ -689,7 +740,7 @@ def main(argv: list[str] | None = None) -> int:
     a = ap.parse_args(argv)
     try:
         return {"login": cmd_login, "logout": cmd_logout, "whoami": cmd_whoami, "prepare": cmd_prepare,
-                "submit": cmd_submit, "status": cmd_status, "play": cmd_play, "direct": cmd_direct, "style": cmd_style,
+                "submit": cmd_submit, "status": cmd_status, "play": cmd_play, "direct": cmd_direct, "style": cmd_style, "mine": cmd_mine,
                 "fit": cmd_fit, "start": cmd_start}[a.cmd](a)
     except ApiError as e:
         return die(str(e))

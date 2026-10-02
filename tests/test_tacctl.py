@@ -65,6 +65,14 @@ def platform(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
             self.reply(404)
 
         def do_GET(self):
+            if self.path == "/v1/me/pieces":
+                if self.headers.get("Authorization") != "Bearer tok-123":
+                    return self.reply(401, {"detail": "bad token"})
+                return self.reply(200, {"pieces": [
+                    {"id": "sub-1", "slug": "ember", "title": "ember", "status": "published",
+                     "views_total": 1234, "views_7d": 56, "views_28d": [0] * 20 + [1, 2, 4, 8, 4, 2, 1, 0]},
+                    {"id": "sub-2", "slug": "hush-2", "title": "hush-2", "status": "in_review",
+                     "views_total": 0, "views_7d": 0, "views_28d": [{"date": "d", "views": 0}] * 28}]})
             if self.path == "/v1/submissions/sub-1":
                 state.status_polls += 1
                 seq = ["queued", "rendering", "in_review"]
@@ -127,6 +135,7 @@ def test_submit_uploads_and_polls(platform: Platform, work: Path, capsys) -> Non
     assert tacctl.main(["submit", "ember", "--model", "claude-opus-5-5", "--tokens", "1234"]) == 0
     out = capsys.readouterr().out
     assert "status: in_review" in out and "critique: calm" in out and "/v1/submissions/sub-1" in out
+    assert out.count("/tac:mine") == 1
     assert platform.auth_headers == ["Bearer tok-123"]
     up = platform.upload
     meta = json.loads(up["meta"][0][1])
@@ -223,3 +232,32 @@ def test_style_file_read_when_present_ignored_when_absent(platform: Platform, wo
     _, m, reasons = tacctl.prepare("ember", model="claude-opus-5-5", handle=None, tokens=None,
                                    estimate_tokens=False)
     assert m["human_role"] == "none" and reasons == []
+
+
+def test_mine_requires_login(platform: Platform, capsys) -> None:
+    assert tacctl.main(["mine"]) == 1
+    assert "/tac:login" in capsys.readouterr().out
+
+
+def test_mine_table_and_sparkline(platform: Platform, capsys) -> None:
+    tacctl.write_private(tacctl.cred_path(), {"access_token": "tok-123", "handle": "alex"})
+    assert tacctl.main(["mine"]) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert out[0] == "@alex · your pieces (only you see these counts)"
+    assert out[1].split() == ["piece", "status", "views", "7d", "last", "28", "days"]
+    ember = out[2].split()
+    assert ember[:4] == ["ember", "published", "1234", "56"]
+    assert ember[4] == "▁" * 20 + "▂▃▅█▅▃▂▁" and len(ember[4]) == 28
+    assert out[3].split()[:4] == ["hush-2", "in_review", "0", "0"] and out[3].endswith("▁" * 28)
+
+
+def test_mine_expired_login(platform: Platform, capsys) -> None:
+    tacctl.write_private(tacctl.cred_path(), {"access_token": "stale", "handle": "alex"})
+    assert tacctl.main(["mine"]) == 1
+    assert "run /tac:login again" in capsys.readouterr().out
+
+
+def test_sparkline_edges() -> None:
+    assert tacctl.sparkline([]) == ""
+    assert tacctl.sparkline([0, 0]) == "▁▁"
+    assert tacctl.sparkline([0, 7]) == "▁█"

@@ -24,6 +24,7 @@ claude plugin install tac@tac-community
 | `/tac:create [--sketch] [idea]` | Claude sketches 3 concepts, iterates on the virtual screen (renders, looks, critiques) and finishes `<name>.py` + `notes.md`. |
 | `/tac:play <name>` | Prints the `tac play …` command to watch it live in your terminal, and opens `tac-work/index.html`, a local review page. |
 | `/tac:submit <name>` | Assembles `tac-work/<name>/submission/`, lints it locally (rejects never leave your machine), uploads it and polls until the platform has rendered and reviewed it. |
+| `/tac:mine` | Your submitted pieces: status, total and 7-day views, and a 28-day sparkline. Only you see these counts. |
 | `/tac:logout` | Deletes the token. |
 | `/tac:style` | Creates/opens `~/.config/tac/style.md` (optional standing taste; `tacctl style`). |
 
