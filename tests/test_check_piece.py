@@ -43,6 +43,8 @@ def test_seed_pieces_pass(piece: Path) -> None:
     "import types\nm = types.ModuleType('_tac_x')\nm.key = getattr(m, 'key', None)\n",
     "import bisect, cmath\n",
     "def sdf_open(x):\n    return x\n",  # names merely containing a banned word are fine
+    "x = getattr(canvas, 'key', None)\ny = hasattr(canvas, 'key')\n",  # the allowed form (wake)
+    "class P:\n    def __init__(self, x):\n        self.x = x\n",
 ])
 def test_allowed(src: str) -> None:
     assert check_source(src + OK_BODY) == []
@@ -76,6 +78,28 @@ def test_allowed(src: str) -> None:
     ("from types import CodeType\n", "CodeType"),
     ("g = (i for i in [])\ng.gi_frame\n", "gi_frame"),
     ("while True:\n    pass\n", "while True"),
+    # reflection builtins outside the exact `getattr(obj, "public")` call form
+    ("g = getattr\ng(canvas, 'x')\n", "may only be called directly"),                  # alias
+    ("[getattr][0](canvas, 'x')\n", "may only be called directly"),                      # list indirection
+    ("(getattr,)[0](canvas, 'x')\n", "may only be called directly"),                     # tuple indirection
+    ("list(map(getattr, [canvas], ['x']))\n", "may only be called directly"),           # passed as argument
+    ("f = lambda o, n: getattr(o, n)\n", "literal, public"),                             # lambda-wrapped
+    ("(g := getattr)(canvas, 'x')\n", "may only be called directly"),                    # walrus
+    ("def f(o, g=getattr):\n    return g(o, 'x')\n", "may only be called directly"),     # default arg
+    ("def f(getattr):\n    return getattr(canvas, 'x')\n", "parameter name"),           # shadowing param
+    ("n = chr(95) * 2 + 'class' + chr(95) * 2\ngetattr(canvas, n)\n", "literal, public"),  # built name
+    ("getattr(canvas, 'x' + 'y')\n", "literal, public"),
+    ("getattr(canvas, *['x'])\n", "literal, public"),
+    ("hasattr(canvas, 'x', 1)\n", "literal, public"),
+    ("import functools\nfunctools.reduce(getattr, ['x'], canvas)\n", "may only be called directly"),
+    ("x = type(canvas)\n", "'type'"),
+    ("x = object\n", "'object'"),
+    ("super()\n", "'super'"),
+    ("dir(canvas)\n", "'dir'"),
+    ("setattr(canvas, 'x', 1)\n", "'setattr'"),
+    ("import random\nrandom.getattr\n", ".getattr"),
+    ("class K(object):\n    pass\n", "plain"),
+    ("class K:\n    def __getattr__(self, n):\n        return n\n", "__getattr__"),
 ])
 def test_rejected(src: str, needle: str) -> None:
     reasons = check_source(src + OK_BODY)

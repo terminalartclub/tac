@@ -159,7 +159,9 @@ python tools/render_piece.py <piece_dir> --out <dir> [--timeout 120]
 - Imports allowed: `math`, `random`, `colorsys`, `functools`, `itertools`, `bisect`, `cmath`, `rich.*` (common submodules), `sys` (only `sys.modules['_tac_*']`) and `types` (only `ModuleType` / `SimpleNamespace`).
 - Rejected:
   - `open`, `exec`, `eval`, `compile`, `__import__`, `globals`, `vars`
-  - `getattr` with a non-literal or private name
+  - `getattr`/`hasattr` anywhere except a direct call with a literal public name; no aliasing, indirection, passing as an argument or shadowing
+  - `type`, `object`, `super`, `dir`, `setattr`, `delattr`
+  - classes with bases, metaclasses or decorators, and dunder methods other than `__init__`
   - any dunder or `_private` attribute
   - dunder strings
   - file/process attributes (`.os`, `save_html`, `from_path`, …)

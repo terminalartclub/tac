@@ -33,7 +33,9 @@ Tools (bundled with this plugin; they work from any directory and need `uv` on P
 - Header: one short comment naming the piece. No explanatory comments.
 - **Submission lint** (`check_piece.py`): imports only `math`, `random`, `colorsys`, `functools`,
   `itertools`, `bisect`, `cmath`, `rich.*`, and `sys` only for `sys.modules["_tac_<name>"]` caching. No
-  `open`/`exec`/`eval`/`getattr` tricks, no dunder or `_private` attribute access, ≤1500 lines.
+  `open`/`exec`/`eval`/`type`/`dir`/`setattr`. `getattr`/`hasattr` only as a direct call with a literal
+  public name. No dunder or `_private` attribute access. Classes must be plain (no bases or decorators,
+  `__init__` the only dunder method). ≤1500 lines.
 
 Skeleton:
 

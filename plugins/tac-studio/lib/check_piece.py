@@ -45,8 +45,12 @@ CACHE_KEY = re.compile(r"^_tac_[A-Za-z0-9_]+$")
 
 BANNED_NAMES = {"open", "exec", "eval", "compile", "__import__", "globals", "locals", "vars",
                 "breakpoint", "input", "help", "exit", "quit", "memoryview", "setattr",
-                "delattr", "__builtins__", "__loader__", "__spec__"}
-ATTR_BUILTINS = {"getattr", "hasattr"}  # allowed only with a literal, public attribute name
+                "delattr", "dir", "type", "object", "super", "classmethod", "staticmethod",
+                "property", "__builtins__", "__loader__", "__spec__"}
+# Reflection builtins: the name may appear ONLY as the callee of `getattr(obj, "public_literal"[, default])`.
+# Any other occurrence (alias, list/tuple, argument, lambda, walrus, default arg, shadowing) is rejected,
+# so a runtime-built attribute name can never reach them.
+ATTR_BUILTINS = {"getattr", "hasattr"}
 BANNED_ATTRS = {"os", "subprocess", "socket", "shutil", "builtins", "importlib", "io", "pathlib",
                 "save_html", "save_svg", "save_text", "from_path", "read_text", "write_text",
                 "read_bytes", "write_bytes", "system", "popen", "f_globals", "f_locals", "f_back",
@@ -70,6 +74,7 @@ class _Lint(ast.NodeVisitor):
     def __init__(self) -> None:
         self.reasons: list[str] = []
         self.module_alias: dict[str, str] = {}  # local name → module ("sys", "types", ...)
+        self.ok_reflection: set[int] = set()  # id() of getattr/hasattr Name nodes in the allowed call form
 
     def bad(self, node: ast.AST, msg: str) -> None:
         line = max(1, getattr(node, "lineno", 2) - 1)
@@ -107,6 +112,34 @@ class _Lint(ast.NodeVisitor):
     def visit_Name(self, node: ast.Name) -> None:
         if node.id in BANNED_NAMES or DUNDER.fullmatch(node.id):
             self.bad(node, f"{node.id!r} is not allowed")
+        elif node.id in ATTR_BUILTINS and id(node) not in self.ok_reflection:
+            self.bad(node, f"{node.id} may only be called directly as {node.id}(obj, \"public_name\")")
+
+    def _arg_names(self, args: ast.arguments) -> None:
+        for a in (*args.posonlyargs, *args.args, *args.kwonlyargs, args.vararg, args.kwarg):
+            if a is not None and (a.arg in BANNED_NAMES or a.arg in ATTR_BUILTINS):
+                self.bad(a, f"parameter name {a.arg!r} is not allowed")
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        if node.name in BANNED_NAMES or node.name in ATTR_BUILTINS or (
+                DUNDER.fullmatch(node.name) and node.name != "__init__"):
+            self.bad(node, f"defining {node.name!r} is not allowed")
+        self._arg_names(node.args)
+        self.generic_visit(node)
+
+    visit_AsyncFunctionDef = visit_FunctionDef  # type: ignore[assignment]
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        self._arg_names(node.args)
+        self.generic_visit(node)
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        # Plain data classes only: no bases, metaclass/keywords or decorators (hook surface).
+        if node.bases or node.keywords or node.decorator_list:
+            self.bad(node, "classes must be plain: no base classes, metaclass or decorators")
+        if node.name in BANNED_NAMES or node.name in ATTR_BUILTINS or DUNDER.fullmatch(node.name):
+            self.bad(node, f"class name {node.name!r} is not allowed")
+        self.generic_visit(node)
 
     def visit_Attribute(self, node: ast.Attribute) -> None:
         attr = node.attr
@@ -114,7 +147,7 @@ class _Lint(ast.NodeVisitor):
             self.bad(node, f"dunder attribute .{attr} is not allowed")
         elif attr.startswith("_"):
             self.bad(node, f"private attribute .{attr} is not allowed")
-        elif attr in BANNED_ATTRS:
+        elif attr in BANNED_ATTRS or attr in BANNED_NAMES or attr in ATTR_BUILTINS:
             self.bad(node, f"attribute .{attr} is not allowed")
         base = node.value
         if isinstance(base, ast.Name):
@@ -136,8 +169,14 @@ class _Lint(ast.NodeVisitor):
         f = node.func
         if isinstance(f, ast.Name) and f.id in ATTR_BUILTINS:
             name = node.args[1] if len(node.args) > 1 else None
-            if not (isinstance(name, ast.Constant) and isinstance(name.value, str)
-                    and not name.value.startswith("_") and name.value not in BANNED_ATTRS):
+            ok = (2 <= len(node.args) <= (3 if f.id == "getattr" else 2) and not node.keywords
+                  and not any(isinstance(x, ast.Starred) for x in node.args)
+                  and isinstance(name, ast.Constant) and isinstance(name.value, str)
+                  and name.value.isidentifier() and not name.value.startswith("_")
+                  and name.value not in BANNED_ATTRS)
+            if ok:
+                self.ok_reflection.add(id(f))
+            else:
                 self.bad(node, f"{f.id}() needs a literal, public attribute name")
         if isinstance(f, ast.Attribute) and self._is_sys_modules(f.value):
             if f.attr not in ("get", "setdefault", "pop") or not node.args or not self._cache_key(node.args[0]):
@@ -171,7 +210,8 @@ def check_source(code: str) -> list[str]:
     except SyntaxError as e:
         return reasons + [f"piece.py:{max(1, (e.lineno or 2) - 1)}: syntax error: {e.msg}"]
     lint = _Lint()
-    lint.visit(tree)
+    for stmt in tree.body[0].body:  # type: ignore[attr-defined]  # skip our own wrapper def
+        lint.visit(stmt)
     reasons += lint.reasons
     body = tree.body[0].body  # type: ignore[attr-defined]
     for stmt in body:
