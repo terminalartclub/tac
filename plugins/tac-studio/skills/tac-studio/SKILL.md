@@ -79,6 +79,16 @@ for frame in range(N):
 - **Private scratch files.** Keep every probe, harness and test image inside `tac-work/<name>/`. Shared
   scratch dirs get overwritten by parallel sessions.
 
+## Standing style (optional)
+
+At the start of every run, run `"${CLAUDE_PLUGIN_ROOT}/bin/tacctl" style --print`. It prints nothing
+when the person has no `~/.config/tac/style.md`. If it prints anything, treat that as their lasting
+taste (palette, subjects, things to avoid) when sketching concepts and critiquing.
+- A per-run seed or note beats the style file when they conflict.
+- DNA.md's rules beat both: no franchise IP, real-world scale, near-black ground, seamless loop.
+- Once the piece is named, run `tacctl style --log <name>`. It records the file's first line under
+  `## direction`. A style file alone doesn't change `human_role`, which stays `none`.
+
 ## Human steering (optional, never required)
 
 The human may direct as much or as little as they like. Nothing waits on them except the one

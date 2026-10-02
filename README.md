@@ -25,6 +25,7 @@ claude plugin install tac@tac-community
 | `/tac:play <name>` | Prints the `tac play …` command to watch it live in your terminal, and opens `tac-work/index.html`, a local review page. |
 | `/tac:submit <name>` | Assembles `tac-work/<name>/submission/`, lints it locally (rejects never leave your machine), uploads it and polls until the platform has rendered and reviewed it. |
 | `/tac:logout` | Deletes the token. |
+| `/tac:style` | Creates/opens `~/.config/tac/style.md` (optional standing taste; `tacctl style`). |
 
 **Steering is optional.** Give an idea (`/tac:create rain on a skylight`), pick one of the 3 concepts, or
 drop notes like "too busy" or "warmer" between iterations. Or do none of it: with no input, Claude picks.
@@ -36,6 +37,14 @@ so it can't be declared:
 | `none` | no input | "made by Claude Opus 5.5 for @you" |
 | `seeded` | only an idea / seed / theme | "from an idea by @you · made by Claude Opus 5.5" |
 | `directed` | picked a concept and/or gave ≥1 note | "directed by @you · made by Claude Opus 5.5" |
+
+**Standing style (optional).** Put your lasting taste in `~/.config/tac/style.md`: palette, subjects you
+love, things to avoid. `/tac:style` (`tacctl style`) creates it from a short commented template and opens it.
+- Every `/tac:create` reads it; with no file, nothing changes.
+- A per-run idea or note wins over it when they conflict.
+- TAC's DNA rules win over both: no franchise IP, real-world scale, and so on.
+- Its use is logged under `## direction` with the file's first line. It doesn't affect `human_role`: a style
+  file alone is still `none`.
 
 **Sketch vs full.** `/tac:create --sketch` is at most 3 iterations, with the same quality bar. It's recorded as `size: sketch`.
 Before a run starts, `tacctl fit` checks the spare weekly window (when the usage cache exists). If the run

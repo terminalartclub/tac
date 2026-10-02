@@ -8,6 +8,7 @@
     tacctl status <id>
     tacctl fit [--sketch]              does a run fit the spare weekly window? (exit 3 = no)
     tacctl start <name> [--sketch]     create the work dir, record size sketch|full
+    tacctl style [--print] [--log N]   open/create ~/.config/tac/style.md; --print / --log for the skill
     tacctl direct <name> seed|pick|note "<text>" [--iter K]   log the human's steering in notes.md
     tacctl play <name>                 print the live `tac play` command, build + open the review page
 
@@ -414,16 +415,12 @@ def cmd_start(a: argparse.Namespace) -> int:
 # ── direction: the human's optional steering, logged in notes.md ───────────
 
 
-def cmd_direct(a: argparse.Namespace) -> int:
-    wd = work_root() / a.name
+def append_direction(name: str, line: str) -> str:
+    """Append one line to tac-work/<name>/notes.md under `## direction`; returns the new text."""
+    wd = work_root() / name
     wd.mkdir(parents=True, exist_ok=True)
     path = wd / "notes.md"
-    text = path.read_text(encoding="utf-8") if path.exists() else f"# {a.name} — notes\n"
-    value = " ".join(a.text.split())
-    if not value:
-        return die("empty direction")
-    line = {"seed": f"- seed: {value}", "pick": f"- pick: {value}",
-            "note": f"- note (iter-{a.iter}): {value}" if a.iter else f"- note: {value}"}[a.kind]
+    text = path.read_text(encoding="utf-8") if path.exists() else f"# {name} — notes\n"
     sec = notesmod.direction_section(text)
     if not sec and not re.search(r"^##\s+direction\s*$", text, re.M | re.I):
         text = text.rstrip("\n") + "\n\n## direction\n\n" + line + "\n"
@@ -432,7 +429,72 @@ def cmd_direct(a: argparse.Namespace) -> int:
         end = m.end() + len(sec)
         text = text[:end].rstrip("\n") + "\n" + line + "\n" + ("\n" + text[end:].lstrip("\n") if text[end:].strip() else "")
     path.write_text(text, encoding="utf-8")
+    return text
+
+
+def cmd_direct(a: argparse.Namespace) -> int:
+    value = " ".join(a.text.split())
+    if not value:
+        return die("empty direction")
+    line = {"seed": f"- seed: {value}", "pick": f"- pick: {value}",
+            "note": f"- note (iter-{a.iter}): {value}" if a.iter else f"- note: {value}"}[a.kind]
+    text = append_direction(a.name, line)
     print(f"{line}  → human_role {notesmod.human_role(text)}")
+    return 0
+
+
+# ── style: the person's standing taste (~/.config/tac/style.md) ────────────
+
+STYLE_TEMPLATE = """<!--
+Your standing taste for /tac:create. Claude reads this at the start of every run.
+A per-run idea or note wins when they conflict. TAC's DNA rules (no franchise IP,
+real-world scale, near-black ground, seamless loop...) always win.
+Write plainly; delete these comments. The first line is quoted in each piece's notes.
+-->
+I like: 
+Palette: 
+Subjects I keep coming back to: 
+Avoid: 
+"""
+
+
+def style_path() -> Path:
+    return config_dir() / "style.md"
+
+
+def style_text() -> str:
+    """The style file without HTML comments, or '' when absent/empty."""
+    try:
+        raw = style_path().read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    return re.sub(r"<!--.*?-->", "", raw, flags=re.S).strip()
+
+
+def style_first_line(text: str) -> str:
+    return next((ln.strip() for ln in text.splitlines() if ln.strip()), "")[:120]
+
+
+def cmd_style(a: argparse.Namespace) -> int:
+    if a.print or a.log:  # skill entry points; silent no-ops when the file is absent or empty
+        text = style_text()
+        if text and a.log:
+            append_direction(a.log, f"- style file used ({style_path()}): {style_first_line(text)}")
+        if text and a.print:
+            print(text)
+        return 0
+    path = style_path()
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        path.write_text(STYLE_TEMPLATE, encoding="utf-8")
+        print(f"created {path}")
+    else:
+        print(path)
+    if not a.no_open:
+        if sys.platform == "darwin":
+            subprocess.run(["open", "-t", str(path)], check=False)
+        else:
+            open_browser(str(path))
     return 0
 
 
@@ -608,6 +670,10 @@ def main(argv: list[str] | None = None) -> int:
     sa = sp.add_parser("start", help="create tac-work/<name>/ and record the run size")
     sa.add_argument("name")
     sa.add_argument("--sketch", action="store_true")
+    sy = sp.add_parser("style", help="open/create ~/.config/tac/style.md (your standing taste)")
+    sy.add_argument("--print", action="store_true", help="print the style (nothing if absent)")
+    sy.add_argument("--log", metavar="NAME", help="log its use under ## direction in NAME's notes.md")
+    sy.add_argument("--no-open", action="store_true")
     dr = sp.add_parser("direct", help="log the human's seed / concept pick / iteration note in notes.md")
     dr.add_argument("name")
     dr.add_argument("kind", choices=("seed", "pick", "note"))
@@ -623,7 +689,7 @@ def main(argv: list[str] | None = None) -> int:
     a = ap.parse_args(argv)
     try:
         return {"login": cmd_login, "logout": cmd_logout, "whoami": cmd_whoami, "prepare": cmd_prepare,
-                "submit": cmd_submit, "status": cmd_status, "play": cmd_play, "direct": cmd_direct,
+                "submit": cmd_submit, "status": cmd_status, "play": cmd_play, "direct": cmd_direct, "style": cmd_style,
                 "fit": cmd_fit, "start": cmd_start}[a.cmd](a)
     except ApiError as e:
         return die(str(e))

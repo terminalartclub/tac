@@ -203,3 +203,23 @@ def test_sketch_over_three_iterations_rejected(good: Path) -> None:
     (good / "meta.yaml").write_text((good / "meta.yaml").read_text().replace("iterations: 1", "iterations: 5")
                                     + 'size: "sketch"\n')
     assert any("at most 3 iterations" in r for r in check_dir(good))
+
+
+def test_style_file_read_when_present_ignored_when_absent(platform: Platform, work: Path, capsys) -> None:
+    assert not tacctl.style_path().exists()
+    assert tacctl.main(["style", "--print", "--log", "ember"]) == 0
+    assert capsys.readouterr().out == ""                       # absent → nothing printed
+    assert "style file used" not in (work / "notes.md").read_text()  # … and nothing logged
+
+    assert tacctl.main(["style", "--no-open"]) == 0              # creates the commented template
+    assert tacctl.style_text().startswith("I like:")             # comments stripped
+    tacctl.style_path().write_text("<!-- c -->\nmoody teal interiors, rain\nAvoid: neon, space\n")
+    capsys.readouterr()
+    assert tacctl.main(["style", "--print", "--log", "ember"]) == 0
+    assert capsys.readouterr().out == "moody teal interiors, rain\nAvoid: neon, space\n"
+    text = (work / "notes.md").read_text()
+    assert "## direction" in text and ": moody teal interiors, rain" in text
+    assert notes.human_role(text) == "none"                      # a style file alone is still "none"
+    _, m, reasons = tacctl.prepare("ember", model="claude-opus-5-5", handle=None, tokens=None,
+                                   estimate_tokens=False)
+    assert m["human_role"] == "none" and reasons == []
