@@ -172,3 +172,49 @@ async def test_hide_never_wipes_concurrent_unhide(ctx):
     media = await store.list(f"public/{h}/{s}")
     assert row["hidden"] == 0 and listed == [f"{h}/{s}"]
     assert f"public/{h}/{s}/preview.webp" in media  # unhide's copy survived
+
+
+async def test_house_artist_admin_only(ctx):
+    token = await ctx.login("alex")
+    from conftest import META
+
+    sub = (await ctx.submit(token, meta={**META, "house_artist": True})).json()  # client claim: ignored
+    await ctx.wait(token, sub["id"])
+    assert "house_artist" not in json.loads(
+        (await ctx.app.state.db.fetchone("SELECT meta_json FROM submissions"))["meta_json"])
+    async with ctx.admin() as a:
+        assert (await a.post(f"/v1/admin/submissions/{sub['id']}/approve")).status_code == 200
+    async with ctx.client() as c:
+        assert (await c.get("/v1/community.json")).json()["pieces"][0]["house_artist"] is False
+        assert (await c.post("/v1/admin/users/alex/house", json={"house": True})).status_code == 401
+    async with ctx.admin() as a:
+        r = await a.post("/v1/admin/users/alex/house", json={"house": True})
+        assert r.json() == {"handle": "alex", "house_artist": True}
+        assert (await a.post("/v1/admin/users/nobody/house", json={"house": True})).status_code == 404
+        assert "Unmark alex house artist" in (await a.get("/admin")).text
+    async with ctx.client() as c:  # regenerated immediately for already-published pieces
+        assert (await c.get("/v1/community.json")).json()["pieces"][0]["house_artist"] is True
+    async with ctx.admin() as a:
+        await a.post("/v1/admin/users/alex/house", json={"house": False})
+    async with ctx.client() as c:
+        assert (await c.get("/v1/community.json")).json()["pieces"][0]["house_artist"] is False
+
+
+async def test_house_artist_migration_on_old_db(tmp_path):
+    import aiosqlite
+
+    from tac_platform.db import Database
+
+    path = tmp_path / "old.sqlite3"
+    async with aiosqlite.connect(path) as c:  # users table as created before the column existed
+        await c.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, handle TEXT NOT NULL UNIQUE, github_id INTEGER UNIQUE,"
+                        " trusted INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL)")
+        await c.execute("INSERT INTO users (handle, created_at) VALUES ('old', 'x')")
+        await c.commit()
+    db = Database(path)
+    await db.open()
+    try:
+        row = await db.fetchone("SELECT house_artist FROM users WHERE handle = 'old'")
+        assert row["house_artist"] == 0
+    finally:
+        await db.close()

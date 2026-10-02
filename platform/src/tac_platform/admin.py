@@ -72,7 +72,7 @@ async def _queue(request: Request) -> dict:
     db = request.app.state.db
     cols = (
         "s.id, s.slug, s.title, s.status, s.hidden, s.meta_json, s.reasons_json, s.critique, s.flags_json,"
-        " s.stats_json, s.process_n, s.created_at, u.handle, u.trusted"
+        " s.stats_json, s.process_n, s.created_at, u.handle, u.trusted, u.house_artist"
     )
     review = await db.fetchall(
         f"SELECT {cols} FROM submissions s JOIN users u ON u.id = s.user_id"
@@ -99,6 +99,7 @@ async def _queue(request: Request) -> dict:
             "status": r["status"],
             "hidden": bool(r["hidden"]),
             "trusted": bool(r["trusted"]),
+            "house_artist": bool(r["house_artist"]),
             "meta": json.loads(r["meta_json"]),
             "reasons": json.loads(r["reasons_json"]),
             "critique": r["critique"],
@@ -175,6 +176,21 @@ async def trust(handle: str, body: TrustIn, request: Request) -> dict:
     return {"handle": handle, "trusted": body.trusted}
 
 
+class HouseIn(BaseModel):
+    house: bool
+
+
+@router.post("/v1/admin/users/{handle}/house")
+async def house(handle: str, body: HouseIn, request: Request) -> dict:
+    require_admin(request)
+    async with request.app.state.db.tx() as tx:
+        if not await tx.execute("UPDATE users SET house_artist = ? WHERE handle = ?", (int(body.house), handle)):
+            raise ApiError(404, "not_found")
+        await tx.audit("admin", "house" if body.house else "unhouse", detail=handle)
+    await request.app.state.publisher.regenerate()  # flag shows on already-published pieces
+    return {"handle": handle, "house_artist": body.house}
+
+
 # ------------------------------------------------------------------ HTML
 
 e = html.escape
@@ -206,6 +222,12 @@ table.audit { width:100%; border-collapse:collapse; font-size:12px; } table.audi
 """
 
 
+def _house_button(it: dict) -> str:
+    h, on = e(it["handle"]), it["house_artist"]
+    return (f"<button onclick=\"act('/v1/admin/users/{h}/house',{{house:{'false' if on else 'true'}}})\">"
+            f"{'Unmark' if on else 'Mark'} {h} house artist</button>")
+
+
 def _kv(d: dict) -> str:
     return "<dl class=kv>" + "".join(f"<dt>{e(str(k))}</dt><dd>{e(str(v))}</dd>" for k, v in d.items()) + "</dl>"
 
@@ -231,11 +253,12 @@ async def _card(request: Request, it: dict, mode: str) -> str:
             f"<button class=bad onclick=\"withReason('/v1/admin/submissions/{e(sid)}/reject','{e(rid)}')\">Reject</button>"
             f"<button onclick=\"act('/v1/admin/users/{h}/trust',{{trusted:{'false' if it['trusted'] else 'true'}}})\">"
             f"{'Untrust' if it['trusted'] else 'Trust'} {h}</button>"
+            + _house_button(it)
         )
     else:
         unhide = f"<button class=primary onclick=\"act('/v1/admin/pieces/{h}/{s}/unhide')\">Unhide</button>" if mode == "hidden" else ""
         actions = (
-            f"{unhide}<input type=text id='{e(rid)}' placeholder='delete reason'>"
+            f"{unhide}{_house_button(it)}<input type=text id='{e(rid)}' placeholder='delete reason'>"
             f"<button class=bad onclick=\"withReason('/v1/admin/pieces/{h}/{s}/delete','{e(rid)}')\">Delete</button>"
         )
     return (
@@ -243,7 +266,7 @@ async def _card(request: Request, it: dict, mode: str) -> str:
         f"<img class=preview src='/admin/media/{e(sid)}/render/preview.webp' alt='preview'>"
         f"<div class=procs>{procs}</div></div><div>"
         f"<h2>{e(it['title'])} <span class=count>by {h} · {e(it['created_at'][:16])}"
-        f"{' · trusted' if it['trusted'] else ''} · {it['views_7d']} views 7d · human: {e(it['meta'].get('human_role', 'none'))} · {e(it['meta'].get('size', 'full'))}</span></h2>"
+        f"{' · trusted' if it['trusted'] else ''}{' · house artist' if it['house_artist'] else ''} · {it['views_7d']} views 7d · human: {e(it['meta'].get('human_role', 'none'))} · {e(it['meta'].get('size', 'full'))}</span></h2>"
         f"<p>{e(it['meta'].get('description', ''))}</p>"
         f"<div>{flags}{reasons}</div>"
         + (f"<p><b>critique</b> {e(it['critique'])}</p>" if it["critique"] else "<p class=muted>no critique</p>")

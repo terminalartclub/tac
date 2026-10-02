@@ -184,7 +184,7 @@ class Publisher:
 
     async def build(self) -> dict:
         rows = await self.db.fetchall(
-            "SELECT s.*, u.handle FROM submissions s JOIN users u ON u.id = s.user_id"
+            "SELECT s.*, u.handle, u.house_artist FROM submissions s JOIN users u ON u.id = s.user_id"
             " WHERE s.status = 'published' AND s.hidden = 0 ORDER BY s.published_at DESC, s.id"
         )
         pieces = []
@@ -202,7 +202,7 @@ class Publisher:
                     "description": meta.get("description", ""),
                     "model": meta["model"],
                     "model_label": model_label(meta["model"]),
-                    "house_artist": False,
+                    "house_artist": bool(r["house_artist"]),  # owner's admin-set flag, never meta
                     "human_role": meta.get("human_role", "none"),
                     "size": meta.get("size", "full"),
                     "tokens": meta.get("tokens"),

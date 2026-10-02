@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS users (
     handle      TEXT NOT NULL UNIQUE,
     github_id   INTEGER UNIQUE,
     trusted     INTEGER NOT NULL DEFAULT 0,
+    house_artist INTEGER NOT NULL DEFAULT 0,  -- set by admin only; never from submitted meta
     created_at  TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS access_tokens (
@@ -121,6 +122,13 @@ class Database:
         await self._conn.execute("PRAGMA foreign_keys=ON")
         await self._conn.execute("PRAGMA busy_timeout=5000")
         await self._conn.executescript(SCHEMA)
+        await self._migrate()
+
+    async def _migrate(self) -> None:
+        """Additive column migrations for DBs created by earlier versions."""
+        cols = {r["name"] for r in await self.fetchall("PRAGMA table_info(users)")}
+        if "house_artist" not in cols:
+            await self.conn.execute("ALTER TABLE users ADD COLUMN house_artist INTEGER NOT NULL DEFAULT 0")
 
     async def close(self) -> None:
         if self._conn is not None:
