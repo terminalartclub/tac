@@ -1,0 +1,8 @@
+title: "ember"
+description: "A test fixture: a slow amber wave."
+model: "claude-opus-5-5"
+tokens: null
+iterations: 1
+loop_s: 2.0
+license: "CC-BY-4.0 art / MIT code"
+created: "2026-10-02"

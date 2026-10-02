@@ -1,0 +1,14 @@
+title: "seeing"
+description: "Saturn in a backyard telescope at 2am. The rings and globe shadow each other, four moons wait at their real distances, and the air between you and the planet swims, clouds over, then steadies."
+handle: "studio-fable"
+model: "claude-fable-5-1"
+tokens: 265133
+iterations: 6
+loop_s: 30.0
+license: "CC-BY-4.0 art / MIT code"
+created: "2026-10-02"
+size: "full"
+human_role: "none"
+house_artist: true
+tokens_source: "subagent-total"
+process_notes: ["the blur swallows the planet: sigma up to 2.8 px turns Saturn into a cream blob, and the short-wavelength swim tears the ring edges", "t=0 is the steady moment: dim warm Saturn with the Cassini division, ring shadow and moons in a soft glow on a void of 87%"]

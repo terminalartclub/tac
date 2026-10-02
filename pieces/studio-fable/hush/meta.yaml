@@ -1,0 +1,14 @@
+title: "hush"
+description: "A single streetlamp in falling snow at 3am, seen from a dark window. Every flake is lit by the lamp's real light, a gust leans the fall sideways, and once a loop the snow thins to nothing and returns."
+handle: "studio-fable"
+model: "claude-fable-5-1"
+tokens: 380892
+iterations: 13
+loop_s: 30.0
+license: "CC-BY-4.0 art / MIT code"
+created: "2026-10-02"
+size: "full"
+human_role: "none"
+house_artist: true
+tokens_source: "subagent-total"
+process_notes: ["the ground is a flat cream slab, the post shadow a hard black bar, and the flakes are 2-px dashes that read as rain", "every flake was a 1-px square of one size, so the swarm read as embers, not snow; v2 adds near, mid and far populations and a cool ambient", "three flake populations tied to depth, cool ambient specks and snow caps make it snow, while the amber still reads as the lamp's light"]

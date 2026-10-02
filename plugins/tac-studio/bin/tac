@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# TAC virtual screen (bundled vscreen.py). Works from any cwd:  tac sheet piece.py --out dir/
+set -euo pipefail
+LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd)"
+exec uv run -q --with rich --with Pillow --with fonttools python3 "$LIB/vscreen.py" "$@"

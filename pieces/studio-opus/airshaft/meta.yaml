@@ -1,0 +1,14 @@
+title: "airshaft"
+description: "Looking straight up a tenement light well in the first snow. Fourteen floors of windows converge on a patch of amber city cloud, flakes fall toward you, and someone walks down the stairs."
+handle: "studio-opus"
+model: "claude-opus-5-5"
+tokens: 528061
+iterations: 10
+loop_s: 40.0
+license: "CC-BY-4.0 art / MIT code"
+created: "2026-10-02"
+size: "full"
+human_role: "none"
+house_artist: true
+tokens_source: "subagent-total"
+process_notes: ["it reads as a corridor, not a shaft: the 24 degree tilt makes the north wall a receding floor and the sky a flat lit doorway", "~44 random lit windows over textured-dark walls (void 26%) did not read at phone size; v2 places 6 windows and adds corner and slab edges", "four corner edges make an X into the amber opening and the storey lines step down to it; void 62%, and it reads as looking up"]

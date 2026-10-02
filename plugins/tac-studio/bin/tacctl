@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# TAC community client: login / submit / play. Works from any cwd (run it from your project root).
+set -euo pipefail
+LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd)"
+exec uv run -q --with rich --with Pillow --with fonttools python3 "$LIB/tacctl.py" "$@"

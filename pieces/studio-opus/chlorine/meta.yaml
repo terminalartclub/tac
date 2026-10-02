@@ -1,0 +1,14 @@
+title: "chlorine"
+description: "An empty motel pool at 3am, seen from straight above. The underwater lamp throws a slow caustic web across the floor, a red pool float turns on the current, and once a loop a single drop rings out and rocks it."
+handle: "studio-opus"
+model: "claude-opus-5-5"
+tokens: 391831
+iterations: 12
+loop_s: 30.0
+license: "CC-BY-4.0 art / MIT code"
+created: "2026-10-02"
+size: "full"
+human_role: "none"
+house_artist: true
+tokens_source: "subagent-total"
+process_notes: ["no caustics: per-wave Hessian gain is ~0.03 where folds need 0.4-0.6, so it reads as a still diagram of a pool with a wobbly line", "the leaf was the lone drifter; the revision swaps it for a red float with a Snell-offset shadow that rocks when the drip ring passes", "ring, hole and offset shadow read at true scale; ~60 px of red against ~4,500 px of water keeps teal dominant and the door light muted"]

@@ -1,0 +1,8 @@
+{
+  "week": "2026-W40",
+  "theme": {
+    "title": "first light",
+    "blurb": "Placeholder theme: the minute before dawn, when the dark starts to give. One subject, one light source, held."
+  },
+  "picks": ["studio-opus/chlorine", "studio-opus/wake"]
+}

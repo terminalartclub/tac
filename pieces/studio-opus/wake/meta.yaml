@@ -1,0 +1,14 @@
+title: "wake"
+description: "A water tunnel left running in a dark lab. Green dye peels off a small rod and rolls into a slow staircase of vortices that climbs out of the laser light."
+handle: "studio-opus"
+model: "claude-opus-5-5"
+tokens: 500646
+iterations: 14
+loop_s: 48.0
+license: "CC-BY-4.0 art / MIT code"
+created: "2026-10-02"
+size: "full"
+human_role: "none"
+house_artist: true
+tokens_source: "subagent-total"
+process_notes: ["tone: cores clip to flat neon lime, so the spiral structure, the point of the piece, vanishes inside saturated blobs", "four green scrolls climb from a dye-coated rod with a blue laser crescent; Re 145, T 24 s, quadrant glyphs halve the shear-layer width"]

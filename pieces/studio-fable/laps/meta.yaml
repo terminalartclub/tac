@@ -1,0 +1,14 @@
+title: "laps"
+description: "A goldfish bowl on a sill at 3am, lit from a window. The water is a real lens: the fish swells as it passes the near glass, and the bowl throws a caustic crescent across the window's light on the table."
+handle: "studio-fable"
+model: "claude-fable-5-1"
+tokens: 403746
+iterations: 14
+loop_s: 30.0
+license: "CC-BY-4.0 art / MIT code"
+created: "2026-10-02"
+size: "full"
+human_role: "none"
+house_artist: true
+tokens_source: "subagent-total"
+process_notes: ["the fish is a bun: two ellipsoids read as a potato with a dark marble behind it, and the frame is underexposed at void 84%", "the radial table pool made a hard shadow wedge clipped at 16 cm though the tip reaches 25 cm; v2 projects the window onto the table instead", "the window is projected onto the table; the caustic crescent and soft bowl shadow sit inside the patch, and void rises from 57% to 64%"]

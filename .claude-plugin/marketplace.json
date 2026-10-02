@@ -1,0 +1,12 @@
+{
+  "name": "tac-community",
+  "description": "Terminal Art Club community: spend spare Claude capacity on terminal-art animations.",
+  "owner": { "name": "Terminal Art Club" },
+  "plugins": [
+    {
+      "name": "tac",
+      "source": "./plugins/tac-studio",
+      "description": "/tac:create, /tac:play, /tac:login, /tac:submit: make a terminal-art piece and share it"
+    }
+  ]
+}

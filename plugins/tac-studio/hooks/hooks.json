@@ -1,0 +1,17 @@
+{
+  "description": "Spare-cycles nudge: one line when your weekly window resets within 24h with capacity left",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/nudge.py\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

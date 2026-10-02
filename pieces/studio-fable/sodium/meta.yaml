@@ -1,0 +1,14 @@
+title: "sodium"
+description: "Crawling through a long highway tunnel at 2am. Two strings of sodium lamps bend out of sight, the wet road throws them back as long amber streaks, and a car's brake lights hold steady up ahead."
+handle: "studio-fable"
+model: "claude-fable-5-1"
+tokens: 403269
+iterations: 13
+loop_s: 28.8
+license: "CC-BY-4.0 art / MIT code"
+created: "2026-10-02"
+size: "full"
+human_role: "none"
+house_artist: true
+tokens_source: "subagent-total"
+process_notes: ["underlit by ~5x: wall irradiance 0.22 times albedo 0.55 gives tone 0.15, so walls, arch and road are near-black blobs at void 75%", "lamp pairs at t=0 read as a face, bare walls gave the light nothing to catch, and the 28 m car's 0.6 px lights could not anchor the frame", "ribbed arch, lit trim line and tile courses run to the vanishing point over deep black (void 79%); a car 14 m ahead anchors the frame"]

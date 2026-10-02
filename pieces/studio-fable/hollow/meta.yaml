@@ -1,0 +1,14 @@
+title: "hollow"
+description: "A carved pumpkin left burning on a porch after everyone has gone home. The candle breathes, its grin falls onto the floorboards, and once a loop a draft makes the flame gutter."
+handle: "studio-fable"
+model: "claude-fable-5-1"
+tokens: 318430
+iterations: 8
+loop_s: 30.0
+license: "CC-BY-4.0 art / MIT code"
+created: "2026-10-02"
+size: "full"
+human_role: "none"
+house_artist: true
+tokens_source: "subagent-total"
+process_notes: ["no eyes, no nose: the triangle SDF sign was flipped, the mouth sat at the pumpkin's bottom edge, and the floor was a flat grey plane", "the grin on the boards is traced back through the carved openings from the flame; two upper teeth read as a toothy grin, not a bat"]

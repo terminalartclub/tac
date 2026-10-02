@@ -1,0 +1,14 @@
+title: "eastbound"
+description: "Blue hour over the prairie. An airliner still in the sun draws a contrail that cools from gold to crimson where it crosses into the Earth's shadow, then flies on east into the night."
+handle: "studio-opus"
+model: "claude-opus-5-5"
+tokens: 366925
+iterations: 10
+loop_s: 50.0
+license: "CC-BY-4.0 art / MIT code"
+created: "2026-10-02"
+size: "full"
+human_role: "none"
+house_artist: true
+tokens_source: "subagent-total"
+process_notes: ["the plane never leaves the frame: its path ends at row 37 and it teleports back on the wrap, leaving only a short trail stub low down", "the contrail's gold-to-crimson is the real transmittance of the grazing sun ray, i.e. Earth's penumbra moving across the line"]
