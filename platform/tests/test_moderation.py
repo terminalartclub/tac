@@ -1,3 +1,4 @@
+import json
 import os
 
 from conftest import handle_slug
@@ -89,6 +90,7 @@ async def test_sandbox_env_is_scrubbed(tmp_path, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-not-real")
     monkeypatch.setenv("TAC_ADMIN_TOKEN", "x")
     monkeypatch.setenv("UV_CACHE_DIR", "/tmp/uvc")
+    monkeypatch.setenv("UV_INDEX_URL", "https://user:pass@example.invalid/simple")
     res = await run_limited(
         ["python3", "-c", "import json, os, resource; print(json.dumps({'env': sorted(os.environ),"
          " 'nofile': resource.getrlimit(resource.RLIMIT_NOFILE)[0], 'cpu': resource.getrlimit(resource.RLIMIT_CPU)[0],"
@@ -100,7 +102,12 @@ async def test_sandbox_env_is_scrubbed(tmp_path, monkeypatch):
 
     out = json.loads(res.stdout)
     assert "ANTHROPIC_API_KEY" not in out["env"] and "TAC_ADMIN_TOKEN" not in out["env"]
-    assert "UV_CACHE_DIR" in out["env"] and "PATH" in out["env"]
+    assert not any(k.startswith("UV_") for k in out["env"])
+    # LC_CTYPE (PEP 538 locale coercion) and __CF_USER_TEXT_ENCODING (macOS CoreFoundation) are added
+    # by the child itself, not inherited
+    allowed = {"PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "PYTHONDONTWRITEBYTECODE", "PYTHONNOUSERSITE",
+               "LC_CTYPE", "__CF_USER_TEXT_ENCODING"}
+    assert set(out["env"]) <= allowed
     assert out["nofile"] == 256 and out["cpu"] == 180
     assert os.path.realpath(out["cwd"]) == os.path.realpath(tmp_path)
 
@@ -126,3 +133,42 @@ async def test_cancel_kills_child(tmp_path):
     out = await asyncio.create_subprocess_exec("pgrep", "-f", "time.sleep\\(60\\)", stdout=asyncio.subprocess.PIPE)
     pids, _ = await out.communicate()
     assert pids.strip() == b""
+
+
+async def test_admin_cookie_post_needs_csrf_header(ctx):
+    token = await ctx.login("alex")
+    sub = (await ctx.submit(token)).json()
+    await ctx.wait(token, sub["id"])
+    url = f"/v1/admin/submissions/{sub['id']}/reject"
+    async with ctx.client() as c:
+        c.cookies.set("tac_admin", "test-admin-token")
+        # a cross-origin form/fetch from a sibling subdomain carries the cookie but not our header
+        assert (await c.post(url, json={"reason": "x"})).status_code == 403
+        r = await c.post(url, json={"reason": "x"}, headers={"x-tac-admin-csrf": "1", "sec-fetch-site": "same-site"})
+        assert r.status_code == 403
+        r = await c.post(url, json={"reason": "x"}, headers={"x-tac-admin-csrf": "1", "sec-fetch-site": "same-origin"})
+        assert r.status_code == 200
+        assert "x-tac-admin-csrf" in (await c.get("/admin")).text  # act() sends it
+
+
+async def test_hide_never_wipes_concurrent_unhide(ctx):
+    import asyncio
+
+    _, sub_id, h, s = await _published(ctx)
+    pub, store = ctx.app.state.publisher, ctx.app.state.store
+    real_delete = store.delete_prefix
+
+    async def slow_delete(prefix):  # widen the window between hide's DB write and its media delete
+        await asyncio.sleep(0.2)
+        await real_delete(prefix)
+
+    store.delete_prefix = slow_delete
+    hide = asyncio.create_task(pub.hide(h, s, "reports"))
+    await asyncio.sleep(0.05)  # hide has committed hidden=1 and is now deleting media
+    assert await pub.unhide(h, s, "admin")
+    assert await hide
+    row = await ctx.app.state.db.fetchone("SELECT hidden FROM submissions WHERE id = ?", (sub_id,))
+    listed = [p["id"] for p in json.loads(await store.get("public/community.json"))["pieces"]]
+    media = await store.list(f"public/{h}/{s}")
+    assert row["hidden"] == 0 and listed == [f"{h}/{s}"]
+    assert f"public/{h}/{s}/preview.webp" in media  # unhide's copy survived

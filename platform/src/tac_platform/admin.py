@@ -24,14 +24,23 @@ def _token_ok(request: Request, token: str | None) -> bool:
     return bool(expected) and bool(token) and hmac.compare_digest(token.encode(), expected.encode())
 
 
+CSRF_HEADER = "x-tac-admin-csrf"
+
+
 def require_admin(request: Request) -> None:
     if not request.app.state.settings.admin_token:
         raise ApiError(403, "admin_disabled", detail="set TAC_ADMIN_TOKEN")
-    if not (
-        _token_ok(request, request.headers.get("x-admin-token"))
-        or _token_ok(request, request.cookies.get(COOKIE))
-    ):
+    if _token_ok(request, request.headers.get("x-admin-token")):
+        return  # header auth: a browser can't attach it cross-site
+    if not _token_ok(request, request.cookies.get(COOKIE)):
         raise ApiError(401, "admin_auth_required")
+    # Cookie auth on a state change: SameSite=Strict alone trusts sibling subdomains (same-site).
+    # Require the custom header act() sends (forces a CORS preflight we never answer) and, where the
+    # browser reports it, a same-origin fetch.
+    if request.method not in ("GET", "HEAD"):
+        site = request.headers.get("sec-fetch-site")
+        if request.headers.get(CSRF_HEADER) != "1" or (site is not None and site != "same-origin"):
+            raise ApiError(403, "csrf_check_failed")
 
 
 @router.get("/admin/login")
@@ -166,7 +175,7 @@ e = html.escape
 
 JS = """
 async function act(url, body) {
-  const r = await fetch(url, {method: 'POST', headers: {'content-type': 'application/json'},
+  const r = await fetch(url, {method: 'POST', headers: {'content-type': 'application/json', 'x-tac-admin-csrf': '1'},
                               body: JSON.stringify(body || {})});
   if (!r.ok) { alert(url + ' -> ' + r.status + ' ' + await r.text()); return; }
   location.reload();

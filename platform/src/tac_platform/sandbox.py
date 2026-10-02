@@ -18,19 +18,13 @@ LIMITS = {
     resource.RLIMIT_FSIZE: 200 * 1024**2,  # largest file the child may write
 }
 
-# Only these survive into the child. Everything else (API keys, admin token) is dropped.
+# Only these survive into the child. Everything else (API keys, admin token, UV_INDEX_URL
+# with embedded credentials, ...) is dropped. The tools run as the interpreter directly, not via uv.
 ENV_ALLOW = ("PATH", "HOME", "LANG", "LC_ALL")
-ENV_ALLOW_PREFIX = ("UV_",)
-ENV_DENY_SUBSTR = ("TOKEN", "KEY", "SECRET", "PASSWORD", "CREDENTIAL")
 
 
 def scrubbed_env(tmpdir: Path) -> dict[str, str]:
-    env = {
-        k: v
-        for k, v in os.environ.items()
-        if (k in ENV_ALLOW or k.startswith(ENV_ALLOW_PREFIX))
-        and not any(s in k.upper() for s in ENV_DENY_SUBSTR)
-    }
+    env = {k: v for k, v in os.environ.items() if k in ENV_ALLOW}
     env["TMPDIR"] = str(tmpdir)
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     env["PYTHONNOUSERSITE"] = "1"
@@ -75,16 +69,18 @@ async def run_limited(argv: list[str], cwd: Path, timeout_s: float, max_output: 
     )
     timed_out = False
     try:
-        out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
-    except TimeoutError:
-        timed_out = True
+        try:
+            out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
+        except TimeoutError:
+            timed_out = True
+            _killpg(proc.pid)
+            out, err = await proc.communicate()
+    finally:
+        # any exit path (normal, timeout, CancelledError on shutdown/reload): kill the whole group,
+        # including anything the piece left running in the background
         _killpg(proc.pid)
-        out, err = await proc.communicate()
-    except asyncio.CancelledError:  # server shutting down: never leave a render running
-        _killpg(proc.pid)
-        await asyncio.shield(proc.wait())
-        raise
-    _killpg(proc.pid)  # reap anything the piece left running in its group
+        if proc.returncode is None:
+            await asyncio.shield(proc.wait())
     return RunResult(
         returncode=proc.returncode if proc.returncode is not None else -1,
         stdout=out[:max_output].decode("utf-8", "replace"),

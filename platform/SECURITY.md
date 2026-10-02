@@ -2,6 +2,8 @@
 
 **Bottom line:** the API surface is hardened for a small public gallery. Locally on macOS, the render step is not sandboxed. A malicious `piece.py` runs as your user, with your files and your network. Prod must not run renders in the API process's machine (see "Prod render isolation").
 
+**Hard gate:** the platform MUST refuse to start with `TAC_ENV=prod` while the renderer is the local `run_limited` subprocess. This is enforced by `Settings.check_prod_safety()`, which runs in `create_app` before anything binds. `ISOLATED_RENDERERS` is empty until an isolated backend is implemented, so prod cannot start today. Public uploads stay blocked until isolated render machines exist.
+
 ## Assets
 
 | asset | where | impact if lost |
@@ -19,11 +21,11 @@ Every submission is arbitrary Python that the renderer executes.
 | control | local (macOS) | what it actually stops |
 |---|---|---|
 | `check_piece.py` static check | yes | lazy attacks only. Static analysis of Python is bypassable (`getattr(__builtins__, ...)`, `exec` of decoded strings). |
-| scrubbed env (PATH, HOME, LANG, UV_*, minus anything named *TOKEN/KEY/SECRET/PASSWORD/CREDENTIAL*) | yes (`sandbox.py`, tested) | reading secrets from `os.environ`. It does **not** stop reading `~/.config`, `~/.ssh`, the SQLite DB or the API's `/proc`-equivalent. |
+| scrubbed env: only PATH, HOME, LANG, LC_ALL pass (no `UV_*`: `UV_INDEX_URL` can embed credentials; the tools run as the interpreter directly) | yes (`sandbox.py`, tested) | reading secrets from `os.environ`. It does **not** stop reading `~/.config`, `~/.ssh`, the SQLite DB or the API's `/proc`-equivalent. |
 | cwd = fresh temp dir, `TMPDIR` pointed there | yes | accidental writes into the repo |
 | `RLIMIT_CPU` 180 s, `RLIMIT_NOFILE` 256, `RLIMIT_FSIZE` 200 MB | yes | CPU burn, fd exhaustion, disk fill via one file |
 | `RLIMIT_AS` 3 GB | **set but not enforced by the macOS kernel** | nothing on macOS. It works on Linux. |
-| 240 s wall clock, kill of the whole process group | yes | hangs, orphaned children |
+| 240 s wall clock, kill of the whole process group on every exit path (normal, timeout, cancellation on shutdown/reload) | yes | hangs, orphaned children |
 | network isolation | **no** | nothing. The piece can exfiltrate and call any reachable host, including 127.0.0.1:8790. |
 | filesystem isolation | **no** | nothing. Same uid as the API. |
 | stdout/stderr | read into memory | a piece can print GBs within 240 s. Unbounded memory in the API process (accepted locally). |
@@ -66,11 +68,18 @@ The `Pipeline` only calls `run_limited(argv, cwd, timeout)`. Swapping in either 
 - Inherent to device flow: a phished user code can approve an attacker's device. The page shows nothing about the requesting device yet (TODO: show request time/IP region).
 - Admin:
   - The token is compared in constant time.
-  - The `/admin/login?token=` cookie is `HttpOnly; SameSite=Strict`, plus `Secure` on https. SameSite=Strict is the CSRF defence for the cookie-auth POSTs.
+  - The `/admin/login?token=` cookie is `HttpOnly; SameSite=Strict`, plus `Secure` on https.
+  - SameSite alone trusts sibling subdomains, so a cookie-authenticated POST also needs:
+    - the `X-TAC-Admin-CSRF: 1` header. The admin page's `act()` sends it, and cross-origin it forces a CORS preflight we never answer;
+    - and, when the browser sends `Sec-Fetch-Site`, the value `same-origin`.
+  - Header-authenticated calls (`X-Admin-Token`) are exempt: a browser can't attach that header cross-site.
   - The access log redacts `token=` (`main.RedactTokens`).
   - Still: the token sits in browser history. Prefer the header from scripts. TODO(prod): replace with GitHub OAuth plus an admin allow-list.
 - Owner-only status: another user's submission id returns 404, not 403. Ids are 72-bit random.
 - Pre-publish preview links are HMAC-signed with a per-install secret (in the `kv` table) and expire after 7 days.
+  - They are issued only while the status is queued, rendering or in_review.
+  - On every fetch the status is re-checked: queued/rendering/in_review, or published and not hidden. A rejected, deleted or hidden piece stops serving even through a still-valid link.
+  - Signatures are compared as bytes, so a non-ASCII `sig` gets 403, not 500.
 
 ## 4. Rate limits and abuse
 
@@ -88,12 +97,14 @@ The `Pipeline` only calls `run_limited(argv, cwd, timeout)`. Swapping in either 
 ## 5. Automod
 
 - The submission (code, title, description) is untrusted. The system prompt marks it as data, and the reply is forced into a JSON schema (`output_config.format`).
+- The untrusted blocks are wrapped in `<title>/<description>/<code>`, with every `</` inside them rewritten to `<\/`. A submitter can't close a wrapper and write text that looks like ours.
 - A prompt-injected "safe" verdict only matters for trusted handles (auto-publish). Everyone else still gets human review.
 - A refusal (`stop_reason == "refusal"`), an API error or invalid JSON goes to `in_review` with the reason, never to auto-reject or auto-publish.
 - The API key is never passed to renders. Automod sends code to Anthropic, which the submit flow should disclose to artists.
 
 ## 6. Concurrency
 
+- Public-media transitions (publish, hide, unhide, delete) are serialised by one in-process lock. Hide removes the media before regenerating the listing, so a concurrent unhide can't be wiped (regression test). Multiple API instances would need a DB lock instead.
 - One shared SQLite connection. Every write goes through one `asyncio.Lock`, and every state change is a compare-and-swap on the current status inside a transaction, together with its audit row. Two admins can't double-publish, and a report-hide can't race an admin delete into an inconsistent state.
 - The queue claim is a single `UPDATE … WHERE id = (SELECT … LIMIT 1) AND status='queued' RETURNING id`.
 - `community.json` regeneration is serialised and reads the DB after the write. The file is written atomically (tmp + rename).

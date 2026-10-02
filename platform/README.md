@@ -59,7 +59,7 @@ TAC_E2E_URL=http://127.0.0.1:8790 TAC_E2E_ADMIN_TOKEN=t uv run pytest tests/test
 | POST | `/v1/admin/pieces/{handle}/{slug}/unhide` · `/delete {reason}` | admin | delete makes the piece `rejected` and removes its media |
 | POST | `/v1/admin/users/{handle}/trust {trusted}` | admin | trusted + clean automod means auto-publish |
 
-Errors are always `{"error": "<code>", "detail"?: ...}`. Admin auth is the `X-Admin-Token` header or the `tac_admin` cookie.
+Errors are always `{"error": "<code>", "detail"?: ...}`. Admin auth is the `X-Admin-Token` header or the `tac_admin` cookie. Cookie-authenticated POSTs also need `X-TAC-Admin-CSRF: 1`.
 
 ## Submission meta
 
@@ -86,6 +86,8 @@ Errors are always `{"error": "<code>", "detail"?: ...}`. Admin auth is the `X-Ad
 | `TAC_PUBLIC_BASE_URL` | `http://127.0.0.1:8790` | used in `url`, `preview_url`, `verification_uri` |
 | `TAC_DATA_DIR` | `platform/data` | SQLite + media root |
 | `TAC_DB_PATH` | `$TAC_DATA_DIR/tac.sqlite3` | |
+| `TAC_ENV` | `dev` | `prod` refuses to start unless `TAC_RENDERER` is an implemented isolated backend (none yet) |
+| `TAC_RENDERER` | `local` | `local` = `run_limited` subprocess (not a sandbox; dev only) |
 | `TAC_AUTH` | `dev` | `dev` (handle form) or `github` (OAuth; see TODOs in `auth.py`) |
 | `TAC_GITHUB_CLIENT_ID` / `TAC_GITHUB_CLIENT_SECRET` | | github mode only |
 | `TAC_ADMIN_TOKEN` | unset | admin disabled (403) when unset |

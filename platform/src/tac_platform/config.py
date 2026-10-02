@@ -7,6 +7,10 @@ from pathlib import Path
 
 PLATFORM_DIR = Path(__file__).resolve().parents[2]
 REPO_DIR = PLATFORM_DIR.parent
+# IMPLEMENTED render backends that isolate untrusted code (no secrets, no network, own machine or
+# namespace). Empty until the Fly-Machine (or nsjail) renderer lands, so TAC_ENV=prod cannot start
+# and public uploads stay blocked. Add a name here only together with its implementation.
+ISOLATED_RENDERERS: frozenset[str] = frozenset()
 
 
 def _env(name: str, default: str) -> str:
@@ -21,6 +25,8 @@ class Settings:
     host: str = "127.0.0.1"
     port: int = 8790
 
+    env: str = "dev"  # "dev" | "prod"
+    renderer: str = "local"  # "local" (run_limited subprocess, NOT isolated); isolated backends: TODO
     auth_mode: str = "dev"  # "dev" | "github"
     github_client_id: str = ""
     github_client_secret: str = ""
@@ -44,6 +50,14 @@ class Settings:
     reports_to_hide: int = 3
     extra: dict = field(default_factory=dict)
 
+    def check_prod_safety(self) -> None:
+        """Refuse to run in prod while renders would execute untrusted code unisolated on the API host."""
+        if self.env == "prod" and self.renderer not in ISOLATED_RENDERERS:
+            raise RuntimeError(
+                f"TAC_ENV=prod refuses TAC_RENDERER={self.renderer!r}: the local subprocess renderer is not a "
+                f"sandbox. Isolated backends implemented: {', '.join(sorted(ISOLATED_RENDERERS)) or 'none yet'}; see DEPLOY.md."
+            )
+
     @property
     def sqlite_path(self) -> Path:
         return self.db_path or self.data_dir / "tac.sqlite3"
@@ -56,6 +70,8 @@ class Settings:
             public_base_url=_env("TAC_PUBLIC_BASE_URL", "http://127.0.0.1:8790").rstrip("/"),
             host=_env("TAC_HOST", "127.0.0.1"),
             port=int(_env("TAC_PORT", "8790")),
+            env=_env("TAC_ENV", "dev"),
+            renderer=_env("TAC_RENDERER", "local"),
             auth_mode=_env("TAC_AUTH", "dev"),
             github_client_id=_env("TAC_GITHUB_CLIENT_ID", ""),
             github_client_secret=_env("TAC_GITHUB_CLIENT_SECRET", ""),

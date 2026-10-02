@@ -29,6 +29,7 @@ MAX_PROCESS = 4
 MAX_NOTES = 64 * 1024
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 PREVIEW_URL_TTL_S = 7 * 86400
+PREVIEWABLE = ("queued", "rendering", "in_review")  # signed preview only before a decision
 
 
 def slugify(title: str) -> str:
@@ -61,7 +62,8 @@ async def create_submission(request: Request):
     if recent["n"] >= limit:  # fast path; the INSERT below re-checks atomically
         raise ApiError(429, "rate_limited", detail=f"{limit} submissions per 24 h")
 
-    form = await request.form(max_files=MAX_PROCESS + 2, max_fields=8, max_part_size=MAX_NOTES)
+    # max_part_size bounds non-file fields only (Starlette); the per-field caps are checked in _accept.
+    form = await request.form(max_files=MAX_PROCESS + 2, max_fields=8, max_part_size=MAX_PNG)
     try:
         return await _accept(request, user, form, since, limit)
     finally:
@@ -84,6 +86,8 @@ async def _accept(request: Request, user: dict, form, since: str, limit: int) ->
         raw_meta = (await _read_capped(raw_meta, MAX_NOTES, "meta")).decode("utf-8", "replace")
     if not raw_meta:
         raise ApiError(400, "invalid_request", detail="meta (JSON string) is required")
+    if len(raw_meta) > MAX_NOTES:
+        raise ApiError(413, "too_large", detail=f"meta is over {MAX_NOTES // 1024} KB")
     try:
         meta = SubmissionMeta.model_validate_json(raw_meta)
     except ValidationError as exc:
@@ -94,6 +98,8 @@ async def _accept(request: Request, user: dict, form, since: str, limit: int) ->
     if isinstance(notes, UploadFile):
         notes = (await _read_capped(notes, MAX_NOTES, "notes")).decode("utf-8", "replace")
     notes = notes or None
+    if notes and len(notes.encode()) > MAX_NOTES:
+        raise ApiError(413, "too_large", detail=f"notes is over {MAX_NOTES // 1024} KB")
     # human_role is computed from notes.md, never trusted from meta. check_piece rejects a
     # declared role the notes don't back; the stored value is always the computed one.
     declared_role = meta.human_role
@@ -160,7 +166,7 @@ async def get_submission(sub_id: str, request: Request):
     base = st.settings.public_base_url
     if row["status"] == "published" and not row["hidden"]:
         preview_url = f"{base}/media/{row['handle']}/{row['slug']}/preview.webp"
-    elif row["stats_json"]:
+    elif row["status"] in PREVIEWABLE and row["stats_json"]:
         exp = int(time.time()) + PREVIEW_URL_TTL_S
         preview_url = f"{base}/v1/submissions/{sub_id}/preview.webp?exp={exp}&sig={_sign_preview(st.secret, sub_id, exp)}"
     return SubmissionOut(
@@ -176,8 +182,12 @@ async def get_submission(sub_id: str, request: Request):
 async def submission_preview(sub_id: str, request: Request, exp: int = 0, sig: str = ""):
     """Capability URL for the owner's preview before publish (HMAC-signed, expires)."""
     st = request.app.state
-    if exp < time.time() or not hmac.compare_digest(sig, _sign_preview(st.secret, sub_id, exp)):
+    if exp < time.time() or not hmac.compare_digest(sig.encode(), _sign_preview(st.secret, sub_id, exp).encode()):
         return JSONResponse({"error": "invalid_signature"}, status_code=403)
+    row = await st.db.fetchone("SELECT status, hidden FROM submissions WHERE id = ?", (sub_id,))
+    # re-checked on every fetch: a rejected/deleted/hidden piece stops serving even with a valid link
+    if row is None or not (row["status"] in PREVIEWABLE or (row["status"] == "published" and not row["hidden"])):
+        raise ApiError(404, "not_found")
     data = await st.store.get(f"submissions/{sub_id}/render/preview.webp")
     if data is None:
         raise ApiError(404, "not_found")

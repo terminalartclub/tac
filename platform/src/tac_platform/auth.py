@@ -255,7 +255,7 @@ async def github_callback(request: Request, code: str = "", state: str = ""):
     user_code, _, rest = state.partition(".")
     nonce, _, sig = rest.partition(".")
     if (
-        not hmac.compare_digest(sig, _sign(user_code + nonce, st.secret))
+        not hmac.compare_digest(sig.encode(), _sign(user_code + nonce, st.secret).encode())
         or request.cookies.get("tac_gh_nonce") != nonce
     ):
         return HTMLResponse(_device_form(error="Login state mismatch. Start again.", github=True), 400)

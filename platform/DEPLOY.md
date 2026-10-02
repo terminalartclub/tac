@@ -2,6 +2,8 @@
 
 Nothing here is provisioned. These are the target shape and the code changes it needs.
 
+> **Gate:** with `TAC_ENV=prod` the API refuses to start unless `TAC_RENDERER` names an implemented isolated backend (`config.ISOLATED_RENDERERS`, empty today). The local `run_limited` subprocess renderer is never allowed in prod. Public uploads stay blocked until the `tac-render` Machine backend below is built, and its name is added to that set in the same change.
+
 ```
                          ┌──────────── org: tac (6PN A) ────────────┐
 artist plugin ──https──▶ │ app tac-api  (1 Machine, shared-cpu-1x)   │──presign──▶ Tigris bucket tac-media
@@ -19,7 +21,7 @@ site / browsers ───────▶ │  FastAPI + worker, SQLite on volume
 
 ## App 1: `tac-api`
 
-- Image: `python:3.12-slim` + `uv sync --frozen`. Run `tac-platform` with `TAC_HOST=0.0.0.0` and `TAC_TRUST_PROXY=1`.
+- Image: `python:3.12-slim` + `uv sync --frozen`. Run `tac-platform` with `TAC_ENV=prod`, `TAC_RENDERER=fly-machine` (once implemented), `TAC_HOST=0.0.0.0` and `TAC_TRUST_PROXY=1`.
 - One Machine (shared-cpu-1x, 512 MB) with a 1 GB volume at `/data` (`TAC_DATA_DIR=/data`) for SQLite.
   - Stay on one Machine while SQLite is the DB. Scale out means LiteFS (one primary, read replicas) or Fly Postgres. `db.py` is the swap point; the SQL already uses `RETURNING` / `ON CONFLICT`.
 - `fly secrets set ANTHROPIC_API_KEY=… TAC_ADMIN_TOKEN=… TAC_GITHUB_CLIENT_ID=… TAC_GITHUB_CLIENT_SECRET=… FLY_RENDER_TOKEN=…`
@@ -69,7 +71,7 @@ site / browsers ───────▶ │  FastAPI + worker, SQLite on volume
 
 ## Before going public: checklist
 
-- [ ] `FlyRenderer` in place; local `run_limited` disabled in prod (`TAC_RENDERER=fly`).
+- [ ] `FlyRenderer` implemented and `"fly-machine"` added to `ISOLATED_RENDERERS`. Until then `TAC_ENV=prod` refuses to start.
 - [ ] GitHub OAuth tested end to end; pick-a-handle step for invalid/taken logins.
 - [ ] Token expiry + revoke endpoint; admin via GitHub allow-list instead of a shared token.
 - [ ] `TigrisStore` + public URLs; `/media` static mount removed.

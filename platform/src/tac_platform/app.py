@@ -103,6 +103,7 @@ async def _load_themes(db: Database, settings: Settings) -> None:
 
 def create_app(settings: Settings | None = None, automod: Automod | None = None) -> FastAPI:
     settings = settings or Settings.from_env()
+    settings.check_prod_safety()
     public_dir = settings.data_dir / "public"
     public_dir.mkdir(parents=True, exist_ok=True)
 

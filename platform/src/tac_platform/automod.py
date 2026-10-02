@@ -51,6 +51,11 @@ SCHEMA = {
 }
 
 
+def neutralize(text: str) -> str:
+    """Untrusted text can't close our <title>/<description>/<code> wrappers: `</` -> `<\\/`."""
+    return text.replace("</", "<\\/")
+
+
 @dataclass
 class AutomodResult:
     verdict: AutomodVerdict | None = None
@@ -108,8 +113,8 @@ class Automod:
             {
                 "type": "text",
                 "text": (
-                    f"<title>{title}</title>\n<description>{description}</description>\n"
-                    f"<code truncated=\"{str(truncated).lower()}\">\n{code[:CODE_LIMIT]}\n</code>"
+                    f"<title>{neutralize(title)}</title>\n<description>{neutralize(description)}</description>\n"
+                    f"<code truncated=\"{str(truncated).lower()}\">\n{neutralize(code[:CODE_LIMIT])}\n</code>"
                 ),
             }
         )

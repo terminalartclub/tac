@@ -151,6 +151,8 @@ class Pipeline:
             await asyncio.to_thread(d.mkdir)
         await self._materialize(sub_id, piece_dir)
         tools, py = self.settings.tools_dir, self.settings.tools_python
+        if self.settings.renderer != "local":  # only backend implemented; prod refuses to start without isolation
+            raise RuntimeError(f"renderer {self.settings.renderer!r} is not implemented")
 
         # 1. static check
         res = await run_limited([py, str(tools / "check_piece.py"), str(piece_dir)], work, self.settings.check_timeout_s)

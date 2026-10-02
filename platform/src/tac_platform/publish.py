@@ -38,6 +38,26 @@ class Publisher:
         self.db = db
         self.store = store
         self._regen_lock = asyncio.Lock()
+        # Serialises every transition that touches public media (publish/hide/unhide/delete), so a
+        # hide's delete_prefix can never wipe the files a concurrent unhide just copied back.
+        # In-process only: one API Machine. Multi-instance needs a DB/advisory lock instead.
+        self._media_lock = asyncio.Lock()
+
+    async def publish(self, sub_id: str, actor: str, from_status: str = "in_review") -> bool:
+        async with self._media_lock:
+            return await self._publish(sub_id, actor, from_status)
+
+    async def hide(self, handle: str, slug: str, actor: str, detail: str = "") -> bool:
+        async with self._media_lock:
+            return await self._hide(handle, slug, actor, detail)
+
+    async def unhide(self, handle: str, slug: str, actor: str) -> bool:
+        async with self._media_lock:
+            return await self._unhide(handle, slug, actor)
+
+    async def delete(self, handle: str, slug: str, actor: str, reason: str) -> bool:
+        async with self._media_lock:
+            return await self._delete(handle, slug, actor, reason)
 
     # ------------------------------------------------------------ media
 
@@ -68,7 +88,7 @@ class Publisher:
 
     # ------------------------------------------------------------ transitions
 
-    async def publish(self, sub_id: str, actor: str, from_status: str = "in_review") -> bool:
+    async def _publish(self, sub_id: str, actor: str, from_status: str = "in_review") -> bool:
         row = await self._row(sub_id)
         if row is None or row["status"] != from_status:
             return False
@@ -100,7 +120,7 @@ class Publisher:
                 await tx.audit(actor, "reject", sub_id, from_status, "rejected", "; ".join(reasons))
         return bool(ok)
 
-    async def hide(self, handle: str, slug: str, actor: str, detail: str = "") -> bool:
+    async def _hide(self, handle: str, slug: str, actor: str, detail: str = "") -> bool:
         row = await self._piece_row(handle, slug)
         if row is None:
             return False
@@ -112,11 +132,11 @@ class Publisher:
             if ok:
                 await tx.audit(actor, "hide", row["id"], "published", "published", detail or None)
         if ok:
-            await self.regenerate()
             await self.store.delete_prefix(f"public/{handle}/{slug}")
+            await self.regenerate()
         return bool(ok)
 
-    async def unhide(self, handle: str, slug: str, actor: str) -> bool:
+    async def _unhide(self, handle: str, slug: str, actor: str) -> bool:
         row = await self._piece_row(handle, slug)
         if row is None or row["status"] != "published" or not row["hidden"]:
             return False
@@ -135,7 +155,7 @@ class Publisher:
         await self.regenerate()
         return True
 
-    async def delete(self, handle: str, slug: str, actor: str, reason: str) -> bool:
+    async def _delete(self, handle: str, slug: str, actor: str, reason: str) -> bool:
         """Take a published piece down for good: status -> rejected, public media removed."""
         row = await self._piece_row(handle, slug)
         if row is None:
@@ -150,8 +170,8 @@ class Publisher:
             if ok:
                 await tx.audit(actor, "delete", row["id"], "published", "rejected", reason)
         if ok:
-            await self.regenerate()
             await self.store.delete_prefix(f"public/{handle}/{slug}")
+            await self.regenerate()
         return bool(ok)
 
     # ------------------------------------------------------------ community.json
