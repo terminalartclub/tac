@@ -7,10 +7,9 @@ from pathlib import Path
 
 PLATFORM_DIR = Path(__file__).resolve().parents[2]
 REPO_DIR = PLATFORM_DIR.parent
-# IMPLEMENTED render backends that isolate untrusted code (no secrets, no network, own machine or
-# namespace). Empty until the Fly-Machine (or nsjail) renderer lands, so TAC_ENV=prod cannot start
-# and public uploads stay blocked. Add a name here only together with its implementation.
-ISOLATED_RENDERERS: frozenset[str] = frozenset()
+# IMPLEMENTED render backends that isolate untrusted code (no secrets, no network, own container,
+# machine or namespace). Add a name here only together with its implementation (renderer.py).
+ISOLATED_RENDERERS: frozenset[str] = frozenset({"docker"})
 
 
 def _env(name: str, default: str) -> str:
@@ -26,7 +25,8 @@ class Settings:
     port: int = 8790
 
     env: str = "dev"  # "dev" | "prod"
-    renderer: str = "local"  # "local" (run_limited subprocess, NOT isolated); isolated backends: TODO
+    renderer: str = "local"  # "local" (run_limited subprocess, NOT isolated) | "docker" (isolated)
+    render_image: str = "tac-render:local"
     auth_mode: str = "dev"  # "dev" | "github"
     github_client_id: str = ""
     github_client_secret: str = ""
@@ -73,6 +73,7 @@ class Settings:
             port=int(_env("TAC_PORT", "8790")),
             env=_env("TAC_ENV", "dev"),
             renderer=_env("TAC_RENDERER", "local"),
+            render_image=_env("TAC_RENDER_IMAGE", "tac-render:local"),
             auth_mode=_env("TAC_AUTH", "dev"),
             github_client_id=_env("TAC_GITHUB_CLIENT_ID", ""),
             github_client_secret=_env("TAC_GITHUB_CLIENT_SECRET", ""),

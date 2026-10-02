@@ -2,7 +2,24 @@
 
 Nothing here is provisioned. These are the target shape and the code changes it needs.
 
-> **Gate:** with `TAC_ENV=prod` the API refuses to start unless `TAC_RENDERER` names an implemented isolated backend (`config.ISOLATED_RENDERERS`, empty today). The local `run_limited` subprocess renderer is never allowed in prod. Public uploads stay blocked until the `tac-render` Machine backend below is built, and its name is added to that set in the same change.
+> **Gate:** with `TAC_ENV=prod` the API refuses to start unless `TAC_RENDERER` names an implemented isolated backend (`config.ISOLATED_RENDERERS`). Today that is only `docker`. The local `run_limited` subprocess renderer is never allowed in prod. With `docker`, prod also refuses to start if the render image is missing.
+
+## Render backend: the decision the operator owns
+
+**Prod with `TAC_RENDERER=docker` needs a host where the API can run `docker run`.** Fly Machines don't run Docker by default (a Machine is a Firecracker microVM with no Docker daemon). So "API on a Fly Machine + DockerRenderer" does not work as-is. There are two options; the choice is a money/ops decision for the operator. Prices are rough: verify on the provider's pricing page.
+
+| | (a) small VM with Docker, API + renders on it | (b) `FlyMachineRenderer` (not built) |
+|---|---|---|
+| what | one VM (e.g. 2 vCPU / 4 GB) running the API and `tac-render:local` containers via `DockerRenderer` (built and tested today) | API stays on Fly; each job launches one throwaway Machine through the Machines API (the `tac-render` app below) |
+| isolation boundary | container: shared kernel, `--network none`, read-only root, nobody user, no caps, cgroup limits. A kernel exploit escapes into a host that also holds the API's secrets | Firecracker microVM per job in a separate Fly org; no secrets in the VM. A kernel exploit lands in an empty, disposable VM |
+| code still to write | none: deploy + systemd/compose | ~150–250 lines: Machines API client, presigned-URL output, poll for exit, cleanup; plus a test rig |
+| render latency | +~1 s container start (measured: laps 18.7 s in Docker vs 16 s native) | +~2–5 s Machine create/boot per job, image cached per region |
+| idle cost | the VM runs 24/7 | ~0 when idle; per second while rendering |
+| rough monthly cost (verify) | ~$5–25 for one VM; one bill, no Fly | API Machine ~$3 + renders ~$0.2–0.5 at 1,000 jobs/mo |
+| ops | you patch the VM, Docker and the kernel; backups; TLS | Fly runs the hosts; more moving parts (two orgs, a deploy token, image pushes) |
+| scale-out | vertical; parallel renders compete for the box's CPUs | horizontal per job |
+
+A third variant: (a) with the API kept on Fly and renders on a separate Docker VM. That needs a job channel between them. Never expose the Docker socket over the network (that is root on the VM). It would mean a small render agent: more code than (a), less isolation than (b).
 
 ```
                          ┌──────────── org: tac (6PN A) ────────────┐
@@ -49,7 +66,7 @@ site / browsers ───────▶ │  FastAPI + worker, SQLite on volume
   - Outputs go out through presigned PUT URLs: 10 min expiry, one key each, under `submissions/<id>/render/`. No credentials in the VM.
   - Wrapper entrypoint: `unshare --net --map-root-user timeout 240 python tools/render_piece.py /job/piece --out /job/out`. The piece process gets loopback only, so it has **no egress**. After it exits, the trusted wrapper PUTs the outputs and exits, and `--rm` destroys the Machine.
   - The API polls the Machines API for exit (or waits for the PUTs to land in Tigris), then continues the pipeline as today.
-- Code change: `Pipeline._process` calls a `Renderer` interface. `LocalRenderer` = today's `run_limited` path. `FlyRenderer` = the flow above. The static check is pure AST, so it can stay in the API, but it is cheap to also run it in the render VM.
+- Code change: `renderer.py` already has the `Renderer` interface (`check`, `render`), with `LocalRenderer` (dev) and `DockerRenderer` (isolated). A `FlyMachineRenderer` is a third implementation of the same two methods. Add `"fly-machine"` to `ISOLATED_RENDERERS` only in the commit that implements it.
 - Concurrency: cap jobs with `TAC_RENDER_CONCURRENCY`. Each job is its own VM, so 4 parallel jobs means 4 VMs.
 
 ## Rough monthly cost (verify on fly.io/pricing)
@@ -71,7 +88,7 @@ site / browsers ───────▶ │  FastAPI + worker, SQLite on volume
 
 ## Before going public: checklist
 
-- [ ] `FlyRenderer` implemented and `"fly-machine"` added to `ISOLATED_RENDERERS`. Until then `TAC_ENV=prod` refuses to start.
+- [ ] Render backend chosen: (a) a Docker host + `TAC_RENDERER=docker` + `render-image/build.sh` on it, or (b) `FlyMachineRenderer` built. Without one, `TAC_ENV=prod` refuses to start.
 - [ ] GitHub OAuth tested end to end; pick-a-handle step for invalid/taken logins.
 - [ ] Token expiry + revoke endpoint; admin via GitHub allow-list instead of a shared token.
 - [ ] `TigrisStore` + public URLs; `/media` static mount removed.

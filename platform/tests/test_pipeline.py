@@ -268,6 +268,7 @@ def test_prod_refuses_local_renderer(tmp_path):
 
     with pytest.raises(RuntimeError, match="TAC_ENV=prod"):
         create_app(Settings.from_env(data_dir=tmp_path, env="prod", renderer="local"))
-    with pytest.raises(RuntimeError, match="none yet"):
+    with pytest.raises(RuntimeError, match="implemented: docker"):
         create_app(Settings.from_env(data_dir=tmp_path, env="prod", renderer="fly-machine"))
+    create_app(Settings.from_env(data_dir=tmp_path, env="prod", renderer="docker"))  # isolated: passes the gate
     create_app(Settings.from_env(data_dir=tmp_path, env="dev"))  # dev still starts

@@ -28,6 +28,15 @@ TAC_ADMIN_TOKEN=pick-a-local-value uv run tac-platform        # http://127.0.0.1
 - State: `data/tac.sqlite3` and `data/submissions/...` (private), plus `data/public/...`, served at `/media/...`.
 - Reset: stop the server and `rm -rf data/`.
 
+## Isolated renders (Docker)
+
+```bash
+render-image/build.sh                                  # tac-render:local from plugins/tac-studio/lib
+TAC_RENDERER=docker TAC_ADMIN_TOKEN=… uv run tac-platform
+```
+
+See SECURITY.md for the exact `docker run` flags.
+
 ## Tests
 
 ```bash
@@ -37,6 +46,7 @@ TAC_E2E_URL=http://127.0.0.1:8790 TAC_E2E_ADMIN_TOKEN=t uv run pytest tests/test
 ```
 
 - The unit tests use `tests/fixtures/tools/` (stand-ins with the same CLI contract), so they don't depend on `tools/`.
+- `tests/test_docker_renderer.py` needs Docker and the image, and skips otherwise.
 - The e2e test submits `terminal-art-club/studio/work/laps` (override with `TAC_E2E_PIECE`).
 
 ## Endpoints
@@ -109,7 +119,8 @@ site ──POST /v1/pieces/h/s/view──▶ day_salt(UTC day) ─▶ hash = sha
 | `TAC_DATA_DIR` | `platform/data` | SQLite + media root |
 | `TAC_DB_PATH` | `$TAC_DATA_DIR/tac.sqlite3` | |
 | `TAC_ENV` | `dev` | `prod` refuses to start unless `TAC_RENDERER` is an implemented isolated backend (none yet) |
-| `TAC_RENDERER` | `local` | `local` = `run_limited` subprocess (not a sandbox; dev only) |
+| `TAC_RENDERER` | `local` | `local` = `run_limited` subprocess (not a sandbox; dev only); `docker` = one isolated container per check/render |
+| `TAC_RENDER_IMAGE` | `tac-render:local` | image for `docker`; build with `render-image/build.sh` |
 | `TAC_AUTH` | `dev` | `dev` (handle form) or `github` (OAuth; see TODOs in `auth.py`) |
 | `TAC_GITHUB_CLIENT_ID` / `TAC_GITHUB_CLIENT_SECRET` | | github mode only |
 | `TAC_ADMIN_TOKEN` | unset | admin disabled (403) when unset |

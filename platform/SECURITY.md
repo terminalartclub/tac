@@ -2,7 +2,9 @@
 
 **Bottom line:** the API surface is hardened for a small public gallery. Locally on macOS, the render step is not sandboxed. A malicious `piece.py` runs as your user, with your files and your network. Prod must not run renders in the API process's machine (see "Prod render isolation").
 
-**Hard gate:** the platform MUST refuse to start with `TAC_ENV=prod` while the renderer is the local `run_limited` subprocess. This is enforced by `Settings.check_prod_safety()`, which runs in `create_app` before anything binds. `ISOLATED_RENDERERS` is empty until an isolated backend is implemented, so prod cannot start today. Public uploads stay blocked until isolated render machines exist.
+**Hard gate:** the platform MUST refuse to start with `TAC_ENV=prod` while the renderer is the local `run_limited` subprocess.
+- This is enforced by `Settings.check_prod_safety()`, which runs in `create_app` before anything binds.
+- `ISOLATED_RENDERERS` = `{"docker"}`. With `TAC_RENDERER=docker`, prod also refuses to start if the render image is missing.
 
 ## Assets
 
@@ -44,7 +46,31 @@ Either option works. Option A fits Fly.
   - Machine size caps memory and CPU for real: shared-cpu-2x / 2 GB, with a kill after 240 s.
 - **B. Same host, real sandbox:** nsjail or bubblewrap with a new user, mount, PID and net namespace (no network), a read-only root, a tmpfs work dir, seccomp, and cgroup memory/CPU limits. Run the API and the renderer under different uids.
 
-The `Pipeline` only calls `run_limited(argv, cwd, timeout)`. Swapping in either option means replacing `sandbox.run_limited` plus `_materialize` / `_store_render`.
+### Implemented: `DockerRenderer` (`TAC_RENDERER=docker`)
+
+Both `check_piece.py` and `render_piece.py` run inside a fresh container per call:
+
+```
+docker run --rm --name tac-render-<random> --network none --read-only --tmpfs /tmp:size=256m
+  --memory 2g --memory-swap 2g --cpus 1 --pids-limit 256 --ulimit nofile=256 --ulimit fsize=200MB
+  --cap-drop ALL --security-opt no-new-privileges --user 65534:65534
+  -v <piece_dir>:/in:ro -v <out_dir>:/out:rw tac-render:local python /app/render_piece.py /in --out /out
+```
+
+- The docker CLI gets only PATH, HOME and `DOCKER_*`, and the container gets only the image's env. No API keys either way.
+- On the 240 s wall-clock timeout, cancellation or any other exit, the container is `docker kill`ed and `docker rm -f`ed.
+- Tested (`tests/test_docker_renderer.py`, skipped without Docker):
+  - TCP, UDP and DNS fail;
+  - writes to `/app`, `/etc`, `/in` and `/usr` fail, while `/out` and `/tmp` work;
+  - uid is 65534;
+  - no secrets in env;
+  - timeout and cancel leave no container behind;
+  - the real `laps` seed renders through the full pipeline.
+- Remaining risk:
+  - The boundary is the shared Linux kernel. On Docker Desktop that kernel is a VM, which adds a layer. On a Linux host, a kernel exploit reaches the host.
+  - `/out` is a bind mount with no quota. `fsize` caps any single file at 200 MB, but many files could fill the disk within 240 s. Outputs are size-checked after the run (≤ 25 MB each).
+
+`FlyMachineRenderer` (option A above) is not built. DEPLOY.md lists the tradeoffs between running a Docker host and building it.
 
 ## 2. Uploads
 

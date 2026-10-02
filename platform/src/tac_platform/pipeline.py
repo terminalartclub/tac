@@ -19,7 +19,7 @@ from .automod import Automod
 from .config import Settings
 from .db import Database, now_iso
 from .publish import Publisher
-from .sandbox import run_limited
+from .renderer import Renderer, make_renderer
 from .storage import MediaStore
 
 log = logging.getLogger("tac.pipeline")
@@ -68,12 +68,19 @@ class Pipeline:
         self.store = store
         self.publisher = publisher
         self.automod = automod
+        self.renderer: Renderer = make_renderer(settings)
         self._wake = asyncio.Event()
         self._tasks: list[asyncio.Task] = []
 
     # ------------------------------------------------------------ lifecycle
 
     async def start(self) -> None:
+        check = getattr(self.renderer, "available", None)
+        problem = await check() if check else None
+        if problem:
+            if self.settings.env == "prod":
+                raise RuntimeError(problem)  # fail fast: prod must not accept uploads it can't render
+            log.warning("%s (renders will fail until it exists; build with render-image/build.sh)", problem)
         async with self.db.tx() as tx:
             n = await tx.execute("UPDATE submissions SET status = 'queued' WHERE status = 'rendering'")
             if n:
@@ -150,12 +157,8 @@ class Pipeline:
         for d in (piece_dir, out_dir, work):
             await asyncio.to_thread(d.mkdir)
         await self._materialize(sub_id, piece_dir)
-        tools, py = self.settings.tools_dir, self.settings.tools_python
-        if self.settings.renderer != "local":  # only backend implemented; prod refuses to start without isolation
-            raise RuntimeError(f"renderer {self.settings.renderer!r} is not implemented")
-
-        # 1. static check
-        res = await run_limited([py, str(tools / "check_piece.py"), str(piece_dir)], work, self.settings.check_timeout_s)
+        # 1. static check (also in the isolated backend: it parses untrusted source)
+        res = await self.renderer.check(piece_dir, work)
         try:
             verdict = json.loads(res.stdout)
         except ValueError:
@@ -167,13 +170,11 @@ class Pipeline:
             raise Rejected([str(r)[:300] for r in verdict.get("reasons") or ["static check failed"]])
 
         # 2. render (untrusted code runs here)
-        res = await run_limited(
-            [py, str(tools / "render_piece.py"), str(piece_dir), "--out", str(out_dir)],
-            work,
-            self.settings.render_timeout_s,
-        )
+        res = await self.renderer.render(piece_dir, out_dir, work)
         if res.timed_out:
             raise Rejected([f"render timed out after {self.settings.render_timeout_s:.0f} s"])
+        if res.returncode == 125 and self.settings.renderer == "docker":
+            raise Rejected(["render backend unavailable; please resubmit later"])
         if res.returncode != 0:
             raise Rejected([f"render failed (exit {res.returncode}): {_tail(res.stderr) or 'no output'}"])
         stats, process_n = await self._store_render(sub_id, out_dir)
