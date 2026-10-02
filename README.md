@@ -160,6 +160,19 @@ python tools/render_piece.py <piece_dir> --out <dir> [--timeout 120]
 Rendering still executes the piece, so CI and the platform run it with no secrets, a read-only
 token and a 120 s wall clock.
 
+CI runs `check_piece`/`render_piece` from the **base** commit (`trusted/`), never from the PR, so a PR
+can't change its own gate. The comment workflow (`workflow_run`) never checks out PR code.
+
+### Open TODOs
+
+- **Network-isolate renders.** Fork piece code currently gets ~10 min on a runner with network. Wrap the
+  render step in `unshare -n` or a `--network none` container, in both CI and the platform.
+- **Runtime builtins.** vscreen `exec`s pieces with full builtins. Pass a minimal `__builtins__` with a
+  gated `__import__` as defence in depth. This is not a sandbox; isolation is the real control.
+- **Re-render at publish.** Artifacts from a fork-PR job are attacker-writable, so `publish.yml`
+  re-renders on `main` and never consumes PR artifacts. Keep it that way.
+- **Deploy.** `publish.yml` uploads `build/` as an artifact; pushing it to the gallery host is not built yet.
+
 ## Site data
 
 `python tools/build_site.py --render` renders stale pieces and writes `build/community.json`. All its paths are

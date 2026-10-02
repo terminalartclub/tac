@@ -48,4 +48,6 @@ jobs:
             echo
             echo "Previews (preview.webp, og.jpg, stats.json per piece) are in the \`submission\` artifact: $RUN_URL"
           } > body.md
-          gh pr comment "$pr" --repo "$REPO" --body-file body.md
+          # One comment per PR: edit our last one if it exists, else create it.
+          gh pr comment "$pr" --repo "$REPO" --body-file body.md --edit-last 2>/dev/null \
+            || gh pr comment "$pr" --repo "$REPO" --body-file body.md

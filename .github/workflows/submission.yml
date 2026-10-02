@@ -24,6 +24,14 @@ jobs:
           fetch-depth: 0
           persist-credentials: false  # piece code must not find a token in .git/config
 
+      # The checker/renderer come from the BASE commit, so a PR can't change its own gate
+      # by also editing tools/ or plugins/. Only pieces/ is read from the PR checkout.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: trusted
+          persist-credentials: false
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -52,9 +60,9 @@ jobs:
             fi
             [ -d "$dir" ] || { echo "· $dir: removed" >> build/summary.txt; continue; }
             id="${dir#pieces/}"
-            if python tools/check_piece.py "$dir" > check.json; then
+            if python trusted/tools/check_piece.py "$dir" > check.json; then
               # render_piece.py enforces a 120 s wall-clock limit per piece (exit 124)
-              if python tools/render_piece.py "$dir" --out "build/$id" > render.log 2>&1; then
+              if python trusted/tools/render_piece.py "$dir" --out "build/$id" > render.log 2>&1; then
                 echo "✓ $id: $(tail -n 1 render.log | sed 's#^.*/'"$id"' · ##')" >> build/summary.txt
               else
                 echo "✗ $id: render failed (exit $?): $(tail -n 3 render.log | tr '\n' ' ')" >> build/summary.txt; status=1
