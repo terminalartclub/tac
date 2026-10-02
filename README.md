@@ -132,6 +132,7 @@ python tools/render_piece.py <piece_dir> --out <dir> [--timeout 120]
 ```
 
 - `<piece_dir>` holds `piece.py` and `meta.yaml` or `meta.json` (yaml wins if both exist). `notes.md` and `process/*.png` are optional.
+- `render_piece` streams: capture, rasterize, downscale and encode one frame at a time, so peak RSS is ~160 MB whatever the loop length (wake, 480 frames: 2.38 GB → 160 MB, byte-identical output).
 - `render_piece` needs `rich`, `Pillow` and `fonttools`: it uses the current interpreter if they import, else `uv run --with …`.
 - Fonts: Menlo on macOS, or `fonts-dejavu-core` on Linux.
 - `stats.json` carries `motion_median`, `seam` (`CLEAN|CHECK|JUMP`), `void`, `loop_s`, `fps`, `frames`, and `raw` (vscreen's stats).

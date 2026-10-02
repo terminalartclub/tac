@@ -60,6 +60,8 @@ def run_with_timeout(piece_dir: Path, out: Path, timeout: float, cols: int, rows
 
 
 # ── worker (needs rich + Pillow) ───────────────────────────────────────────
+# Streams: capture → cells → stats window → rasterize → downscale → WebP encoder, one frame at a
+# time. Peak memory no longer grows with loop length (wake: 480 frames held 2.4 GB before).
 
 
 def _ms_durations(durs: list[float]) -> list[int]:
@@ -71,6 +73,77 @@ def _ms_durations(durs: list[float]) -> list[int]:
         out.append(q)
         emitted += q
     return out
+
+
+class WebPStream:
+    """Incremental animated-WebP writer, byte-identical to
+    `frames[0].save(path, save_all=True, append_images=frames[1:], duration=_ms_durations(durs),
+    loop=0, quality=WEBP_QUALITY, method=4)` but holding one frame at a time. It mirrors Pillow's
+    WebPImagePlugin._save_all on Pillow's own WebPAnimEncoder; without it, frames are buffered."""
+
+    def __init__(self, path: Path, quality: int = WEBP_QUALITY, method: int = 4) -> None:
+        try:
+            from PIL import _webp
+            anim = hasattr(_webp, "WebPAnimEncoder")
+        except ImportError:
+            anim = False
+        self.path, self.quality, self.method = path, quality, method
+        self._first = None          # held until a 2nd frame proves it's an animation
+        self._enc = None
+        self._target = 0.0
+        self._emitted = 0
+        self._buffered: list | None = None if anim else []
+        self._durs: list[float] = []
+
+    def _encoder(self):  # type: ignore[no-untyped-def]
+        from PIL import _webp
+
+        # Pillow defaults for lossy RGB: background (0,0,0,0) → 0, loop 0, kmin 3, kmax 5.
+        return _webp.WebPAnimEncoder(self._first.size, 0, 0, False, 3, 5, False, False)
+
+    def _add(self, img) -> None:  # type: ignore[no-untyped-def]
+        self._enc.add(img.getim(), self._emitted, False, self.quality, 100, self.method)
+
+    def _advance(self, duration_s: float) -> None:
+        self._target += duration_s * 1000
+        q = max(1, round(self._target - self._emitted))
+        self._emitted += q
+
+    def add(self, img, duration_s: float) -> None:  # type: ignore[no-untyped-def]
+        """Append one frame shown for duration_s. The image is not retained after the call
+        (except the very first frame, until a second one arrives)."""
+        if img.mode not in ("RGB", "RGBA", "RGBX"):
+            img = img.convert("RGB")
+        if self._buffered is not None:
+            self._buffered.append(img)
+            self._durs.append(duration_s)
+            return
+        if self._enc is None and self._first is None:
+            self._first, self._first_d = img, duration_s
+            return
+        if self._enc is None:
+            self._enc = self._encoder()
+            self._add(self._first)
+            self._advance(self._first_d)
+            self._first = None
+        self._add(img)
+        self._advance(duration_s)
+
+    def close(self) -> None:
+        if self._buffered is not None:
+            fr = self._buffered
+            fr[0].save(self.path, save_all=True, append_images=fr[1:], duration=_ms_durations(self._durs),
+                       loop=0, quality=self.quality, method=self.method)
+            return
+        if self._enc is None:  # a single frame: Pillow saves it as a still WebP
+            self._first.save(self.path, save_all=True, append_images=[], duration=_ms_durations([self._first_d]),
+                             loop=0, quality=self.quality, method=self.method)
+            return
+        self._enc.add(None, self._emitted, False, self.quality, 100, 0)
+        data = self._enc.assemble("", "", "")
+        if data is None:
+            raise OSError("cannot write file as WebP (encoder returned None)")
+        self.path.write_bytes(data)
 
 
 def _reel_frame(img, size):  # type: ignore[no-untyped-def]
@@ -86,6 +159,52 @@ def _reel_frame(img, size):  # type: ignore[no-untyped-def]
     return canvas.resize((W, H), Image.Resampling.LANCZOS)
 
 
+class StreamStats:
+    """vscreen.stats(grids, window) computed over a stream, holding only window+1 grids."""
+
+    def __init__(self, window: int, n: int) -> None:
+        from collections import deque
+
+        self.k = max(1, min(window, n - 1))
+        self.win: deque = deque(maxlen=self.k + 1)
+        self.first = None
+        self.prev = None
+        self.ever: set = set()
+        self.motion: list[float] = []
+        self.steps: list[float] = []
+        self.dark: list[float] = []
+
+    def add(self, grid) -> None:  # type: ignore[no-untyped-def]
+        import vscreen
+
+        self.win.append(grid)
+        if len(self.win) == self.k + 1:
+            self.motion.append(vscreen._changed(self.win[0], grid, self.ever))
+        if self.prev is not None:
+            self.steps.append(vscreen._changed(self.prev, grid))
+        if self.first is None:
+            self.first = grid
+        self.prev = grid
+        total = len(grid) * len(grid[0])
+        self.dark.append(sum(1 for row in grid for c in row if vscreen._cell_lum(c) < 24) / total)
+
+    def result(self) -> dict[str, float]:
+        import statistics
+
+        import vscreen
+        total = len(self.first) * len(self.first[0])
+        steps = self.steps
+        p90 = sorted(steps)[int(0.9 * (len(steps) - 1))] if steps else 0.0
+        return {
+            "motion_median": statistics.median(self.motion) if self.motion else 0.0,
+            "motion_max": max(self.motion) if self.motion else 0.0,
+            "step_change_p90": p90,
+            "seam_change": vscreen._changed(self.prev, self.first),
+            "dark_fraction_mean": statistics.mean(self.dark),
+            "cells_ever_moving": len(self.ever) / total,
+        }
+
+
 def worker(piece_dir: Path, out: Path, cols: int, rows: int) -> int:
     import asyncio
 
@@ -95,32 +214,45 @@ def worker(piece_dir: Path, out: Path, cols: int, rows: int) -> int:
     import vscreen
 
     code = (piece_dir / "piece.py").read_text(encoding="utf-8")
-    cap = asyncio.run(vscreen.capture(code, cols, rows))
-    grids = [vscreen.to_cells(b, cols, rows) for _, b in cap.samples]
-    raw = vscreen.stats(grids, window=max(1, round(0.5 * cap.steps / cap.loop_s)))
+    # Pass 1: loop length and step count only (the stats window depends on fps). Nothing is kept.
+    probe = asyncio.run(vscreen.capture(code, cols, rows, on_sample=lambda t, b: None))
+    loop_s, n_steps = probe.loop_s, probe.steps
+    out.mkdir(parents=True, exist_ok=True)
+
+    st = StreamStats(max(1, round(0.5 * n_steps / loop_s)), n_steps)
+    ras = vscreen.Rasterizer()
+    webp = WebPStream(out / "preview.webp")
+    state = {"t": None, "key": None, "img": None, "d": 0.0, "frames": 0, "og": None}
+
+    def flush() -> None:
+        if state["img"] is not None:
+            webp.add(state["img"], state["d"])
+            state["img"] = None
+
+    def on_sample(t: float, buf: list) -> None:
+        if state["t"] is not None:
+            state["d"] += t - state["t"]  # the previous sample's step duration is now known
+        grid = vscreen.to_cells(buf, cols, rows)
+        st.add(grid)
+        key = hash(tuple(tuple(r) for r in grid))
+        if key != state["key"]:
+            flush()
+            state.update(key=key, img=_reel_frame(ras.frame(grid), (PREVIEW_W, PREVIEW_H)), d=0.0)
+            state["frames"] += 1
+        if t <= OG_T + 1e-6:
+            state["og"] = state["img"]
+        state["t"] = t
+
+    cap = asyncio.run(vscreen.capture(code, cols, rows, on_sample=on_sample))
+    state["d"] += cap.loop_s - state["t"]
+    flush()
+    webp.close()
+    state["og"].save(out / "og.jpg", quality=82, optimize=True, progressive=True)
+
+    raw = st.result()
     p90, seam = raw["step_change_p90"], raw["seam_change"]
     ratio = seam / p90 if p90 else (float("inf") if seam else 0.0)
     verdict = "CLEAN" if ratio <= 1.5 else "CHECK" if ratio <= 3.0 else "JUMP"
-
-    durs = vscreen._step_durations(cap)
-    ras = vscreen.Rasterizer()
-    frames, frame_durs, og = [], [], None
-    prev_key = None
-    for (t, _), grid, d in zip(cap.samples, grids, durs):
-        key = hash(tuple(tuple(r) for r in grid))
-        if key == prev_key:
-            frame_durs[-1] += d  # identical frame: extend the previous one
-        else:
-            frames.append(_reel_frame(ras.frame(grid), (PREVIEW_W, PREVIEW_H)))
-            frame_durs.append(d)
-            prev_key = key
-        if t <= OG_T + 1e-6:
-            og = frames[-1]
-    out.mkdir(parents=True, exist_ok=True)
-    frames[0].save(out / "preview.webp", save_all=True, append_images=frames[1:],
-                   duration=_ms_durations(frame_durs), loop=0, quality=WEBP_QUALITY, method=4)
-    (og or frames[0]).save(out / "og.jpg", quality=82, optimize=True, progressive=True)
-
     stats = {
         "motion_median": round(raw["motion_median"], 4),
         "seam": verdict,
@@ -128,7 +260,7 @@ def worker(piece_dir: Path, out: Path, cols: int, rows: int) -> int:
         "loop_s": round(cap.loop_s, 3),
         "fps": round(cap.steps / cap.loop_s, 2),
         "steps": cap.steps,
-        "frames": len(frames),
+        "frames": state["frames"],
         "seam_ratio": None if ratio == float("inf") else round(ratio, 3),
         "raw": {k: round(v, 5) for k, v in raw.items()},
     }
@@ -142,7 +274,7 @@ def worker(piece_dir: Path, out: Path, cols: int, rows: int) -> int:
         if im.width > PROCESS_W:
             im = im.resize((PROCESS_W, round(im.height * PROCESS_W / im.width)), Image.Resampling.LANCZOS)
         im.save(out / "process" / f"{i:02d}.webp", quality=80, method=4)
-    print(f"{out} · {len(frames)} frames · loop {cap.loop_s:.2f}s · {stats['fps']} fps · "
+    print(f"{out} · {state['frames']} frames · loop {cap.loop_s:.2f}s · {stats['fps']} fps · "
           f"motion {stats['motion_median']:.1%} · seam {verdict} · void {stats['void']:.0%} · "
           f"webp {(out / 'preview.webp').stat().st_size / 1e6:.1f} MB")
     return 0

@@ -124,11 +124,13 @@ class Capture:
 
 
 async def capture(code: str, cols: int, rows: int, times: list[float] | None = None,
-                  *, seed: int = 42) -> Capture:
+                  *, seed: int = 42, on_sample: Any = None) -> Capture:
     """Sample the canvas at each virtual time in `times` (seconds, ascending).
 
     times=None → every sleep() step of exactly one pass (for gif/mp4/stats).
     Passes repeat like the live viewer's outer loop, so t may exceed one pass.
+    on_sample(t, buffer) → stream each sample instead of keeping it (Capture.samples stays empty,
+    so memory doesn't grow with loop length; tac-community addition).
     """
     compiled = _compile(code)
     canvas = _Canvas()
@@ -137,16 +139,21 @@ async def capture(code: str, cols: int, rows: int, times: list[float] | None = N
     samples: list[tuple[float, list[Any]]] = []
     first_pass: tuple[float, int] | None = None
     steps = 0
+    n_streamed = 0
 
     async def fake_sleep(dt: float = 0) -> None:
-        nonlocal clock, steps
+        nonlocal clock, steps, n_streamed
         dt = max(float(dt), 0.0)
         if dt == 0:
             return
         if steps > MAX_STEPS:
             raise _Runaway(f"no end after {MAX_STEPS} steps — top-level `while True`?")
         if pending is None:
-            samples.append((clock, list(canvas.buffer)))
+            if on_sample is not None:
+                on_sample(clock, list(canvas.buffer))
+                n_streamed += 1
+            else:
+                samples.append((clock, list(canvas.buffer)))
         else:
             eps = 1e-6  # float drift: 0.1 summed 40x != 4.0; boundary targets belong to the next frame
             while pending and clock - eps <= pending[0] < clock + max(dt, 1e-9) - eps:
@@ -182,7 +189,7 @@ async def capture(code: str, cols: int, rows: int, times: list[float] | None = N
     finally:
         random.seed = real_seed  # type: ignore[assignment]
     loop_s, n = first_pass if first_pass else (clock, steps)
-    if not samples:
+    if not samples and not n_streamed:
         raise RuntimeError("piece produced no frames — did it call canvas.write() and sleep()?")
     return Capture(loop_s, n, samples)
 

@@ -230,7 +230,7 @@ def loop_seconds(code: str) -> float | None:
         import asyncio
 
         import vscreen
-        cap = asyncio.run(vscreen.capture(code, 80, 66))  # one full pass
+        cap = asyncio.run(vscreen.capture(code, 80, 66, on_sample=lambda t, b: None))  # one pass, nothing kept
         return round(cap.loop_s, 3) if cap.loop_s else None
     except Exception as e:  # noqa: BLE001
         print(f"warn: could not measure loop length: {e}", file=sys.stderr)

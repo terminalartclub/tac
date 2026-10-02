@@ -78,7 +78,8 @@ def main() -> int:
         shutil.copyfile(src / f"{slug}.py", dst / "piece.py")
         shutil.copyfile(src / "notes.md", dst / "notes.md")
         text = (src / "notes.md").read_text(encoding="utf-8")
-        loop_s = asyncio.run(vscreen.capture((src / f"{slug}.py").read_text(encoding="utf-8"), 80, 66)).loop_s
+        loop_s = asyncio.run(vscreen.capture((src / f"{slug}.py").read_text(encoding="utf-8"), 80, 66,
+                                             on_sample=lambda t, b: None)).loop_s
 
         steps = [("iteration-1", src / "iter-1.py", notesmod.critique(text, 1))]
         if v1:
