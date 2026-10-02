@@ -53,6 +53,8 @@ TAC_E2E_URL=http://127.0.0.1:8790 TAC_E2E_ADMIN_TOKEN=t uv run pytest tests/test
 | GET | `/v1/community.json` | none | gallery feed (CORS `*`) |
 | GET | `/media/{handle}/{slug}/...` | none | preview.webp, og.jpg, piece.py, process/NN.webp |
 | POST | `/v1/pieces/{handle}/{slug}/report` | none | `{reason}`; 5/h per IP; 3 distinct IPs hide the piece |
+| POST | `/v1/pieces/{handle}/{slug}/view` | none | private view count; 204 always (see below) |
+| GET | `/v1/me/pieces` | Bearer | own pieces: `{handle, series_start, pieces: [{id, piece_id, slug, title, status, hidden, created, views_total, views_7d, views_28d[28], url}]}` |
 | GET | `/admin`, `/admin/login?token=` | admin | HTML queue: in review, hidden, published, audit log |
 | GET | `/v1/admin/queue` | admin | JSON version of the queue |
 | POST | `/v1/admin/submissions/{id}/approve` · `/reject {reason}` | admin | from `in_review` only (409 otherwise) |
@@ -68,6 +70,26 @@ Errors are always `{"error": "<code>", "detail"?: ...}`. Admin auth is the `X-Ad
 - Optional: `description` (≤ 400), `tokens`, `iterations`, `loop_s`, `license`, `process_notes` (≤ 4 strings, one per process image), `human_role` (`none` default | `seeded` | `directed`, i.e. how much the person steered the piece).
 - Unknown keys are ignored.
 - `human_role` is passed through to `community.json` and shown in `/admin`.
+
+## View counts (private, v0)
+
+```
+site ──POST /v1/pieces/h/s/view──▶ day_salt(UTC day) ─▶ hash = sha256(salt|ip)
+        (no cookie, no body)           │                   │
+                                       │   rate 120/h per hash ── over → 204, dropped
+                                       ▼
+                     published && !hidden ? INSERT OR IGNORE views(piece, day, hash)
+                                              └─ new row → view_days(piece, day) += 1
+        ◀── 204 always (unknown / hidden / duplicate / limited all look the same)
+```
+
+- One view per piece, per IP, per UTC day.
+- Counts are private:
+  - only the owner sees them (`GET /v1/me/pieces`: total, last 7 days, a 28-day series from oldest to newest);
+  - admins see `views_7d` in the queue;
+  - nothing goes into `community.json`, and there are no rankings.
+- CORS: `Access-Control-Allow-Origin` is echoed only for `TAC_SITE_ORIGINS`.
+- Retention: per-hash `views` rows are purged after 30 days (hourly job); the `view_days` rollup is kept.
 
 ## Limits
 
@@ -98,6 +120,7 @@ Errors are always `{"error": "<code>", "detail"?: ...}`. Admin auth is the `X-Ad
 | `TAC_THEMES_FILE` | `platform/themes.json` | `{"2026-W40": {"title", "blurb"}}`, upserted at startup |
 | `ANTHROPIC_API_KEY` | unset | enables automod; never passed to renders |
 | `TAC_AUTOMOD_MODEL` / `TAC_AUTOMOD_EFFORT` | `claude-opus-5-5` / `low` | |
+| `TAC_SITE_ORIGINS` | `http://localhost:5181,https://terminalart.club` | origins allowed to POST views cross-origin |
 | `TAC_TRUST_PROXY` | `0` | `1` = take the client IP from `Fly-Client-IP` / `X-Forwarded-For` (only behind Fly's proxy) |
 | `TAC_WORKER` | `1` | `0` = don't start the in-process pipeline worker |
 

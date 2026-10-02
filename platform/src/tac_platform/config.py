@@ -43,6 +43,7 @@ class Settings:
     automod_effort: str = "low"
     anthropic_api_key_present: bool = False
 
+    site_origins: tuple[str, ...] = ("http://localhost:5181", "https://terminalart.club")
     trust_proxy: bool = False  # honour Fly-Client-IP / X-Forwarded-For
     worker_enabled: bool = True
     submissions_per_day: int = 3
@@ -84,6 +85,11 @@ class Settings:
             automod_model=_env("TAC_AUTOMOD_MODEL", "claude-opus-5-5"),
             automod_effort=_env("TAC_AUTOMOD_EFFORT", "low"),
             anthropic_api_key_present=bool(os.environ.get("ANTHROPIC_API_KEY")),
+            site_origins=tuple(
+                o.strip().rstrip("/")
+                for o in _env("TAC_SITE_ORIGINS", "http://localhost:5181,https://terminalart.club").split(",")
+                if o.strip()
+            ),
             trust_proxy=_env("TAC_TRUST_PROXY", "0") == "1",
             worker_enabled=_env("TAC_WORKER", "1") == "1",
         )

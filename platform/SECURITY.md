@@ -94,7 +94,25 @@ The `Pipeline` only calls `run_limited(argv, cwd, timeout)`. Swapping in either 
 - The client IP is the socket peer. `Fly-Client-IP` / `X-Forwarded-For` are honoured only with `TAC_TRUST_PROXY=1`. Otherwise anyone could spoof them and dodge the limits.
 - Known gap: 3 IPs (one phone, one VPN, one home connection) are enough to hide any piece. That's acceptable because hiding only puts the piece in the admin queue, and unhide clears its reports. Revisit if it gets abused.
 
-## 5. Automod
+## 5. View counts (privacy)
+
+- **No cookies, no identifiers, no body.** The site fires `POST /v1/pieces/{h}/{s}/view`, and the response is 204 with an empty body in every case: unknown, hidden, duplicate or rate-limited. A probe learns nothing about state.
+- **No raw IPs.**
+  - The dedupe key is `sha256(day_salt | ip)`. `day_salt` is 32 random bytes minted per UTC day (in `kv`).
+  - The salt is deleted once the day after it has ended, so a hash stays reversible by IPv4 brute force (2^32) for at most ~48 h. After that it is irreversible.
+  - Different days use different salts, so a viewer can't be linked across days.
+- **Retention:**
+  - Per-hash rows (`views`) are purged after 30 days.
+  - The rollup `view_days(piece, day, views)` holds no viewer data and is kept.
+  - Rate-limit events (`rate_events`, keyed by the day hash) are GC'd after 2 days.
+- **Abuse limits:**
+  - 120 view POSTs per hash per hour. Beyond that they are silently dropped (still 204).
+  - Dedupe caps inflation at 1 per IP per piece per day, so inflating by N takes N IPs.
+  - Counts are private and unranked, which leaves little incentive to game them.
+- **CORS** is echoed only for `TAC_SITE_ORIGINS`. The POST is a "simple" request, so CORS doesn't stop a third-party page firing it. Dedupe and the rate limit are what bound the effect.
+- **Exposure:** only the owner (`/v1/me/pieces`, Bearer) and admins see counts. `community.json` carries none (tested).
+
+## 6. Automod
 
 - The submission (code, title, description) is untrusted. The system prompt marks it as data, and the reply is forced into a JSON schema (`output_config.format`).
 - The untrusted blocks are wrapped in `<title>/<description>/<code>`, with every `</` inside them rewritten to `<\/`. A submitter can't close a wrapper and write text that looks like ours.
@@ -102,7 +120,7 @@ The `Pipeline` only calls `run_limited(argv, cwd, timeout)`. Swapping in either 
 - A refusal (`stop_reason == "refusal"`), an API error or invalid JSON goes to `in_review` with the reason, never to auto-reject or auto-publish.
 - The API key is never passed to renders. Automod sends code to Anthropic, which the submit flow should disclose to artists.
 
-## 6. Concurrency
+## 7. Concurrency
 
 - Public-media transitions (publish, hide, unhide, delete) are serialised by one in-process lock. Hide removes the media before regenerating the listing, so a concurrent unhide can't be wiped (regression test). Multiple API instances would need a DB lock instead.
 - One shared SQLite connection. Every write goes through one `asyncio.Lock`, and every state change is a compare-and-swap on the current status inside a transaction, together with its audit row. Two admins can't double-publish, and a report-hide can't race an admin delete into an inconsistent state.

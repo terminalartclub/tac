@@ -84,6 +84,18 @@ CREATE TABLE IF NOT EXISTS audit_log (
     to_status     TEXT,
     detail        TEXT
 );
+CREATE TABLE IF NOT EXISTS views (          -- per-viewer dedupe; purged after 30 days
+    submission_id TEXT NOT NULL,
+    day           TEXT NOT NULL,                -- UTC YYYY-MM-DD
+    ip_day_hash   TEXT NOT NULL,                -- sha256(day_salt | ip), salt deleted after the day
+    UNIQUE (submission_id, day, ip_day_hash)
+);
+CREATE TABLE IF NOT EXISTS view_days (      -- rollup, kept
+    submission_id TEXT NOT NULL,
+    day           TEXT NOT NULL,
+    views         INTEGER NOT NULL,
+    PRIMARY KEY (submission_id, day)
+);
 CREATE TABLE IF NOT EXISTS kv (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL

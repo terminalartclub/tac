@@ -10,6 +10,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from pydantic import BaseModel
 
 from .models import RejectIn
+from .views import views_summary
 from .web import ApiError, page
 
 router = APIRouter()
@@ -108,11 +109,16 @@ async def _queue(request: Request) -> dict:
             "reports": [dict(x) for x in reports],
         }
 
-    return {
+    views = await views_summary(db, [r["id"] for r in (*review, *hidden, *published)])
+    out = {
         "in_review": [await item(r) for r in review],
         "hidden": [await item(r) for r in hidden],
         "published": [await item(r) for r in published],
     }
+    for items in out.values():
+        for it in items:
+            it["views_7d"] = views[it["id"]]["views_7d"]  # private; never in community.json
+    return out
 
 
 @router.get("/v1/admin/queue")
@@ -237,7 +243,7 @@ async def _card(request: Request, it: dict, mode: str) -> str:
         f"<img class=preview src='/admin/media/{e(sid)}/render/preview.webp' alt='preview'>"
         f"<div class=procs>{procs}</div></div><div>"
         f"<h2>{e(it['title'])} <span class=count>by {h} · {e(it['created_at'][:16])}"
-        f"{' · trusted' if it['trusted'] else ''} · human: {e(it['meta'].get('human_role', 'none'))} · {e(it['meta'].get('size', 'full'))}</span></h2>"
+        f"{' · trusted' if it['trusted'] else ''} · {it['views_7d']} views 7d · human: {e(it['meta'].get('human_role', 'none'))} · {e(it['meta'].get('size', 'full'))}</span></h2>"
         f"<p>{e(it['meta'].get('description', ''))}</p>"
         f"<div>{flags}{reasons}</div>"
         + (f"<p><b>critique</b> {e(it['critique'])}</p>" if it["critique"] else "<p class=muted>no critique</p>")

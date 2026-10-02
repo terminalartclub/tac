@@ -1,5 +1,6 @@
 """FastAPI app factory: wiring, body-size limit, error shape, static media."""
 
+import asyncio
 import json
 import logging
 import secrets
@@ -12,7 +13,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from . import admin, auth, moderation, submissions
+from . import admin, auth, moderation, submissions, views
 from .automod import Automod
 from .config import Settings
 from .db import Database
@@ -122,11 +123,14 @@ def create_app(settings: Settings | None = None, automod: Automod | None = None)
         await publisher.regenerate()
         if settings.worker_enabled:
             await pipeline.start()
+        purger = asyncio.create_task(views.purge_loop(db), name="tac-view-purge")
         log.info("tac-platform up: auth=%s automod=%s tools=%s", settings.auth_mode,
                  "on" if pipeline.automod.enabled else "off", settings.tools_dir)
         try:
             yield
         finally:
+            purger.cancel()
+            await asyncio.gather(purger, return_exceptions=True)
             await pipeline.stop()
             await db.close()
 
@@ -153,7 +157,7 @@ def create_app(settings: Settings | None = None, automod: Automod | None = None)
     async def healthz() -> dict:
         return {"ok": True}
 
-    for r in (auth.router, submissions.router, moderation.router, admin.router):
+    for r in (auth.router, submissions.router, moderation.router, views.router, admin.router):
         app.include_router(r)
     app.mount("/media", StaticFiles(directory=public_dir), name="media")
     return app
