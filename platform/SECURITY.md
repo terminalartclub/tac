@@ -4,7 +4,7 @@
 
 **Hard gate:** the platform MUST refuse to start with `TAC_ENV=prod` while the renderer is the local `run_limited` subprocess.
 - This is enforced by `Settings.check_prod_safety()`, which runs in `create_app` before anything binds.
-- `ISOLATED_RENDERERS` = `{"docker"}`. With `TAC_RENDERER=docker`, prod also refuses to start if the render image is missing.
+- `ISOLATED_RENDERERS` = `{"docker", "fly-machine"}`. Prod also refuses to start if the chosen backend isn't usable: the image is missing (docker), or `FLY_API_TOKEN` / `TAC_FLY_RENDER_IMAGE` are unset (fly-machine).
 
 ## Assets
 
@@ -34,17 +34,49 @@ Every submission is arbitrary Python that the renderer executes.
 
 **Local rule:** only run untrusted submissions locally on a machine or account with nothing to lose, or keep `TAC_WORKER=0` and review the code first.
 
-### Prod render isolation (required before accepting public uploads)
+### Prod render isolation: `FlyMachineRenderer` (`TAC_RENDERER=fly-machine`, the decided prod backend)
 
-Either option works. Option A fits Fly.
+One throwaway Firecracker microVM per job, in the `tac-render` app (recommended: its own Fly org).
+- The Machine has `auto_destroy`, restart `no`, no services and no IPs. Its env holds no secrets: only two presigned URLs and two timeouts.
+- The API force-destroys the Machine on every exit path: success, error, 300 s timeout, cancellation.
 
-- **A. Ephemeral Fly Machine per job** (`tac-render` app, see DEPLOY.md):
-  - Firecracker microVM, destroyed after the job (`--rm`).
-  - No secrets in its env. Inputs are baked in or passed as files. Output goes out through presigned PUT URLs scoped to `submissions/<id>/render/*`, expiring in 10 min.
-  - The piece process runs under `unshare --net` (loopback only) inside the VM. Only the trusted wrapper uploads, after the piece exits.
-  - The app lives in a **separate Fly org**, so the API's 6PN private network is unreachable from it.
-  - Machine size caps memory and CPU for real: shared-cpu-2x / 2 GB, with a kill after 240 s.
-- **B. Same host, real sandbox:** nsjail or bubblewrap with a new user, mount, PID and net namespace (no network), a read-only root, a tmpfs work dir, seccomp, and cgroup memory/CPU limits. Run the API and the renderer under different uids.
+**Which step has network** (`render-image/fly_bootstrap.py`):
+
+| step | runs | network | identity |
+|---|---|---|---|
+| 1. GET input tar (presigned, 10 min, one key) | bootstrap (ours) | **yes** | root in the VM |
+| 2. probe: no routes except kernel IPv6 reject routes; TCP to 1.1.1.1 fails | probe child | **no**: fresh netns | uid 65534 |
+| 3. `check_piece.py` | child (parses untrusted source) | **no**: fresh netns | uid 65534, no_new_privs, rlimits |
+| 4. `render_piece.py` (runs the piece) | child | **no**: fresh netns | uid 65534, no_new_privs, rlimits |
+| 5. PUT output tar (presigned, 10 min, one key) | bootstrap, after all children exit | **yes** | root |
+
+- **How the drop works:**
+  - Each untrusted step starts via `preexec_fn`: `os.unshare(CLONE_NEWNET)`, setrlimit, `setgroups([])`, setgid/setuid 65534, `prctl(PR_SET_NO_NEW_PRIVS)`, then exec.
+  - The new namespace has only a downed loopback and no routes.
+  - Re-entering the Machine's namespace needs CAP_SYS_ADMIN (`setns`), which uid 65534 doesn't have.
+- **Fail closed:** if the namespace can't be created, or the probe finds any usable route, the bootstrap uploads `{"error": "network isolation unavailable"}` and **never runs check or render**. The API rejects the job as "render backend unavailable".
+- **What is verified, and what isn't (honest status):**
+  - Verified locally: the real image + real `fly_bootstrap.py` + the real seed `laps` ran as the "Machine". Docker stood in for the VM as root + CAP_SYS_ADMIN with a normal network. (`tests/test_fly_machine.py::test_real_bootstrap_drops_network_for_piece`)
+  - In that run the bootstrap reached the API over the presigned URLs. The untrusted child, as uid 65534, could not reach the same host ("Network is unreachable"), and the probe saw zero routes.
+  - Without CAP_SYS_ADMIN the probe fails and the job fails closed.
+  - **Not verified on a real Fly Machine:** no Fly resources were created. Fly Machines boot a full Linux kernel with the process as root, and network namespaces are standard there (Docker-in-Machine setups depend on them). This is expected to work, but it is unproven until the first smoke render (DEPLOY.md checklist).
+  - Because the bootstrap fails closed, an unsupported kernel produces failed renders, never unisolated ones. That is why `fly-machine` is in `ISOLATED_RENDERERS`.
+- **Fallback** if Fly's kernel refuses the namespace:
+  - The closest equivalent is an egress firewall applied by the bootstrap before step 3: nftables/iptables drop all output except loopback, then drop CAP_NET_ADMIN by switching to uid 65534. That needs `nftables` in the image and has the same fail-closed probe.
+  - A weaker alternative: give the render Machine no network at all, deliver inputs through Machine `files` (base64 in the create request, ≤ a few MB), and collect outputs by polling the Machine's exec API. That moves ~1 MB previews through the Machines API and is not built.
+- **Residual risk:**
+  - A kernel exploit from the piece gets root in an empty, disposable VM. From there it holds:
+    - two presigned URLs scoped to this job (read its own input, write its own output);
+    - the tac-render org's 6PN, so the separate org keeps tac-api unreachable.
+  - The output bundle is attacker-controlled either way:
+    - the API extracts it with tarfile's `data` filter;
+    - it keeps only `out/*` regular files ≤ 25 MB plus `result.json`;
+    - render outputs are then whitelisted by name;
+    - a human reviews the result before publish.
+- **API side:**
+  - `FLY_API_TOKEN` is a deploy token scoped to the `tac-render` app (`fly tokens create deploy -a tac-render`). Never an org token.
+  - Anyone holding it can read the presigned URLs in Machine configs. Those last 10 minutes and cover one job's I/O.
+  - The `/v1/render-io/…` routes are public but capability-bound: HMAC over method, key and expiry, keys confined to `render-io/`, PUT ≤ 64 MB. Job I/O is deleted after each job.
 
 ### Implemented: `DockerRenderer` (`TAC_RENDERER=docker`)
 
@@ -70,7 +102,7 @@ docker run --rm --name tac-render-<random> --network none --read-only --tmpfs /t
   - The boundary is the shared Linux kernel. On Docker Desktop that kernel is a VM, which adds a layer. On a Linux host, a kernel exploit reaches the host.
   - `/out` is a bind mount with no quota. `fsize` caps any single file at 200 MB, but many files could fill the disk within 240 s. Outputs are size-checked after the run (≤ 25 MB each).
 
-`FlyMachineRenderer` (option A above) is not built. DEPLOY.md lists the tradeoffs between running a Docker host and building it.
+`DockerRenderer` is the isolated backend for running renders locally or on a Docker host. Prod uses `FlyMachineRenderer` (above).
 
 ## 2. Uploads
 

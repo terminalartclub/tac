@@ -9,7 +9,7 @@ PLATFORM_DIR = Path(__file__).resolve().parents[2]
 REPO_DIR = PLATFORM_DIR.parent
 # IMPLEMENTED render backends that isolate untrusted code (no secrets, no network, own container,
 # machine or namespace). Add a name here only together with its implementation (renderer.py).
-ISOLATED_RENDERERS: frozenset[str] = frozenset({"docker"})
+ISOLATED_RENDERERS: frozenset[str] = frozenset({"docker", "fly-machine"})
 
 
 def _env(name: str, default: str) -> str:
@@ -27,6 +27,9 @@ class Settings:
     env: str = "dev"  # "dev" | "prod"
     renderer: str = "local"  # "local" (run_limited subprocess, NOT isolated) | "docker" (isolated)
     render_image: str = "tac-render:local"
+    fly_render_app: str = "tac-render"
+    fly_render_image: str = ""  # registry.fly.io/tac-render:<tag>
+    fly_render_region: str = ""
     auth_mode: str = "dev"  # "dev" | "github"
     github_client_id: str = ""
     github_client_secret: str = ""
@@ -74,6 +77,9 @@ class Settings:
             env=_env("TAC_ENV", "dev"),
             renderer=_env("TAC_RENDERER", "local"),
             render_image=_env("TAC_RENDER_IMAGE", "tac-render:local"),
+            fly_render_app=_env("TAC_FLY_RENDER_APP", "tac-render"),
+            fly_render_image=_env("TAC_FLY_RENDER_IMAGE", ""),
+            fly_render_region=_env("TAC_FLY_RENDER_REGION", ""),
             auth_mode=_env("TAC_AUTH", "dev"),
             github_client_id=_env("TAC_GITHUB_CLIENT_ID", ""),
             github_client_secret=_env("TAC_GITHUB_CLIENT_SECRET", ""),

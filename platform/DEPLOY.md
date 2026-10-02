@@ -1,96 +1,122 @@
-# Deploy: Fly.io (plan, not built)
+# Deploy: Fly.io
 
-Nothing here is provisioned. These are the target shape and the code changes it needs.
+**Decided (operator):** prod renders with `FlyMachineRenderer`, one throwaway Fly Machine per job (option b). The code is built and tested against a mocked Machines API. **No Fly resources exist yet.** Everything under "Operator runs these" costs money and is for the operator to run.
 
-> **Gate:** with `TAC_ENV=prod` the API refuses to start unless `TAC_RENDERER` names an implemented isolated backend (`config.ISOLATED_RENDERERS`). Today that is only `docker`. The local `run_limited` subprocess renderer is never allowed in prod. With `docker`, prod also refuses to start if the render image is missing.
-
-## Render backend: the decision the operator owns
-
-**Prod with `TAC_RENDERER=docker` needs a host where the API can run `docker run`.** Fly Machines don't run Docker by default (a Machine is a Firecracker microVM with no Docker daemon). So "API on a Fly Machine + DockerRenderer" does not work as-is. There are two options; the choice is a money/ops decision for the operator. Prices are rough: verify on the provider's pricing page.
-
-| | (a) small VM with Docker, API + renders on it | (b) `FlyMachineRenderer` (not built) |
-|---|---|---|
-| what | one VM (e.g. 2 vCPU / 4 GB) running the API and `tac-render:local` containers via `DockerRenderer` (built and tested today) | API stays on Fly; each job launches one throwaway Machine through the Machines API (the `tac-render` app below) |
-| isolation boundary | container: shared kernel, `--network none`, read-only root, nobody user, no caps, cgroup limits. A kernel exploit escapes into a host that also holds the API's secrets | Firecracker microVM per job in a separate Fly org; no secrets in the VM. A kernel exploit lands in an empty, disposable VM |
-| code still to write | none: deploy + systemd/compose | ~150–250 lines: Machines API client, presigned-URL output, poll for exit, cleanup; plus a test rig |
-| render latency | +~1 s container start (measured: laps 18.7 s in Docker vs 16 s native) | +~2–5 s Machine create/boot per job, image cached per region |
-| idle cost | the VM runs 24/7 | ~0 when idle; per second while rendering |
-| rough monthly cost (verify) | ~$5–25 for one VM; one bill, no Fly | API Machine ~$3 + renders ~$0.2–0.5 at 1,000 jobs/mo |
-| ops | you patch the VM, Docker and the kernel; backups; TLS | Fly runs the hosts; more moving parts (two orgs, a deploy token, image pushes) |
-| scale-out | vertical; parallel renders compete for the box's CPUs | horizontal per job |
-
-A third variant: (a) with the API kept on Fly and renders on a separate Docker VM. That needs a job channel between them. Never expose the Docker socket over the network (that is root on the VM). It would mean a small render agent: more code than (a), less isolation than (b).
+> **Gate:** with `TAC_ENV=prod` the API refuses to start unless `TAC_RENDERER` is an implemented isolated backend (`config.ISOLATED_RENDERERS` = `docker`, `fly-machine`).
+> - With `fly-machine`, it also refuses to start without `FLY_API_TOKEN` and `TAC_FLY_RENDER_IMAGE`.
+> - The local `run_limited` subprocess renderer is never allowed in prod.
 
 ```
-                         ┌──────────── org: tac (6PN A) ────────────┐
-artist plugin ──https──▶ │ app tac-api  (1 Machine, shared-cpu-1x)   │──presign──▶ Tigris bucket tac-media
-site / browsers ───────▶ │  FastAPI + worker, SQLite on volume       │                 ├ public/…  (public read)
-                         │  secrets: ANTHROPIC_API_KEY, ADMIN, GH,   │                 └ submissions/… (private)
-                         │           FLY_API_TOKEN (tac-render only) │
-                         └──────────────┬────────────────────────────┘
-                                        │ Machines API: run --rm, files=piece_dir, env=presigned URLs
-                         ┌──────────────▼──── org: tac-render (6PN B, isolated) ──┐
-                         │ app tac-render  (ephemeral Machine per job)            │
-                         │  wrapper: fetch nothing, run piece under unshare --net │
-                         │  → PUT outputs to presigned URLs → exit → destroyed    │
-                         └────────────────────────────────────────────────────────┘
+                    org A                                          org B (recommended: separate org)
+ ┌───────────────────────────────────────────┐           ┌────────────────────────────────────────────┐
+ │ app tac-api (1 Machine, shared-cpu-1x 512MB)│  Machines │ app tac-render: no IPs, no services, no    │
+ │  FastAPI + worker, SQLite + media on volume │───API────▶│ secrets; one Machine per job, auto_destroy │
+ │  secrets: FLY_API_TOKEN (deploy token,      │  create/  │                                            │
+ │   tac-render only), ANTHROPIC, ADMIN, GH     │  wait/    │ fly_bootstrap.py (root, has network):      │
+ │                                              │  destroy  │  1 GET  in.tar.gz  ◀─presigned (10 min)    │
+ │  /v1/render-io/… presigned GET/PUT ◀────────┼───────────┤  2-4 netns, uid 65534, NO network:         │
+ └──────────────────────────────────────────────┘  https   │     probe → check_piece → render_piece      │
+                                                            │  5 PUT  out.tar.gz ─▶presigned (10 min)    │
+                                                            └────────────────────────────────────────────┘
 ```
 
-## App 1: `tac-api`
+## Job lifecycle (`src/tac_platform/fly_machine.py`)
 
-- Image: `python:3.12-slim` + `uv sync --frozen`. Run `tac-platform` with `TAC_ENV=prod`, `TAC_RENDERER=fly-machine` (once implemented), `TAC_HOST=0.0.0.0` and `TAC_TRUST_PROXY=1`.
-- One Machine (shared-cpu-1x, 512 MB) with a 1 GB volume at `/data` (`TAC_DATA_DIR=/data`) for SQLite.
-  - Stay on one Machine while SQLite is the DB. Scale out means LiteFS (one primary, read replicas) or Fly Postgres. `db.py` is the swap point; the SQL already uses `RETURNING` / `ON CONFLICT`.
-- `fly secrets set ANTHROPIC_API_KEY=… TAC_ADMIN_TOKEN=… TAC_GITHUB_CLIENT_ID=… TAC_GITHUB_CLIENT_SECRET=… FLY_RENDER_TOKEN=…`
-  - `FLY_RENDER_TOKEN` is a deploy token scoped to the `tac-render` app only (`fly tokens create deploy -a tac-render`).
-- `TAC_AUTH=github`. Set `TAC_PUBLIC_BASE_URL` to the public hostname.
-- `fly.toml`:
-  - `[http_service] force_https = true`, `auto_stop_machines = "off"` (the worker lives in-process), `min_machines_running = 1`.
-  - `[[http_service.checks]] path = "/healthz"`.
-- Media: a `TigrisStore` implementing `storage.MediaStore` with S3 calls (`put`/`get`/`list`/`delete_prefix`/`copy_prefix`).
-  - Use aioboto3 or plain `httpx` + SigV4.
-  - `public/` is a public-read prefix. `/media` and `community.json` URLs then point at the bucket (or a CDN in front) instead of the API. Keep `GET /v1/community.json` as a redirect.
+Endpoints are from the Machines API OpenAPI spec (`https://docs.fly.io/api/machines/openapi.json`, fetched 2026-10-02) and docs.fly.io/machines/api/machines-resource.
 
-## App 2: `tac-render` (ephemeral, no secrets)
+```
+tar piece_dir ─▶ store.put render-io/<job>/in.tar.gz ─▶ presign GET in, PUT out (10 min each)
+  ─▶ POST https://api.machines.dev/v1/apps/tac-render/machines
+       {name, skip_service_registration: true, config: {image, auto_destroy: true, restart: {policy: "no"},
+        guest: {cpu_kind: "shared", cpus: 1, memory_mb: 2048}, init: {exec: [python, /app/fly_bootstrap.py]},
+        env: {TAC_IN_URL, TAC_OUT_URL, TAC_CHECK_TIMEOUT, TAC_RENDER_TIMEOUT}, services: [],
+        dns: {skip_registration: true}, metadata: {tac_job}}}
+  ─▶ GET …/machines/<id>/wait?state=stopped&instance_id=…&timeout≤60, looped up to 300 s (408 → keep waiting, 404 → auto-destroyed = stopped)
+  ─▶ store.get out.tar.gz ─▶ safe extract (tarfile "data" filter, out/* regular files ≤ 25 MB, result.json)
+  ─▶ finally, on every path incl. cancel: DELETE …/machines/<id>?force=true ; delete render-io/<job>/
+```
 
-- **Separate Fly org**, so its 6PN private network can't reach `tac-api` or anything else we own.
-- Image: `python:3.12-slim` + `rich pillow fonttools`, `fonts-dejavu-core` (render_piece needs a monospace font on Linux), `util-linux` (`unshare`), and builder-community's `tools/` baked in.
-- Per job, the API calls the Machines API (equivalent to `fly machine run --rm`):
-  ```
-  fly machine run registry.fly.io/tac-render:<sha> --app tac-render --rm \
-      --vm-size shared-cpu-2x --vm-memory 2048 --region <api region> \
-      --file-local /job/piece/piece.py=… --file-local /job/piece/meta.json=… \
-      --env PUT_PREVIEW=<presigned> --env PUT_OG=<presigned> --env PUT_STATS=<presigned> --env PUT_PROC_01=…
-  ```
-  - Inputs travel in the Machine config `files`, so the VM needs no inbound fetch.
-  - Outputs go out through presigned PUT URLs: 10 min expiry, one key each, under `submissions/<id>/render/`. No credentials in the VM.
-  - Wrapper entrypoint: `unshare --net --map-root-user timeout 240 python tools/render_piece.py /job/piece --out /job/out`. The piece process gets loopback only, so it has **no egress**. After it exits, the trusted wrapper PUTs the outputs and exits, and `--rm` destroys the Machine.
-  - The API polls the Machines API for exit (or waits for the PUTs to land in Tigris), then continues the pipeline as today.
-- Code change: `renderer.py` already has the `Renderer` interface (`check`, `render`), with `LocalRenderer` (dev) and `DockerRenderer` (isolated). A `FlyMachineRenderer` is a third implementation of the same two methods. Add `"fly-machine"` to `ISOLATED_RENDERERS` only in the commit that implements it.
-- Concurrency: cap jobs with `TAC_RENDER_CONCURRENCY`. Each job is its own VM, so 4 parallel jobs means 4 VMs.
+- On timeout the job is rejected with "render timed out". If no output arrives, the API reads `events[].request.exit_event` (exit_code, oom_killed) for the log.
+- The presigned URLs live on the API itself (`/v1/render-io/…`, HMAC over method, key and expiry, keys confined to `render-io/`), so v0 needs no object store. The Machine must reach `TAC_PUBLIC_BASE_URL` over https.
+- When media moves to Tigris, `TigrisStore.presign()` returns S3 presigned URLs instead. The renderer is unchanged.
+- Machine create is rate-limited to 1 req/s per action, with bursts to 3 req/s (docs). `TAC_RENDER_CONCURRENCY` (default 1) stays well inside that.
 
-## Rough monthly cost (verify on fly.io/pricing)
+## Operator runs these (costs ~$4/mo + cents per render)
 
-| line | assumption | ~USD/mo |
+Prerequisites: `flyctl` logged in, Docker, and the tac-community repo.
+
+```bash
+# 0. (recommended) a separate org for renders, so a render VM can't reach tac-api over 6PN
+fly orgs create tac-render                                   # or reuse an org; renders still have no secrets
+
+# 1. render app: no IPs, no services, never `fly deploy`ed (Machines are created per job by the API)
+fly apps create tac-render --org tac-render
+fly ips list -a tac-render                                   # must be empty; never allocate one
+
+# 2. render image (x86_64 for Fly hosts), pushed to Fly's registry
+fly auth docker
+TAC_RENDER_IMAGE=registry.fly.io/tac-render:$(git rev-parse --short HEAD) TAC_RENDER_PLATFORM=linux/amd64 \
+  platform/render-image/build.sh
+docker push registry.fly.io/tac-render:$(git rev-parse --short HEAD)
+
+# 3. the API's token: a DEPLOY token scoped to tac-render only (never an org or personal token)
+fly tokens create deploy -a tac-render --name tac-api-renders --expiry 2160h   # 90 days, then rotate
+#    -> paste straight into step 5; don't save it to a file
+
+# 4. API app + 1 GB volume (SQLite + media)
+fly apps create tac-api
+fly volumes create tac_data --size 1 -a tac-api --region <region>
+
+# 5. API secrets (values typed or piped from the password manager, never written to disk)
+fly secrets set -a tac-api FLY_API_TOKEN=<token from step 3> TAC_ADMIN_TOKEN=<random> \
+  ANTHROPIC_API_KEY=<key> TAC_GITHUB_CLIENT_ID=<id> TAC_GITHUB_CLIENT_SECRET=<secret>
+
+# 6. deploy the API (needs a Dockerfile + fly.toml for tac-api; not written yet, see checklist)
+#    fly.toml [env]: TAC_ENV=prod TAC_RENDERER=fly-machine TAC_FLY_RENDER_APP=tac-render
+#      TAC_FLY_RENDER_IMAGE=registry.fly.io/tac-render:<sha> TAC_FLY_RENDER_REGION=<region>
+#      TAC_PUBLIC_BASE_URL=https://<api host> TAC_AUTH=github TAC_TRUST_PROXY=1 TAC_DATA_DIR=/data
+#      TAC_HOST=0.0.0.0
+fly deploy -a tac-api
+```
+
+- **Smoke test before opening uploads:**
+  1. Submit one piece and confirm it reaches `in_review`.
+  2. Look at the job's `result.json` `isolation` field in the API log: it must be `{"routes": [], "tcp": "OSError"}`.
+  3. If it shows `network isolation unavailable`, the Fly kernel refused the namespace. Renders then fail closed (no untrusted code runs). Stop there and see SECURITY.md.
+- **Rotation:** run step 3 again, then `fly secrets set` the new token and `fly tokens revoke <old id>` (`fly tokens list -a tac-render`).
+
+## Cost
+
+Rates verified from docs.fly.io/about/pricing:
+- shared-cpu-1x 512 MB: $3.69/mo
+- shared-cpu-1x 2 GB: $13.39/mo
+- volumes: $0.15/GB-mo
+- egress: $0.02/GB (North America / Europe)
+
+Machines bill per second while running.
+
+| line | assumption | USD/mo |
 |---|---|---|
-| tac-api Machine | shared-cpu-1x 512 MB, always on | ~3.2 |
-| volume | 1 GB + snapshots | ~0.15–0.5 |
-| tac-render Machines | shared-cpu-2x 2 GB, ~30 s/job incl. boot, 1,000 jobs/mo = 8.3 h | ~0.2–0.5 |
-| Tigris storage | 300 pieces × ~2 MB = 0.6 GB (+ private submissions ~2 GB) | ~0.05–0.1 |
-| Tigris requests/egress | gallery reads; Tigris has no egress fee, per-request pricing | ~0–2 |
-| IPv4 | dedicated v4 optional (shared v4 is free) | 0–2 |
-| automod (Anthropic, not Fly) | Opus 5.5 at effort low: ~15k input tokens (code + 3 frames) + ~1–2k output ≈ $0.08–0.10 each; 1,000/mo | ~80–100 |
-| **total Fly** | | **~4–9** |
+| tac-api Machine | shared-cpu-1x 512 MB, always on | 3.69 |
+| tac-api volume | 1 GB | 0.15 |
+| render Machines | shared-cpu-1x 2 GB = $13.39/730 h = $0.0183/h. ~40 s per job incl. boot means ~$0.0002 per render | 0.20 per 1,000 renders |
+| egress | gallery media. 300 pieces × ~0.9 MB preview × 50 views = ~13.5 GB | ~0.27 |
+| **Fly total** | 1,000 renders/mo | **~$4.3** |
+| automod (Anthropic, not Fly) | Opus 5.5 at effort low, ~$0.08–0.10 per submission | ~80–100 per 1,000 |
 
-- Automod dominates the bill.
-- Lever: switch `TAC_AUTOMOD_MODEL` to a Sonnet. That is ~2× cheaper per token, at some loss of judgment on the "malicious-looking code" flag.
-- These numbers are from memory of Fly's published rates. Verify every line on fly.io/pricing and tigrisdata.com/pricing before budgeting.
+- Registry storage and image pulls are not in the verified price list above. Check them on the pricing page.
+- At this volume, automod is ~95% of the bill. If it needs trimming, switch `TAC_AUTOMOD_MODEL` to a Sonnet.
+
+## Not built (by decision)
+
+- **Option (a), a Docker host:** `DockerRenderer` exists and is tested. It is useful for local isolated renders. Prod doesn't use it.
+- **Tigris media store:** not needed for v0, since the volume holds media and presigned URLs are served by the API. Revisit when the volume or the single API Machine becomes a limit. `MediaStore` is the swap point; `db.py` is the swap point for Postgres or LiteFS.
 
 ## Before going public: checklist
 
-- [ ] Render backend chosen: (a) a Docker host + `TAC_RENDERER=docker` + `render-image/build.sh` on it, or (b) `FlyMachineRenderer` built. Without one, `TAC_ENV=prod` refuses to start.
-- [ ] GitHub OAuth tested end to end; pick-a-handle step for invalid/taken logins.
-- [ ] Token expiry + revoke endpoint; admin via GitHub allow-list instead of a shared token.
-- [ ] `TigrisStore` + public URLs; `/media` static mount removed.
-- [ ] Backups: volume snapshots daily + `sqlite3 .backup` to Tigris (or LiteFS).
-- [ ] Disclose in the plugin that code and frames go to Anthropic for moderation.
+- [ ] Steps 0–6 above. Smoke test shows `isolation: {"routes": [], "tcp": "OSError"}` from a real Fly Machine.
+- [ ] Dockerfile + fly.toml for `tac-api` (`uv sync --frozen`, `tac-platform`, `/healthz` check, `auto_stop_machines = "off"`, volume at `/data`).
+- [ ] GitHub OAuth tested end to end; pick-a-handle step for invalid or taken logins.
+- [ ] Token expiry + revoke; admin via a GitHub allow-list instead of a shared token.
+- [ ] Backups: daily volume snapshots + `sqlite3 .backup`.
+- [ ] The plugin discloses that code and frames go to Anthropic for moderation.

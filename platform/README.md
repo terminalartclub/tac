@@ -119,8 +119,10 @@ site ──POST /v1/pieces/h/s/view──▶ day_salt(UTC day) ─▶ hash = sha
 | `TAC_DATA_DIR` | `platform/data` | SQLite + media root |
 | `TAC_DB_PATH` | `$TAC_DATA_DIR/tac.sqlite3` | |
 | `TAC_ENV` | `dev` | `prod` refuses to start unless `TAC_RENDERER` is an implemented isolated backend (none yet) |
-| `TAC_RENDERER` | `local` | `local` = `run_limited` subprocess (not a sandbox; dev only); `docker` = one isolated container per check/render |
+| `TAC_RENDERER` | `local` | `local` = `run_limited` subprocess (not a sandbox; dev only); `docker` = one isolated container per check/render; `fly-machine` = one throwaway Fly Machine per job (prod) |
 | `TAC_RENDER_IMAGE` | `tac-render:local` | image for `docker`; build with `render-image/build.sh` |
+| `TAC_FLY_RENDER_APP` / `TAC_FLY_RENDER_IMAGE` / `TAC_FLY_RENDER_REGION` | `tac-render` / unset / unset | `fly-machine` backend: app, `registry.fly.io/tac-render:<tag>`, region |
+| `FLY_API_TOKEN` | unset | `fly-machine` only: deploy token scoped to the tac-render app (see DEPLOY.md) |
 | `TAC_AUTH` | `dev` | `dev` (handle form) or `github` (OAuth; see TODOs in `auth.py`) |
 | `TAC_GITHUB_CLIENT_ID` / `TAC_GITHUB_CLIENT_SECRET` | | github mode only |
 | `TAC_ADMIN_TOKEN` | unset | admin disabled (403) when unset |

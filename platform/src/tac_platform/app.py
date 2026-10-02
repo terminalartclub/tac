@@ -13,7 +13,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from . import admin, auth, moderation, submissions, views
+from . import admin, auth, moderation, render_io, submissions, views
 from .automod import Automod
 from .config import Settings
 from .db import Database
@@ -43,7 +43,7 @@ class LimitsMiddleware:
         if scope["type"] != "http":
             return await self.app(scope, receive, send)
         path = scope["path"]
-        limit = BODY_LIMITS.get(path, DEFAULT_BODY_LIMIT)
+        limit = BODY_LIMITS.get(path, render_io.MAX_PUT if path.startswith("/v1/render-io/") else DEFAULT_BODY_LIMIT)
         headers = dict(scope["headers"])
         length = headers.get(b"content-length")
         if length is not None and (not length.isdigit() or int(length) > limit):
@@ -115,7 +115,7 @@ def create_app(settings: Settings | None = None, automod: Automod | None = None)
         await db.execute("INSERT OR IGNORE INTO kv (key, value) VALUES ('secret', ?)", (secrets.token_hex(32),))
         secret = (await db.fetchone("SELECT value FROM kv WHERE key = 'secret'"))["value"]
         await _load_themes(db, settings)
-        store = LocalStore(settings.data_dir)
+        store = LocalStore(settings.data_dir, base_url=settings.public_base_url, secret=secret)
         publisher = Publisher(db, store)
         pipeline = Pipeline(settings, db, store, publisher, automod or Automod(settings))
         app.state.settings, app.state.db, app.state.store = settings, db, store
@@ -157,7 +157,7 @@ def create_app(settings: Settings | None = None, automod: Automod | None = None)
     async def healthz() -> dict:
         return {"ok": True}
 
-    for r in (auth.router, submissions.router, moderation.router, views.router, admin.router):
+    for r in (auth.router, submissions.router, moderation.router, views.router, render_io.router, admin.router):
         app.include_router(r)
     app.mount("/media", StaticFiles(directory=public_dir), name="media")
     return app

@@ -27,6 +27,7 @@ class MediaStore(Protocol):
     async def list(self, prefix: str) -> list[str]: ...
     async def delete_prefix(self, prefix: str) -> None: ...
     async def copy_prefix(self, src: str, dst: str) -> None: ...
+    def presign(self, key: str, method: str, ttl_s: int = 600) -> str: ...  # render-io/ keys only
 
 
 def _safe_key(key: str) -> str:
@@ -37,8 +38,18 @@ def _safe_key(key: str) -> str:
 
 
 class LocalStore:
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, base_url: str = "", secret: str = "") -> None:
         self.root = root.resolve()
+        self.base_url = base_url
+        self.secret = secret
+
+    def presign(self, key: str, method: str, ttl_s: int = 600) -> str:
+        """URL served by render_io.py; prod (Tigris) returns an S3 SigV4 presigned URL instead."""
+        from .render_io import presign
+
+        if not self.secret:
+            raise RuntimeError("LocalStore needs a secret to presign")
+        return presign(self.base_url, self.secret, _safe_key(key), method, ttl_s)
 
     def path(self, key: str) -> Path:
         return self.root / _safe_key(key)

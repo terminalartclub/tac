@@ -4,7 +4,10 @@
   docker -> one throwaway container per call: no network, read-only rootfs, non-root, no caps,
             2 GB / 1 CPU / 256 pids, piece dir mounted read-only, only /out writable.
 
-Both return sandbox.RunResult, so the pipeline doesn't care which ran.
+  fly-machine -> one throwaway Fly Machine per job (fly_machine.py): check + render in one VM,
+            untrusted steps in a fresh network namespace, I/O via presigned URLs.
+
+Every backend implements run_job(): the static check, then (only if it passed) the render.
 """
 
 import asyncio
@@ -12,6 +15,7 @@ import logging
 import os
 import secrets
 import stat
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
@@ -25,12 +29,33 @@ DOCKER_ENV_ALLOW = ("PATH", "HOME", "DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CON
 MAX_OUTPUT = 256 * 1024
 
 
+@dataclass
+class JobResult:
+    check: RunResult | None
+    render: RunResult | None = None
+    backend_error: str | None = None  # infrastructure failure: not the piece's fault
+    timed_out: bool = False  # the whole job (check + render) ran past its wall clock
+
+
 class Renderer(Protocol):
-    async def check(self, piece_dir: Path, work: Path) -> RunResult: ...
-    async def render(self, piece_dir: Path, out_dir: Path, work: Path) -> RunResult: ...
+    async def run_job(self, piece_dir: Path, out_dir: Path, work: Path) -> JobResult: ...
 
 
-class LocalRenderer:
+def check_passed(res: RunResult) -> bool:
+    return not res.timed_out and res.returncode == 0
+
+
+class StepwiseRenderer:
+    """Backends with separate check/render calls (local, docker)."""
+
+    async def run_job(self, piece_dir: Path, out_dir: Path, work: Path) -> JobResult:
+        check = await self.check(piece_dir, work)  # type: ignore[attr-defined]
+        if not check_passed(check):
+            return JobResult(check=check)
+        return JobResult(check=check, render=await self.render(piece_dir, out_dir, work))  # type: ignore[attr-defined]
+
+
+class LocalRenderer(StepwiseRenderer):
     def __init__(self, settings: Settings) -> None:
         self.s = settings
 
@@ -72,7 +97,7 @@ async def _docker(*args: str, timeout: float = 30) -> tuple[int, bytes, bytes]:
     return proc.returncode or 0, out, err
 
 
-class DockerRenderer:
+class DockerRenderer(StepwiseRenderer):
     def __init__(self, settings: Settings) -> None:
         self.s = settings
         self.image = settings.render_image
@@ -141,7 +166,11 @@ class DockerRenderer:
         )
 
 
-def make_renderer(settings: Settings) -> Renderer:
+def make_renderer(settings: Settings, store=None) -> Renderer:
+    if settings.renderer == "fly-machine":
+        from .fly_machine import FlyMachineRenderer
+
+        return FlyMachineRenderer(settings, store)
     if settings.renderer == "docker":
         return DockerRenderer(settings)
     if settings.renderer == "local":

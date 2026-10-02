@@ -68,7 +68,7 @@ class Pipeline:
         self.store = store
         self.publisher = publisher
         self.automod = automod
-        self.renderer: Renderer = make_renderer(settings)
+        self.renderer: Renderer = make_renderer(settings, store)
         self._wake = asyncio.Event()
         self._tasks: list[asyncio.Task] = []
 
@@ -157,8 +157,14 @@ class Pipeline:
         for d in (piece_dir, out_dir, work):
             await asyncio.to_thread(d.mkdir)
         await self._materialize(sub_id, piece_dir)
-        # 1. static check (also in the isolated backend: it parses untrusted source)
-        res = await self.renderer.check(piece_dir, work)
+        # 1+2. static check then render, both inside the render backend (they touch untrusted source)
+        job = await self.renderer.run_job(piece_dir, out_dir, work)
+        if job.timed_out:
+            raise Rejected([f"render timed out after {self.settings.render_timeout_s:.0f} s"])
+        if job.backend_error:
+            log.error("render backend failed for %s: %s", sub_id, job.backend_error)
+            raise Rejected(["render backend unavailable; please resubmit later"])
+        res = job.check
         try:
             verdict = json.loads(res.stdout)
         except ValueError:
@@ -169,8 +175,9 @@ class Pipeline:
         if res.returncode != 0 or not verdict.get("ok"):
             raise Rejected([str(r)[:300] for r in verdict.get("reasons") or ["static check failed"]])
 
-        # 2. render (untrusted code runs here)
-        res = await self.renderer.render(piece_dir, out_dir, work)
+        res = job.render
+        if res is None:
+            raise Rejected(["render did not run"])
         if res.timed_out:
             raise Rejected([f"render timed out after {self.settings.render_timeout_s:.0f} s"])
         if res.returncode == 125 and self.settings.renderer == "docker":

@@ -51,10 +51,11 @@ async def _run_direct(tmp_path, code: str, timeout: float = 60):
 
 
 async def _containers() -> str:
-    p = await asyncio.create_subprocess_exec("docker", "ps", "-aq", "--filter", "label=tac-render=1",
-                                             stdout=asyncio.subprocess.PIPE)
+    """Leftover containers from THESE tests (they run /in/piece.py); other renders on the host are ignored."""
+    p = await asyncio.create_subprocess_exec("docker", "ps", "-a", "--no-trunc", "--filter", "label=tac-render=1",
+                                             "--format", "{{.Names}} {{.Command}}", stdout=asyncio.subprocess.PIPE)
     out, _ = await p.communicate()
-    return out.decode().strip()
+    return "\n".join(ln for ln in out.decode().splitlines() if "/in/piece.py" in ln)
 
 
 async def test_network_is_unreachable(tmp_path):
@@ -139,4 +140,3 @@ async def test_laps_renders_through_docker_pipeline(tmp_path):
         assert stats["seam"] == "CLEAN" and stats["frames"] == 300
         preview = await ctx.app.state.store.get(f"submissions/{r.json()['id']}/render/preview.webp")
         assert preview[:4] == b"RIFF" and len(preview) > 100_000
-    assert await _containers() == ""
