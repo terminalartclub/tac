@@ -31,7 +31,7 @@ async def test_views_dedupe_per_ip_day_and_private(ctx):
             assert r.status_code == 204 and r.content == b"" and "set-cookie" not in r.headers
     mine = await _mine(ctx, token)
     p = mine["pieces"][0]
-    assert (p["id"], p["slug"], p["status"]) == (sub_id, s, "published")
+    assert (p["id"], p["slug"], p["status"]) == (f"{h}/{s}", s, "published")
     assert p["views_total"] == 3 and p["views_7d"] == 3
     assert len(p["views_28d"]) == 28 and p["views_28d"][-1] == 3 and sum(p["views_28d"][:-1]) == 0
     assert p["url"].endswith(f"/v1/submissions/{sub_id}")
@@ -109,3 +109,19 @@ async def test_purge_keeps_rollups_and_drops_old_salts(ctx):
     assert len(await db.fetchall("SELECT * FROM view_days")) == 2
     salts = [r["key"] for r in await db.fetchall("SELECT key FROM kv WHERE key LIKE 'view_salt:%'")]
     assert salts == [f"view_salt:{today.isoformat()}"]
+
+
+async def test_me_pieces_contract_shape(ctx):
+    """Pinned with the plugin client (tac-studio f5bacdf). Change only together with the plugin."""
+    token, sub_id, h, s = await _published(ctx)
+    body = await _mine(ctx, token)
+    assert set(body) == {"pieces"}
+    (p,) = body["pieces"]
+    assert set(p) == {"id", "slug", "title", "status", "views_total", "views_7d", "views_28d", "url"}
+    assert p["id"] == f"{h}/{s}" and p["slug"] == s and isinstance(p["title"], str)
+    assert p["status"] in {"queued", "rendering", "rejected", "in_review", "published", "hidden"}
+    assert type(p["views_total"]) is int and type(p["views_7d"]) is int
+    assert len(p["views_28d"]) == 28 and all(type(v) is int for v in p["views_28d"])
+    assert p["url"].startswith("http")
+    await ctx.app.state.publisher.hide(h, s, "test")
+    assert (await _mine(ctx, token))["pieces"][0]["status"] == "hidden"

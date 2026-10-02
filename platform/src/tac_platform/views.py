@@ -118,21 +118,17 @@ async def my_pieces(request: Request) -> dict:
     )
     views = await views_summary(st.db, [r["id"] for r in rows])
     base = st.settings.public_base_url
-    start = (utc_today() - timedelta(days=SERIES_DAYS - 1)).isoformat()
+    # Contract pinned with the plugin (tac-studio f5bacdf): exactly these keys. views_28d is
+    # oldest -> newest, last entry = today (UTC). "hidden" = published but hidden by reports.
     return {
-        "handle": user["handle"],
-        "series_start": start,  # date of views_28d[0]; the last entry is today (UTC)
         "pieces": [
             {
-                "id": r["id"],
-                "piece_id": f"{user['handle']}/{r['slug']}",
+                "id": f"{user['handle']}/{r['slug']}",
                 "slug": r["slug"],
                 "title": r["title"],
-                "status": r["status"],
-                "hidden": bool(r["hidden"]),
-                "created": r["created_at"][:10],
+                "status": "hidden" if r["status"] == "published" and r["hidden"] else r["status"],
                 **views[r["id"]],
-                "url": f"{base}/v1/submissions/{r['id']}",
+                "url": f"{base}/v1/submissions/{r['id']}",  # status URL (no site piece-page route yet)
             }
             for r in rows
         ],

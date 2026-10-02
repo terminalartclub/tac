@@ -54,7 +54,7 @@ TAC_E2E_URL=http://127.0.0.1:8790 TAC_E2E_ADMIN_TOKEN=t uv run pytest tests/test
 | GET | `/media/{handle}/{slug}/...` | none | preview.webp, og.jpg, piece.py, process/NN.webp |
 | POST | `/v1/pieces/{handle}/{slug}/report` | none | `{reason}`; 5/h per IP; 3 distinct IPs hide the piece |
 | POST | `/v1/pieces/{handle}/{slug}/view` | none | private view count; 204 always (see below) |
-| GET | `/v1/me/pieces` | Bearer | own pieces: `{handle, series_start, pieces: [{id, piece_id, slug, title, status, hidden, created, views_total, views_7d, views_28d[28], url}]}` |
+| GET | `/v1/me/pieces` | Bearer | own pieces: `{pieces: [{id: "handle/slug", slug, title, status (+ "hidden"), views_total, views_7d, views_28d[28 ints, oldest→newest, last = today UTC], url}]}` (pinned with the plugin) |
 | GET | `/admin`, `/admin/login?token=` | admin | HTML queue: in review, hidden, published, audit log |
 | GET | `/v1/admin/queue` | admin | JSON version of the queue |
 | POST | `/v1/admin/submissions/{id}/approve` · `/reject {reason}` | admin | from `in_review` only (409 otherwise) |
