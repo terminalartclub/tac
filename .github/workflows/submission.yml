@@ -1,0 +1,81 @@
+# Checks and renders the pieces a pull request adds or changes. Runs fork PR code, so it gets
+# NO secrets and a read-only token. The PR comment is posted by submission-comment.yml
+# (workflow_run), which never checks out or executes PR code.
+name: submission
+
+on:
+  pull_request:
+    paths: ["pieces/**"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: submission-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  check-and-render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false  # piece code must not find a token in .git/config
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install renderer deps and fonts
+        run: |
+          sudo apt-get install -y --no-install-recommends fonts-dejavu-core
+          python -m pip install --disable-pip-version-check "rich>=13" "Pillow>=10" "fonttools>=4"
+
+      - name: Find changed pieces
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git diff --name-only "$BASE_SHA...HEAD" -- pieces/ \
+            | awk -F/ 'NF >= 4 { print $1 "/" $2 "/" $3 }' | sort -u > changed.txt
+          cat changed.txt
+
+      - name: Check and render
+        run: |
+          mkdir -p build
+          status=0
+          : > build/summary.txt
+          while IFS= read -r dir; do
+            if ! [[ "$dir" =~ ^pieces/[a-z0-9-]+/[a-z0-9-]+$ ]]; then
+              echo "✗ $dir: bad path (pieces/<handle>/<slug>, lowercase)" >> build/summary.txt; status=1; continue
+            fi
+            [ -d "$dir" ] || { echo "· $dir: removed" >> build/summary.txt; continue; }
+            id="${dir#pieces/}"
+            if python tools/check_piece.py "$dir" > check.json; then
+              # render_piece.py enforces a 120 s wall-clock limit per piece (exit 124)
+              if python tools/render_piece.py "$dir" --out "build/$id" > render.log 2>&1; then
+                echo "✓ $id: $(tail -n 1 render.log | sed 's#^.*/'"$id"' · ##')" >> build/summary.txt
+              else
+                echo "✗ $id: render failed (exit $?): $(tail -n 3 render.log | tr '\n' ' ')" >> build/summary.txt; status=1
+              fi
+            else
+              echo "✗ $id: rejected: $(cat check.json)" >> build/summary.txt; status=1
+            fi
+          done < changed.txt
+          [ -s build/summary.txt ] || echo "no piece directories changed" >> build/summary.txt
+          cat build/summary.txt
+          exit $status
+
+      - name: Record PR number for the comment workflow
+        if: always()
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: echo "$PR_NUMBER" > build/pr-number.txt
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: submission
+          path: build/
+          retention-days: 14

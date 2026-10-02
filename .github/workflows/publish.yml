@@ -1,0 +1,40 @@
+# On main: render every piece and assemble build/community.json. Deploying build/ to the site is a TODO.
+name: publish
+
+on:
+  push:
+    branches: [main]
+    paths: ["pieces/**", "curation.json", "tools/**", "plugins/tac-studio/lib/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install renderer deps and fonts
+        run: |
+          sudo apt-get install -y --no-install-recommends fonts-dejavu-core
+          python -m pip install --disable-pip-version-check "rich>=13" "Pillow>=10" "fonttools>=4"
+      - name: Build site data
+        run: python tools/build_site.py --render
+      - uses: actions/upload-artifact@v4
+        with:
+          name: site-build
+          path: build/
+          retention-days: 30
+      # TODO(deploy): publish build/ to the gallery host (object storage / Pages) once it exists.
+      # Keep the deploy step in a separate job with its own minimal permissions/secrets.
