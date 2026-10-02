@@ -51,7 +51,13 @@ BANNED_NAMES = {"open", "exec", "eval", "compile", "__import__", "globals", "loc
 # Any other occurrence (alias, list/tuple, argument, lambda, walrus, default arg, shadowing) is rejected,
 # so a runtime-built attribute name can never reach them.
 ATTR_BUILTINS = {"getattr", "hasattr"}
-BANNED_ATTRS = {"os", "subprocess", "socket", "shutil", "builtins", "importlib", "io", "pathlib",
+# Attribute names that are top-level module names reach a module re-exported by an allowed one
+# (rich.console.sys, rich.console.threading, rich.syntax.os, ...): reject them structurally.
+# `random` is exempt — pieces call Random().random(), and no allowed module exposes a `random`
+# module attribute (tests/test_check_piece.py walks the reachable modules to keep that true).
+MODULE_ATTR_EXEMPT = {"random"}
+MODULE_NAMES = (set(sys.stdlib_module_names) | {"rich", "PIL", "fontTools", "threading"}) - MODULE_ATTR_EXEMPT
+BANNED_ATTRS = {"sys", "threading", "os", "subprocess", "socket", "shutil", "builtins", "importlib", "io", "pathlib",
                 "save_html", "save_svg", "save_text", "from_path", "read_text", "write_text",
                 "read_bytes", "write_bytes", "system", "popen", "f_globals", "f_locals", "f_back",
                 "f_builtins", "gi_frame", "cr_frame", "ag_frame", "tb_frame", "gi_code", "cr_code",
@@ -99,7 +105,8 @@ class _Lint(ast.NodeVisitor):
         for a in node.names:
             if a.name == "*":
                 self.bad(node, "star imports are not allowed")
-            elif a.name.startswith("_") or a.name in BANNED_ATTRS or a.name in BANNED_NAMES:
+            elif (a.name.startswith("_") or a.name in BANNED_ATTRS or a.name in BANNED_NAMES
+                  or a.name in MODULE_NAMES):
                 self.bad(node, f"importing {a.name!r} from {mod} is not allowed")
             elif mod == "types" and a.name not in TYPES_ATTRS:
                 self.bad(node, f"types.{a.name} is not allowed (only {sorted(TYPES_ATTRS)})")
@@ -149,6 +156,8 @@ class _Lint(ast.NodeVisitor):
             self.bad(node, f"private attribute .{attr} is not allowed")
         elif attr in BANNED_ATTRS or attr in BANNED_NAMES or attr in ATTR_BUILTINS:
             self.bad(node, f"attribute .{attr} is not allowed")
+        elif attr in MODULE_NAMES:
+            self.bad(node, f"attribute .{attr} is a module name (modules re-exported by rich etc. are off limits)")
         base = node.value
         if isinstance(base, ast.Name):
             mod = self.module_alias.get(base.id)

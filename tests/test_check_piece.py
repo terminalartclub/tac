@@ -99,6 +99,15 @@ def test_allowed(src: str) -> None:
     ("setattr(canvas, 'x', 1)\n", "'setattr'"),
     ("import random\nrandom.getattr\n", ".getattr"),
     ("class K(object):\n    pass\n", "plain"),
+    # modules re-exported by rich: rich.console.sys / .threading / .os / .re
+    ("import rich.console\nrich.console.sys\n", ".sys"),
+    ("import rich.style\nrich.style.sys.settrace(None)\n", ".sys"),
+    ("import rich.console\nrich.console.threading\n", ".threading"),
+    ("from rich import console\nconsole.sys.setrecursionlimit(10)\n", ".sys"),
+    ("from rich.console import threading\n", "'threading'"),
+    ("from rich.syntax import textwrap\n", "'textwrap'"),
+    ("import rich.text\nrich.text.re.compile('x')\n", "module name"),
+    ("import rich.syntax\nrich.syntax.textwrap\n", "module name"),
     ("class K:\n    def __getattr__(self, n):\n        return n\n", "__getattr__"),
 ])
 def test_rejected(src: str, needle: str) -> None:
@@ -181,3 +190,33 @@ def test_repo_layout_handle_must_match(tmp_path: Path, good: Path) -> None:
 def test_docstring_says_lint_not_sandbox() -> None:
     import check_piece
     assert "LINT, NOT A SANDBOX" in check_piece.__doc__
+
+
+def test_no_reachable_module_passes_the_lint() -> None:
+    """Walk module objects reachable from every allowed module through attribute names the lint
+    permits; each must be an allowed module itself (guards the `random` exemption too)."""
+    import importlib
+    import types
+
+    import check_piece as cp
+    from check_piece import check_source
+
+    def lint_ok(attr: str) -> bool:
+        return check_source(f"import math\nx = math.{attr}\n" + OK_BODY) == []
+
+    allowed = cp.ALLOWED_MODULES | cp.ALLOWED_RICH
+    todo = [importlib.import_module(m) for m in sorted(allowed - {"sys", "types"})]
+    seen: set[str] = set()
+    leaks = []
+    while todo:
+        mod = todo.pop()
+        if mod.__name__ in seen:
+            continue
+        seen.add(mod.__name__)
+        for k, v in vars(mod).items():
+            if isinstance(v, types.ModuleType) and lint_ok(k):
+                if v.__name__ in allowed or v.__name__.startswith("rich."):
+                    todo.append(v)
+                else:
+                    leaks.append(f"{mod.__name__}.{k} -> {v.__name__}")
+    assert leaks == []

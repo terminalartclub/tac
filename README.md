@@ -165,7 +165,7 @@ python tools/render_piece.py <piece_dir> --out <dir> [--timeout 120]
   - classes with bases, metaclasses or decorators, and dunder methods other than `__init__`
   - any dunder or `_private` attribute
   - dunder strings
-  - file/process attributes (`.os`, `save_html`, `from_path`, …)
+  - file/process attributes (`.os`, `save_html`, `from_path`, …) and any attribute named like a top-level module (`.sys`, `.threading`, `.re`, …; only `.random` is exempt)
   - top-level `while True`
 - Size and layout: >1500 lines is rejected, as are bad process images and unexpected files.
 
