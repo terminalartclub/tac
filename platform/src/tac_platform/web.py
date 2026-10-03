@@ -143,6 +143,8 @@ table.audit td { padding:3px 6px; border-top:1px solid var(--border-light); vert
 table.audit th { padding:3px 6px; text-align:left; color:var(--text-dim); font-weight:400; }
 .chip.warn { border-color:var(--accent-amber); color:var(--accent-amber); }
 .nav { margin:0 0 8px; font-size:13px; }
+form.find { display:flex; gap:8px; align-items:center; margin:0 0 8px; max-width:640px; }
+.pager { display:flex; gap:16px; align-items:center; font-size:13px; }
 """
 FONTS = "https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&display=swap"
 WORDMARK = (

@@ -564,6 +564,41 @@ def test_admin_listener_prompt_requires_a_reason():
     assert res["alerts"] == ["also remove from Instagram"]
 
 
+async def test_every_published_piece_is_reachable_by_page_or_find(ctx, monkeypatch):
+    from tac_platform import admin
+
+    monkeypatch.setattr(admin, "PER_PAGE", 1)
+    token, _, h, s1 = await _published(ctx)
+    _, _, _, s2 = await _published(ctx, token=token, title="Second Light")
+    _, _, sh, ss = await _published(ctx, handle="sam", title="Harbour 100% Fog")
+    for i, slug in enumerate((s1, s2, ss)):  # same second in a test run: pin the order
+        await ctx.app.state.db.execute("UPDATE submissions SET published_at = ? WHERE slug = ?",
+                                       (f"2026-10-0{i + 1}T00:00:00+00:00", slug))
+    hide = lambda h_, s_: f"data-act='/v1/admin/pieces/{h_}/{s_}/hide'"  # noqa: E731
+    async with ctx.admin() as a:
+        p1, p3 = (await a.get("/admin")).text, (await a.get("/admin", params={"page": 3})).text
+        assert hide(sh, ss) in p1 and hide(h, s1) not in p1  # newest first
+        assert "page 1 of 3" in p1 and "href='/admin?page=2#published'>older →" in p1 and "← newer" not in p1
+        assert hide(h, s1) in p3 and "page 3 of 3" in p3 and "older →" not in p3  # the oldest is reachable
+        assert (await a.get("/v1/admin/queue", params={"page": 2})).json()["published_page"] == {
+            "page": 2, "per_page": 1, "total": 3, "find": ""}
+
+        async def found(q):
+            j = (await a.get("/v1/admin/queue", params={"find": q})).json()
+            return sorted(f"{i['handle']}/{i['slug']}" for i in j["published"]), j["published_page"]["total"]
+
+        assert await found(f"{h}/{s1}") == ([f"{h}/{s1}"], 1)
+        assert await found(f"https://terminalart.club/@{h}/{s2}") == ([f"{h}/{s2}"], 1)  # a complaint's URL
+        assert await found(f"/media/{sh}/{ss}/preview.webp") == ([f"{sh}/{ss}"], 1)
+        assert (await found(f"@{h}"))[1] == 2  # a handle: all their visible pieces (paged)
+        assert await found("100%") == ([f"{sh}/{ss}"], 1)  # LIKE wildcards are literal
+        assert await found("1_0") == ([], 0)
+        page = (await a.get("/admin", params={"find": "x' autofocus onfocus='alert(1)"})).text
+        assert "no match" in page and "onfocus='alert" not in page and "x&#x27; autofocus" in page
+        page = (await a.get("/admin", params={"find": f"{h}/{s1}"})).text
+        assert hide(h, s1) in page and "<form class=find method=get" in page
+
+
 # ---------------------------------------------------------------- migration
 
 

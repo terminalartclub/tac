@@ -4,9 +4,9 @@ import hmac
 import html
 import json
 import re
-from urllib.parse import quote
+from urllib.parse import quote, urlencode, urlsplit
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from typing import Annotated
 
@@ -91,7 +91,24 @@ def _high_tokens(meta_json: str) -> bool:
     return isinstance(t, int) and not isinstance(t, bool) and t > HIGH_TOKENS
 
 
-async def _queue(request: Request) -> dict:
+PER_PAGE = 50
+
+
+def _find_terms(q: str) -> tuple[str, str]:
+    """A find-box query as (exact "handle/slug" or handle, LIKE pattern). Takes a handle, handle/slug, @handle,
+    a piece URL (https://terminalart.club/@alex/first-light, /media/alex/first-light/...) or title words."""
+    q = q.strip()[:200]
+    if "://" in q:
+        q = urlsplit(q).path
+    parts = [p.removeprefix("@") for p in q.strip("/").split("/") if p]
+    if parts and parts[0] in ("media", "gallery", "night-shift"):
+        parts = parts[1:]
+    exact = "/".join(parts[:2]) if parts else ""
+    like = "%" + q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+    return exact, like
+
+
+async def _queue(request: Request, page: int = 1, find: str = "") -> dict:
     db = request.app.state.db
     cols = (
         "s.id, s.slug, s.title, s.status, s.hidden, s.meta_json, s.reasons_json, s.critique, s.flags_json,"
@@ -106,9 +123,20 @@ async def _queue(request: Request) -> dict:
         f"SELECT {cols} FROM submissions s JOIN users u ON u.id = s.user_id"
         " WHERE s.status = 'published' AND s.hidden = 1 ORDER BY s.updated_at DESC"
     )
+    # Published: every visible piece is reachable, by page (newest first) or through the find box.
+    where, params = "s.status = 'published' AND s.hidden = 0", ()
+    if find.strip():
+        exact, like = _find_terms(find)
+        where += (" AND (u.handle = ? OR u.handle || '/' || s.slug = ? OR s.slug LIKE ? ESCAPE '\\'"
+                  " OR s.title LIKE ? ESCAPE '\\')")
+        params = (exact, exact, like, like)
+    page = max(1, page)
+    total = (await db.fetchone(
+        f"SELECT COUNT(*) AS n FROM submissions s JOIN users u ON u.id = s.user_id WHERE {where}", params))["n"]
     published = await db.fetchall(
         f"SELECT {cols} FROM submissions s JOIN users u ON u.id = s.user_id"
-        " WHERE s.status = 'published' AND s.hidden = 0 ORDER BY s.published_at DESC LIMIT 50"
+        f" WHERE {where} ORDER BY s.published_at DESC, s.id LIMIT ? OFFSET ?",
+        (*params, PER_PAGE, (page - 1) * PER_PAGE),
     )
 
     async def item(r) -> dict:
@@ -165,6 +193,7 @@ async def _queue(request: Request) -> dict:
     for items in out.values():
         for it in items:
             it["views_7d"] = views[it["id"]]["views_7d"]  # private; never in community.json
+    out["published_page"] = {"page": page, "per_page": PER_PAGE, "total": total, "find": find.strip()}
     out["suspended_users"] = [dict(r) for r in suspended]
     out["instagram_cleanup"] = [
         {"id": f"{r['handle']}/{r['slug']}", "handle": r["handle"], "slug": r["slug"], "title": r["title"],
@@ -175,9 +204,9 @@ async def _queue(request: Request) -> dict:
 
 
 @router.get("/v1/admin/queue")
-async def admin_queue(request: Request) -> dict:
+async def admin_queue(request: Request, page: int = 1, find: str = "") -> dict:
     require_admin(request)
-    return await _queue(request)
+    return await _queue(request, page, find)
 
 
 @router.post("/v1/admin/submissions/{sub_id}/approve")
@@ -434,6 +463,31 @@ document.addEventListener('click', (ev) => {
 NAV = "<p class=nav><a href='/admin'>review queue</a> · <a href='/admin/takedowns'>takedown log</a></p>"
 
 
+def _find_box(pp: dict) -> str:
+    """Plain GET form (no script): find any visible piece, however old, to hide it."""
+    clear = " <a href='/admin#published'>clear</a>" if pp["find"] else ""
+    return (
+        "<form class=find method=get action='/admin#published'>"
+        f"<input type=text name=find value='{e(pp['find'], quote=True)}' "
+        "placeholder='find: handle, handle/slug, piece URL or title' aria-label='find a published piece'>"
+        f"<button type=submit>Find</button>{clear}</form>"
+    )
+
+
+def _pager(pp: dict) -> str:
+    last = max(1, -(-pp["total"] // pp["per_page"]))
+    if last == 1:
+        return ""
+
+    def link(n: int, label: str) -> str:
+        query = urlencode({"page": n, **({"find": pp["find"]} if pp["find"] else {})})
+        return f"<a href='/admin?{e(query, quote=True)}#published'>{label}</a>"
+
+    newer = link(pp["page"] - 1, "← newer") if pp["page"] > 1 else ""
+    older = link(pp["page"] + 1, "older →") if pp["page"] < last else ""
+    return f"<p class=pager>{newer} <span class=muted>page {pp['page']} of {last}</span> {older}</p>"
+
+
 def _seg(v: str) -> str:
     """One URL path segment, percent-encoded (a '/' or '?' in a value can't change the route)."""
     return quote(str(v), safe="")
@@ -565,7 +619,7 @@ async def _card(request: Request, it: dict, mode: str) -> str:
 
 
 @router.get("/admin", response_class=HTMLResponse)
-async def admin_page(request: Request):
+async def admin_page(request: Request, page_n: int = Query(1, alias="page"), find: str = ""):
     try:
         require_admin(request)
     except ApiError:
@@ -573,7 +627,7 @@ async def admin_page(request: Request):
             page("terminal art club · admin",
                  "<h1>admin</h1><p class=muted>Sign in with <code>/admin/login?token=…</code>.</p>"), 401
         )
-    q = await _queue(request)
+    q = await _queue(request, page_n, find)
     audit = await request.app.state.db.fetchall("SELECT * FROM audit_log ORDER BY id DESC LIMIT 40")
     st = request.app.state
     spent = await automod_budget.month_spend(st.db)
@@ -585,8 +639,15 @@ async def admin_page(request: Request):
              f"{e(status)}{over}</p>"]
     for key, title, mode in (("in_review", "In review", "review"), ("hidden", "Hidden", "hidden"),
                              ("published", "Published", "published")):
-        parts.append(f"<section><h2>{title} <span class=count>{len(q[key])}</span></h2>")
-        parts.extend([await _card(request, it, mode) for it in q[key]] or ["<p class=muted>empty</p>"])
+        pp = q["published_page"]
+        count = pp["total"] if key == "published" else len(q[key])
+        parts.append(f"<section id={key}><h2>{title} <span class=count>{count}</span></h2>")
+        if key == "published":
+            parts.append(_find_box(pp))
+        parts.extend([await _card(request, it, mode) for it in q[key]]
+                     or [f"<p class=muted>{'no match' if key == 'published' and pp['find'] else 'empty'}</p>"])
+        if key == "published":
+            parts.append(_pager(pp))
         parts.append("</section>")
     ig = "".join(
         f"<tr><td>{e(c['id'])}</td><td>{e(c['title'])}</td><td>{e(c['state'])}</td>"
