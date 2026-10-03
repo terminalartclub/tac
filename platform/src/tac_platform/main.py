@@ -7,11 +7,14 @@ import uvicorn
 
 from .config import Settings
 
-TOKEN_RE = re.compile(r"(token=)[^&\s]+")
+# Query values that must never reach the access log: the admin token (/admin/login?token=), and the OAuth
+# code + state on /v1/auth/web/github/callback and /device/github/callback (single-use, short-lived, still
+# secrets). Matched by parameter name anywhere in the query, so /device?code=<user code> is redacted too.
+TOKEN_RE = re.compile(r"([?&](?:token|code|state)=)[^&\s]*")
 
 
 class RedactTokens(logging.Filter):
-    """Keep /admin/login?token=... out of the access log."""
+    """Redact secret query values (TOKEN_RE) in uvicorn.access lines; the rest of the line is kept."""
 
     def filter(self, record: logging.LogRecord) -> bool:
         if isinstance(record.args, tuple):

@@ -161,7 +161,8 @@ docker run --rm --name tac-render-<random> --network none --read-only --tmpfs /t
     - the `X-TAC-Admin-CSRF: 1` header. The admin page's `act()` sends it, and cross-origin it forces a CORS preflight we never answer;
     - and, when the browser sends `Sec-Fetch-Site`, the value `same-origin`.
   - Header-authenticated calls (`X-Admin-Token`) are exempt: a browser can't attach that header cross-site.
-  - The access log redacts `token=` (`main.RedactTokens`).
+  - The access log redacts the `token`, `code` and `state` query values (`main.RedactTokens`): the admin token and
+    the OAuth code + state on both GitHub callback paths never reach the logs.
   - Still: the token sits in browser history. Prefer the header from scripts. TODO(prod): replace with GitHub OAuth plus an admin allow-list.
 - Owner-only status: another user's submission id returns 404, not 403. Ids are 72-bit random.
 - Pre-publish preview links are HMAC-signed with a per-install secret (in the `kv` table) and expire after 7 days.
