@@ -86,6 +86,20 @@ async def test_hide_needs_admin_and_cookie_csrf(ctx):
             assert r.status_code == 401, path
 
 
+async def test_delete_reason_is_validated_like_hide(ctx):
+    token, sub_id, h, s = await _published(ctx)
+    url = f"/v1/admin/pieces/{h}/{s}/delete"
+    async with ctx.admin() as a:
+        for bad in (None, {}, {"reason": "  "}, {"reason": "x" * 201}):
+            r = await (a.post(url) if bad is None else a.post(url, json=bad))
+            assert r.status_code == 400, bad
+        page = (await a.get("/admin")).text
+        assert re.search(rf"data-act='/v1/admin/pieces/{h}/{s}/delete' data-prompt='[^']*SHOWN TO THE ARTIST", page)
+        assert (await a.post(url, json={"reason": " DMCA-2026-002 "})).status_code == 200
+    async with ctx.client(authorization=f"Bearer {token}") as c:
+        assert (await c.get(f"/v1/submissions/{sub_id}")).json()["reasons"] == ["removed by moderator: DMCA-2026-002"]
+
+
 # ---------------------------------------------------------------- suspend
 
 

@@ -81,7 +81,7 @@ TAC_E2E_URL=http://127.0.0.1:8790 TAC_E2E_ADMIN_TOKEN=t uv run pytest tests/test
 | GET | `/v1/admin/queue` | admin | JSON version of the queue |
 | POST | `/v1/admin/submissions/{id}/approve` · `/reject {reason}` | admin | from `in_review` only (409 otherwise; 409 `user_suspended` if the artist is suspended) |
 | POST | `/v1/admin/pieces/{handle}/{slug}/hide {reason}` | admin | reason required (1-200 chars). Takes the piece off the wall, gallery, community.json, og/share and media now, like a report auto-hide; 409 `not_visible` unless published and visible. Undo = unhide |
-| POST | `/v1/admin/pieces/{handle}/{slug}/unhide` · `/delete {reason}` | admin | delete makes the piece `rejected` and removes its media; unhide 409 `user_suspended` while the artist is suspended. hide and delete return `reminder: "also remove from Instagram"` when the piece is marked IG-posted |
+| POST | `/v1/admin/pieces/{handle}/{slug}/unhide` · `/delete {reason}` | admin | delete reason required (1-200 chars, shown to the artist); delete makes the piece `rejected` and removes its media; unhide 409 `user_suspended` while the artist is suspended. hide and delete return `reminder: "also remove from Instagram"` when the piece is marked IG-posted |
 | POST | `/v1/admin/pieces/{handle}/{slug}/instagram-posted {posted}` | admin | sets/clears `ig_posted_at` (any status), which drives the Instagram reminder |
 | POST | `/v1/admin/users/{handle}/suspend {reason}` · `/unsuspend {reason}` | admin | see Takedowns. Suspend is idempotent: on a suspended user it re-sweeps (hides any visible piece, removes leftover public media) and reports `already_suspended`, `hidden`, `media_removed`, `media_failed`; unsuspend: 409 `not_suspended` |
 | POST | `/v1/admin/users/{handle}/trust {trusted}` | admin | trusted + clean automod means auto-publish |
@@ -109,7 +109,8 @@ The terms promise copyright/hate takedowns within 72 hours and that repeat infri
   target. `/admin/takedowns` lists the last 100: the record to answer a copyright complaint with.
 
 **Moderator runbook.** Reasons are reference IDs only (e.g. `DMCA-2026-001`): no names, emails or
-descriptions of the work. *Copyright email:* hide the piece now with the claim's reference ID as the reason,
+descriptions of the work. The Delete reason is shown to the artist; hide and suspend reasons stay private.
+*Copyright email:* hide the piece now with the claim's reference ID as the reason,
 reply that it's down, then delete if the claim holds or unhide if it doesn't; a second upheld claim against the
 same artist is grounds to suspend. *Hate content:* hide now, then delete, and suspend at once for anything
 deliberate (no strikes needed). *Repeat offender:* suspend with a reason that lists the reference IDs of the

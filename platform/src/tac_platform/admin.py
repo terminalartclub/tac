@@ -235,10 +235,10 @@ async def unhide(handle: str, slug: str, request: Request) -> dict:
 
 
 @router.post("/v1/admin/pieces/{handle}/{slug}/delete")
-async def delete(handle: str, slug: str, request: Request, body: RejectIn | None = None) -> dict:
+async def delete(handle: str, slug: str, body: ReasonIn, request: Request) -> dict:
+    """The reason is shown to the artist ("removed by moderator: <reason>"); hide/suspend reasons are not."""
     require_admin(request)
-    reason = (body or RejectIn(reason="removed")).reason
-    if not await request.app.state.publisher.delete(handle, slug, "admin", reason):
+    if not await request.app.state.publisher.delete(handle, slug, "admin", body.reason):
         raise ApiError(409, "not_published")
     return {"id": f"{handle}/{slug}", "status": "rejected", "reminder": await _ig_reminder(request, handle, slug)}
 
@@ -504,8 +504,8 @@ async def _card(request: Request, it: dict, mode: str) -> str:
         actions = (
             f"{first}{_house_button(it)}{_ig_button(it)}"
             + _ig_posted_button(it["handle"], it["slug"], bool(it["ig_posted_at"])) + suspend
-            + f"<input type=text id='{e(rid)}' placeholder='delete reason'>"
-            + _button("Delete", f"{piece_path}/delete", reason_id=rid, cls="bad")
+            + _button("Delete", f"{piece_path}/delete", cls="bad",
+                      prompt=f"Delete {it['handle']}/{it['slug']}: reason, SHOWN TO THE ARTIST (reference ID only)")
         )
     state = ""
     if it["suspended"]:
