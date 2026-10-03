@@ -13,7 +13,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from . import admin, auth, moderation, render_io, submissions, views
+from . import admin, auth, me, moderation, render_io, submissions, views, web_auth
 from .automod import Automod
 from .config import Settings
 from .db import Database
@@ -27,6 +27,19 @@ log = logging.getLogger("tac")
 BODY_LIMITS = {"/v1/submissions": submissions.MAX_REQUEST}
 DEFAULT_BODY_LIMIT = 64 * 1024
 PUBLIC_PREFIXES = ("/media/", "/v1/community.json")
+NO_CORS_PREFIXES = ("/v1/admin", "/v1/render-io/")  # never readable cross-origin
+CORS_METHODS = b"GET, POST, PATCH, DELETE"
+CORS_HEADERS = b"content-type, x-tac-csrf, authorization"
+
+
+def credentialed_cors(scope, path: str) -> bytes | None:
+    """The request's Origin if it is a configured site origin and the path is a site API path."""
+    if not path.startswith("/v1/") or path.startswith(PUBLIC_PREFIXES) or path.startswith(NO_CORS_PREFIXES):
+        return None
+    origin = dict(scope["headers"]).get(b"origin")
+    if origin and origin.decode("latin-1") in scope["app"].state.settings.site_origins:
+        return origin
+    return None
 
 
 class BodyTooLarge(Exception):
@@ -43,6 +56,15 @@ class LimitsMiddleware:
         if scope["type"] != "http":
             return await self.app(scope, receive, send)
         path = scope["path"]
+        cors_origin = credentialed_cors(scope, path)
+        if scope["method"] == "OPTIONS" and b"access-control-request-method" in dict(scope["headers"]):
+            hdrs = [(b"vary", b"Origin"), (b"content-length", b"0")]
+            if cors_origin:
+                hdrs += [(b"access-control-allow-origin", cors_origin), (b"access-control-allow-credentials", b"true"),
+                         (b"access-control-allow-methods", CORS_METHODS), (b"access-control-allow-headers", CORS_HEADERS),
+                         (b"access-control-max-age", b"600")]
+            await send({"type": "http.response.start", "status": 204, "headers": hdrs})
+            return await send({"type": "http.response.body", "body": b""})
         limit = BODY_LIMITS.get(path, render_io.MAX_PUT if path.startswith("/v1/render-io/") else DEFAULT_BODY_LIMIT)
         headers = dict(scope["headers"])
         length = headers.get(b"content-length")
@@ -70,6 +92,10 @@ class LimitsMiddleware:
                     extra.append((b"access-control-allow-origin", b"*"))
                 else:
                     extra.append((b"x-frame-options", b"DENY"))
+                    extra.append((b"vary", b"Origin"))
+                    if cors_origin:
+                        extra += [(b"access-control-allow-origin", cors_origin),
+                                  (b"access-control-allow-credentials", b"true")]
                 message = {**message, "headers": [*message.get("headers", []), *extra]}
             await send(message)
 
@@ -157,7 +183,8 @@ def create_app(settings: Settings | None = None, automod: Automod | None = None)
     async def healthz() -> dict:
         return {"ok": True}
 
-    for r in (auth.router, submissions.router, moderation.router, views.router, render_io.router, admin.router):
+    for r in (auth.router, web_auth.router, me.router, submissions.router, moderation.router, views.router,
+              render_io.router, admin.router):
         app.include_router(r)
     app.mount("/media", StaticFiles(directory=public_dir), name="media")
     return app

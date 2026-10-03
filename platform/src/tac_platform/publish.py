@@ -59,6 +59,64 @@ class Publisher:
         async with self._media_lock:
             return await self._delete(handle, slug, actor, reason)
 
+    async def unpublish(self, sub_id: str, actor: str) -> dict | None:
+        """Artist takes their own piece down: published (incl. hidden) or in_review -> rejected.
+        Public media and render outputs are deleted; the private upload stays for the audit trail."""
+        async with self._media_lock:
+            row = await self._row(sub_id)
+            if row is None or row["status"] not in ("published", "in_review"):
+                return None
+            was = row["status"]
+            reason = "unpublished by the artist" if was == "published" else "withdrawn by the artist"
+            async with self.db.tx() as tx:
+                ok = await tx.execute(
+                    "UPDATE submissions SET status = 'rejected', hidden = 0, reasons_json = ?, updated_at = ?"
+                    " WHERE id = ? AND status = ?",
+                    (json.dumps([reason]), now_iso(), sub_id, was),
+                )
+                if ok:
+                    await tx.audit(actor, "unpublish", sub_id, was, "rejected", reason)
+            if not ok:
+                return None
+            await self.store.delete_prefix(f"public/{row['handle']}/{row['slug']}")
+            await self.store.delete_prefix(f"submissions/{sub_id}/render")
+            if was == "published":
+                await self.regenerate()
+            return {"id": f"{row['handle']}/{row['slug']}", "status": "rejected"}
+
+    async def delete_account(self, user_id: int, handle: str) -> bool:
+        """Remove a user and everything they own. False if a render is in flight (worker holds a row)."""
+        async with self._media_lock:
+            async with self.db.tx() as tx:
+                if await tx.fetchone(
+                    "SELECT 1 FROM submissions WHERE user_id = ? AND status IN ('queued', 'rendering')", (user_id,)
+                ):
+                    # queued rows would be claimed mid-delete; fail them first, then let the caller retry
+                    await tx.execute(
+                        "UPDATE submissions SET status = 'rejected', reasons_json = '[\"account deleted\"]'"
+                        " WHERE user_id = ? AND status = 'queued'",
+                        (user_id,),
+                    )
+                    if await tx.fetchone(
+                        "SELECT 1 FROM submissions WHERE user_id = ? AND status = 'rendering'", (user_id,)
+                    ):
+                        return False
+                ids = [r[0] for r in await tx.conn.execute_fetchall("SELECT id FROM submissions WHERE user_id = ?", (user_id,))]
+                marks = ",".join("?" * len(ids))
+                if ids:
+                    for table in ("reports", "views", "view_days"):
+                        await tx.execute(f"DELETE FROM {table} WHERE submission_id IN ({marks})", tuple(ids))
+                    await tx.execute(f"DELETE FROM submissions WHERE id IN ({marks})", tuple(ids))
+                for table in ("access_tokens", "web_sessions", "device_codes"):
+                    await tx.execute(f"DELETE FROM {table} WHERE user_id = ?", (user_id,))
+                await tx.execute("DELETE FROM users WHERE id = ?", (user_id,))
+                await tx.audit(f"user:{handle}", "account_deleted", detail=f"{len(ids)} submissions")
+            for sid in ids:
+                await self.store.delete_prefix(f"submissions/{sid}")
+            await self.store.delete_prefix(f"public/{handle}")
+            await self.regenerate()
+            return True
+
     # ------------------------------------------------------------ media
 
     async def _copy_public(self, sub_id: str, handle: str, slug: str) -> None:
@@ -184,7 +242,8 @@ class Publisher:
 
     async def build(self) -> dict:
         rows = await self.db.fetchall(
-            "SELECT s.*, u.handle, u.house_artist FROM submissions s JOIN users u ON u.id = s.user_id"
+            "SELECT s.*, u.handle, u.house_artist, u.display_name, u.bio, u.link"
+            " FROM submissions s JOIN users u ON u.id = s.user_id"
             " WHERE s.status = 'published' AND s.hidden = 0 ORDER BY s.published_at DESC, s.id"
         )
         pieces = []
@@ -225,6 +284,9 @@ class Publisher:
                     "stats": {k: stats[k] for k in STATS_KEYS if k in stats},
                 }
             )
+            if r["display_name"] or r["bio"] or r["link"]:  # optional; JSON-encoded, the site escapes on render
+                pieces[-1]["artist"] = {"display_name": r["display_name"] or "", "bio": r["bio"] or "",
+                                        "link": r["link"] or ""}
         week = iso_week()
         return {
             "generated_at": now_iso(),

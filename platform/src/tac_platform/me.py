@@ -1,0 +1,146 @@
+"""The signed-in artist's own account: profile, unpublish, delete. Cookie (site) or Bearer (plugin)."""
+
+import re
+import unicodedata
+from urllib.parse import urlsplit
+
+from fastapi import APIRouter, Request, Response
+from pydantic import BaseModel, ConfigDict, field_validator
+
+from .auth import current_user
+from .sessions import clear_session_cookie
+from .web import ApiError
+
+router = APIRouter()
+
+# control chars, zero-width and bidi-override characters (spoofing); newlines handled per field
+_CTRL = re.compile("[\\x00-\\x08\\x0b-\\x1f\\x7f\\u200b-\\u200f\\u202a-\\u202e\\u2066-\\u2069]")
+
+
+def _clean(v: str, allow_newlines: bool) -> str:
+    v = unicodedata.normalize("NFC", v)
+    v = v.replace("\r\n", "\n")
+    v = _CTRL.sub("", v if allow_newlines else v.replace("\n", " ").replace("\t", " "))
+    return v.strip()
+
+
+class ProfileIn(BaseModel):
+    """PATCH semantics: omitted = unchanged, "" or null = cleared."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    display_name: str | None = None
+    bio: str | None = None
+    link: str | None = None
+
+    @field_validator("display_name")
+    @classmethod
+    def v_name(cls, v):
+        if v is None:
+            return v
+        v = _clean(v, allow_newlines=False)
+        if len(v) > 40:
+            raise ValueError("display_name is at most 40 characters")
+        return v
+
+    @field_validator("bio")
+    @classmethod
+    def v_bio(cls, v):
+        if v is None:
+            return v
+        v = _clean(v, allow_newlines=True)
+        if len(v) > 280:
+            raise ValueError("bio is at most 280 characters")
+        return v
+
+    @field_validator("link")
+    @classmethod
+    def v_link(cls, v):
+        if v is None or v.strip() == "":
+            return "" if v is not None else None
+        v = v.strip()
+        if len(v) > 200 or any(c.isspace() or ord(c) < 0x20 or ord(c) == 0x7F for c in v):
+            raise ValueError("link must be a single https URL of at most 200 characters")
+        parts = urlsplit(v)
+        if parts.scheme != "https" or not parts.hostname or "." not in parts.hostname or "@" in parts.netloc:
+            raise ValueError("link must be an https:// URL with a host and no credentials")
+        return v
+
+
+class DeleteIn(BaseModel):
+    confirm: str
+
+
+def profile_out(row) -> dict:
+    return {
+        "handle": row["handle"],
+        "display_name": row["display_name"] or "",
+        "bio": row["bio"] or "",
+        "link": row["link"] or "",
+        "created": row["created_at"][:10],
+    }
+
+
+async def _load(request: Request, user_id: int):
+    return await request.app.state.db.fetchone(
+        "SELECT handle, display_name, bio, link, created_at FROM users WHERE id = ?", (user_id,)
+    )
+
+
+@router.get("/v1/me")
+async def get_me(request: Request) -> dict:
+    user = await current_user(request)
+    return profile_out(await _load(request, user["id"]))
+
+
+@router.patch("/v1/me")
+async def patch_me(body: ProfileIn, request: Request) -> dict:
+    user = await current_user(request)
+    changes = body.model_dump(exclude_unset=True)
+    if changes:
+        st = request.app.state
+        cols = ", ".join(f"{k} = ?" for k in changes)  # keys are the model's three field names only
+        async with st.db.tx() as tx:
+            await tx.execute(f"UPDATE users SET {cols} WHERE id = ?", (*[v or None for v in changes.values()], user["id"]))
+            await tx.audit(f"user:{user['handle']}", "profile_update", detail=",".join(sorted(changes)))
+        if await st.db.fetchone(
+            "SELECT 1 FROM submissions WHERE user_id = ? AND status = 'published' AND hidden = 0 LIMIT 1", (user["id"],)
+        ):
+            await st.publisher.regenerate()  # artist block in community.json
+    return profile_out(await _load(request, user["id"]))
+
+
+@router.post("/v1/me/pieces/{piece_id:path}/unpublish")
+async def unpublish(piece_id: str, request: Request) -> dict:
+    """piece_id = the submission id, or "handle/slug" as listed by GET /v1/me/pieces. Owner only."""
+    st = request.app.state
+    user = await current_user(request)
+    if "/" in piece_id:
+        handle, _, slug = piece_id.partition("/")
+        row = await st.db.fetchone(
+            "SELECT s.id FROM submissions s WHERE s.user_id = ? AND s.slug = ? AND ? = ?",
+            (user["id"], slug, handle, user["handle"]),
+        )
+    else:
+        row = await st.db.fetchone("SELECT id FROM submissions WHERE id = ? AND user_id = ?", (piece_id, user["id"]))
+    if row is None:  # not yours == not found
+        raise ApiError(404, "not_found")
+    result = await st.publisher.unpublish(row["id"], f"user:{user['handle']}")
+    if result is None:
+        raise ApiError(409, "not_unpublishable", detail="only published or in-review pieces can be unpublished")
+    return result
+
+
+@router.delete("/v1/me", status_code=204)
+async def delete_me(body: DeleteIn, request: Request) -> Response:
+    st = request.app.state
+    user = await current_user(request)
+    if body.confirm != user["handle"]:
+        raise ApiError(400, "confirm_mismatch", detail="send {\"confirm\": \"<your handle>\"}")
+    if not await st.publisher.delete_account(user["id"], user["handle"]):
+        raise ApiError(409, "busy", detail="a submission is rendering; try again in a few minutes")
+    resp = Response(status_code=204)
+    if user["via"] == "cookie":
+        clear_session_cookie(request, resp)
+    return resp
+

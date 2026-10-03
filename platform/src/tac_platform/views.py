@@ -10,7 +10,9 @@ Retention: per-hash rows are purged after 30 days; the per-day rollup (view_days
 """
 
 import asyncio
+import json
 import logging
+import time
 import secrets
 from datetime import UTC, date, datetime, timedelta
 
@@ -37,27 +39,11 @@ async def day_salt(db: Database, day: str) -> str:
     return (await db.fetchone("SELECT value FROM kv WHERE key = ?", (f"view_salt:{day}",)))["value"]
 
 
-def cors_headers(request: Request) -> dict[str, str]:
-    origin = request.headers.get("origin")
-    headers = {"Vary": "Origin"}
-    if origin and origin in request.app.state.settings.site_origins:
-        headers["Access-Control-Allow-Origin"] = origin
-    return headers
-
-
-@router.options("/v1/pieces/{handle}/{slug}/view", include_in_schema=False)
-async def view_preflight(request: Request) -> Response:
-    headers = cors_headers(request)
-    if "Access-Control-Allow-Origin" in headers:
-        headers |= {"Access-Control-Allow-Methods": "POST", "Access-Control-Max-Age": "86400"}
-    return Response(status_code=204, headers=headers)
-
-
 @router.post("/v1/pieces/{handle}/{slug}/view", status_code=204)
 async def record_view(handle: str, slug: str, request: Request) -> Response:
     """204 for every outcome (counted, duplicate, rate-limited, unknown, hidden): leaks nothing."""
     st = request.app.state
-    resp = Response(status_code=204, headers=cors_headers(request))
+    resp = Response(status_code=204)  # CORS for TAC_SITE_ORIGINS is added by app.LimitsMiddleware
     day = utc_today().isoformat()
     ip_day_hash = sha256_hex(await day_salt(st.db, day) + "|" + client_ip(request, st.settings))[:32]
     if not await take_rate_token(st.db, f"view:{ip_day_hash}", VIEWS_PER_HOUR, 3600):
@@ -113,7 +99,8 @@ async def my_pieces(request: Request) -> dict:
     st = request.app.state
     user = await current_user(request)
     rows = await st.db.fetchall(
-        "SELECT id, slug, title, status, hidden, created_at FROM submissions WHERE user_id = ? ORDER BY created_at DESC",
+        "SELECT id, slug, title, status, hidden, created_at, critique, reasons_json FROM submissions"
+        " WHERE user_id = ? ORDER BY created_at DESC",
         (user["id"],),
     )
     views = await views_summary(st.db, [r["id"] for r in rows])
@@ -129,6 +116,8 @@ async def my_pieces(request: Request) -> dict:
                 "status": "hidden" if r["status"] == "published" and r["hidden"] else r["status"],
                 **views[r["id"]],
                 "url": f"{base}/v1/submissions/{r['id']}",  # status URL (no site piece-page route yet)
+                "critique": r["critique"],
+                "reasons": json.loads(r["reasons_json"]),
             }
             for r in rows
         ],
@@ -141,6 +130,7 @@ async def purge(db: Database) -> None:
     keep_salts = {f"view_salt:{(today - timedelta(days=1)).isoformat()}", f"view_salt:{today.isoformat()}"}
     async with db.tx() as tx:
         n = await tx.execute("DELETE FROM views WHERE day < ?", (cutoff,))
+        await tx.execute("DELETE FROM web_sessions WHERE expires_at < ?", (time.time(),))
         rows = await tx.conn.execute_fetchall("SELECT key FROM kv WHERE key LIKE 'view_salt:%'")
         for (key,) in rows:
             if key not in keep_salts:  # a deleted salt makes that day's hashes irreversible

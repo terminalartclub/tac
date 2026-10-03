@@ -76,7 +76,7 @@ async def test_view_cors_only_site_origins(ctx):
         evil = await c.post(url, headers={"origin": "https://evil.example"})
         assert "access-control-allow-origin" not in evil.headers
         pre = await c.options(url, headers={"origin": "http://localhost:5181", "access-control-request-method": "POST"})
-        assert pre.status_code == 204 and pre.headers["access-control-allow-methods"] == "POST"
+        assert pre.status_code == 204 and "POST" in pre.headers["access-control-allow-methods"]
 
 
 async def test_me_pieces_owner_only_and_series(ctx):
@@ -117,7 +117,10 @@ async def test_me_pieces_contract_shape(ctx):
     body = await _mine(ctx, token)
     assert set(body) == {"pieces"}
     (p,) = body["pieces"]
-    assert set(p) == {"id", "slug", "title", "status", "views_total", "views_7d", "views_28d", "url"}
+    assert set(p) == {"id", "slug", "title", "status", "views_total", "views_7d", "views_28d", "url",
+                      "critique", "reasons"}
+    assert p["critique"] is None or isinstance(p["critique"], str)
+    assert isinstance(p["reasons"], list) and all(isinstance(x, str) for x in p["reasons"])
     assert p["id"] == f"{h}/{s}" and p["slug"] == s and isinstance(p["title"], str)
     assert p["status"] in {"queued", "rendering", "rejected", "in_review", "published", "hidden"}
     assert type(p["views_total"]) is int and type(p["views_7d"]) is int

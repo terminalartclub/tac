@@ -20,6 +20,9 @@ CREATE TABLE IF NOT EXISTS users (
     github_id   INTEGER UNIQUE,
     trusted     INTEGER NOT NULL DEFAULT 0,
     house_artist INTEGER NOT NULL DEFAULT 0,  -- set by admin only; never from submitted meta
+    display_name TEXT,
+    bio          TEXT,
+    link         TEXT,
     created_at  TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS access_tokens (
@@ -27,6 +30,13 @@ CREATE TABLE IF NOT EXISTS access_tokens (
     user_id      INTEGER NOT NULL REFERENCES users(id),
     created_at   TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS web_sessions (
+    session_sha256 TEXT PRIMARY KEY,
+    user_id        INTEGER NOT NULL REFERENCES users(id),
+    created_at     TEXT NOT NULL,
+    expires_at     REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS web_sessions_user ON web_sessions(user_id);
 CREATE TABLE IF NOT EXISTS device_codes (
     device_code_sha256 TEXT PRIMARY KEY,
     user_code          TEXT NOT NULL UNIQUE,
@@ -129,6 +139,9 @@ class Database:
         cols = {r["name"] for r in await self.fetchall("PRAGMA table_info(users)")}
         if "house_artist" not in cols:
             await self.conn.execute("ALTER TABLE users ADD COLUMN house_artist INTEGER NOT NULL DEFAULT 0")
+        for col in ("display_name", "bio", "link"):
+            if col not in cols:
+                await self.conn.execute(f"ALTER TABLE users ADD COLUMN {col} TEXT")
 
     async def close(self) -> None:
         if self._conn is not None:

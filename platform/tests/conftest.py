@@ -99,8 +99,7 @@ async def make_ctx(tmp_path: Path, automod_client=None, **overrides) -> AsyncIte
         tools_dir=FIXTURES / "tools",
         admin_token=ADMIN,
         anthropic_api_key_present=False,
-        auth_mode="dev",
-        **overrides,
+        **{"auth_mode": "dev", **overrides},
     )
     automod = Automod(settings, client=automod_client)
     app = create_app(settings, automod=automod)

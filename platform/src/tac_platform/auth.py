@@ -18,6 +18,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from .db import now_iso
 from .models import HANDLE_RE, DeviceCodeOut, TokenIn, TokenOut
+from .sessions import cookie_secure, require_csrf, session_row
 from .web import ApiError, ip_key, page, sha256_hex, take_rate_token
 
 router = APIRouter()
@@ -38,9 +39,19 @@ def normalize_user_code(value: str) -> str:
 
 
 async def current_user(request: Request) -> dict:
-    """Bearer token -> {id, handle, trusted}. Raises 401."""
+    """Bearer token (plugin) or `tac_session` cookie (site) -> {id, handle, trusted, via}. Raises 401.
+
+    A Bearer header, when present, wins and is never CSRF-checked (browsers can't attach it
+    cross-site). Cookie auth on a state-changing method must pass require_csrf.
+    """
     header = request.headers.get("authorization", "")
     scheme, _, token = header.partition(" ")
+    if not header:
+        row = await session_row(request)
+        if row is None:
+            raise ApiError(401, "missing_token")
+        require_csrf(request, row["session_sha256"])
+        return {"id": row["id"], "handle": row["handle"], "trusted": row["trusted"], "via": "cookie"}
     if scheme.lower() != "bearer" or not token.strip():
         raise ApiError(401, "missing_token")
     row = await request.app.state.db.fetchone(
@@ -50,7 +61,7 @@ async def current_user(request: Request) -> dict:
     )
     if row is None:
         raise ApiError(401, "invalid_token")
-    return dict(row)
+    return {**dict(row), "via": "bearer"}
 
 
 @router.post("/v1/auth/device", response_model=DeviceCodeOut)
@@ -115,12 +126,6 @@ async def poll_token(body: TokenIn, request: Request):
         )
         await tx.audit(f"user:{row['handle']}", "login")
     return TokenOut(access_token=token, handle=row["handle"])
-
-
-@router.get("/v1/me")
-async def me(request: Request) -> dict:
-    user = await current_user(request)
-    return {"handle": user["handle"]}
 
 
 # ---------------------------------------------------------------- verification page
@@ -220,6 +225,45 @@ def _sign(value: str, secret: str) -> str:
     return hmac.new(secret.encode(), value.encode(), "sha256").hexdigest()[:32]
 
 
+async def github_identity(st, code: str) -> tuple[int, str] | None:
+    """OAuth code -> (github user id, lowercased login), or None if GitHub refused."""
+    async with httpx.AsyncClient(timeout=10) as client:
+        tok = await client.post(
+            "https://github.com/login/oauth/access_token",
+            data={
+                "client_id": st.settings.github_client_id,
+                "client_secret": st.settings.github_client_secret,
+                "code": code,
+            },
+            headers={"Accept": "application/json"},
+        )
+        gh_token = tok.json().get("access_token")
+        if not gh_token:
+            return None
+        prof = (
+            await client.get(
+                "https://api.github.com/user",
+                headers={"Authorization": f"Bearer {gh_token}", "Accept": "application/vnd.github+json"},
+            )
+        ).json()
+    return int(prof["id"]), str(prof["login"]).lower()
+
+
+async def user_for_github(st, gh_id: int, login: str):
+    """The user bound to this GitHub id; created on first login when the login is a free, valid handle."""
+    async with st.db.tx() as tx:
+        row = await tx.fetchone("SELECT id, handle FROM users WHERE github_id = ?", (gh_id,))
+        if row is not None:
+            return row
+        if not HANDLE_RE.match(login) or login in RESERVED_HANDLES or await tx.fetchone(
+            "SELECT 1 FROM users WHERE handle = ?", (login,)
+        ):
+            return None
+        await tx.execute("INSERT INTO users (handle, github_id, created_at) VALUES (?, ?, ?)", (login, gh_id, now_iso()))
+        await tx.audit(f"user:{login}", "user_created", detail=f"github:{gh_id}")
+        return await tx.fetchone("SELECT id, handle FROM users WHERE github_id = ?", (gh_id,))
+
+
 @router.post("/device/github")
 async def github_start(request: Request, user_code: str = Form("")):
     st = request.app.state
@@ -243,7 +287,7 @@ async def github_start(request: Request, user_code: str = Form("")):
         }
     )
     resp = RedirectResponse(f"https://github.com/login/oauth/authorize?{query}", status_code=303)
-    resp.set_cookie("tac_gh_nonce", nonce, max_age=600, httponly=True, samesite="lax", secure=True)
+    resp.set_cookie("tac_gh_nonce", nonce, max_age=600, httponly=True, samesite="lax", secure=cookie_secure(request))
     return resp
 
 
@@ -259,39 +303,11 @@ async def github_callback(request: Request, code: str = "", state: str = ""):
         or request.cookies.get("tac_gh_nonce") != nonce
     ):
         return HTMLResponse(_device_form(error="Login state mismatch. Start again.", github=True), 400)
-    async with httpx.AsyncClient(timeout=10) as client:
-        tok = await client.post(
-            "https://github.com/login/oauth/access_token",
-            data={
-                "client_id": st.settings.github_client_id,
-                "client_secret": st.settings.github_client_secret,
-                "code": code,
-            },
-            headers={"Accept": "application/json"},
-        )
-        gh_token = tok.json().get("access_token")
-        if not gh_token:
-            return HTMLResponse(_device_form(error="GitHub did not authorize.", github=True), 400)
-        prof = (
-            await client.get(
-                "https://api.github.com/user",
-                headers={"Authorization": f"Bearer {gh_token}", "Accept": "application/vnd.github+json"},
-            )
-        ).json()
-    gh_id, login = int(prof["id"]), str(prof["login"]).lower()
-    async with st.db.tx() as tx:
-        row = await tx.fetchone("SELECT id, handle FROM users WHERE github_id = ?", (gh_id,))
-        if row is None:
-            if not HANDLE_RE.match(login) or login in RESERVED_HANDLES or await tx.fetchone(
-                "SELECT 1 FROM users WHERE handle = ?", (login,)
-            ):
-                row = None
-            else:
-                await tx.execute(
-                    "INSERT INTO users (handle, github_id, created_at) VALUES (?, ?, ?)", (login, gh_id, now_iso())
-                )
-                await tx.audit(f"user:{login}", "user_created", detail=f"github:{gh_id}")
-                row = await tx.fetchone("SELECT id, handle FROM users WHERE github_id = ?", (gh_id,))
+    ident = await github_identity(st, code)
+    if ident is None:
+        return HTMLResponse(_device_form(error="GitHub did not authorize.", github=True), 400)
+    gh_id, login = ident
+    row = await user_for_github(st, gh_id, login)
     if row is None:
         return HTMLResponse(_device_form(error=f"Handle '{login}' is unavailable (TODO: pick one).", github=True), 409)
     if not await _approve(request, user_code, row["id"], row["handle"]):

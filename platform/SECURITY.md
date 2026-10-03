@@ -122,7 +122,9 @@ docker run --rm --name tac-render-<random> --network none --read-only --tmpfs /t
 - Device code: 32 random bytes, stored as sha256. The user code is 8 chars over the 20-letter RFC 8628 alphabet (20^8 ≈ 2.6e10), lives 10 min, and the form allows 10 attempts per 10 min per IP. Brute force is out of reach.
 - A device code is consumed exactly once (compare-and-swap `approved → consumed`). Replays get 410.
 - Access tokens: 32 random bytes (`secrets.token_urlsafe`). The DB keeps only sha256, so a DB leak does not leak usable tokens. They don't expire yet (TODO: expiry + revoke endpoint).
-- Dev mode: whoever enters the code picks any free handle. There is no re-login into an existing handle. Dev mode is for local use only. Prod uses `TAC_AUTH=github`, where the handle is the GitHub login.
+- Dev mode, device flow: whoever enters the code picks any free handle; there is no re-login into an existing handle.
+- Dev mode, web login: signs in as any handle, existing or new.
+- Dev mode is local-only, and `TAC_ENV=prod` refuses to start without `TAC_AUTH=github`, where the handle is the GitHub login.
 - Inherent to device flow: a phished user code can approve an attacker's device. The page shows nothing about the requesting device yet (TODO: show request time/IP region).
 - Admin:
   - The token is compared in constant time.
@@ -138,6 +140,43 @@ docker run --rm --name tac-render-<random> --network none --read-only --tmpfs /t
   - They are issued only while the status is queued, rendering or in_review.
   - On every fetch the status is re-checked: queued/rendering/in_review, or published and not hidden. A rejected, deleted or hidden piece stops serving even through a still-valid link.
   - Signatures are compared as bytes, so a non-ASCII `sig` gets 403, not 500.
+
+### Web sessions (site sign-in)
+
+- **Cookie:** `tac_session` = 32 random bytes; the DB stores only sha256.
+  - 30-day expiry, enforced server-side. Expired rows are purged hourly.
+  - Rotated on every login: a session presented at login is revoked.
+  - Logout deletes the row.
+  - Flags: `HttpOnly; SameSite=Lax; Path=/`, plus `Secure` in prod (or with an https base URL). `Domain` comes from `TAC_COOKIE_DOMAIN` (`.terminalart.club` in prod, host-only in dev).
+- **Same user records as the plugin.** One account can be authenticated three ways:
+  - plugin: a Bearer token;
+  - site: the session cookie;
+  - prod web login: GitHub id → handle, same as the device flow.
+- **CSRF** for cookie-authenticated state changes (POST/PATCH/DELETE). Both checks are enforced centrally in `auth.current_user`:
+  - `X-TAC-CSRF` must equal `HMAC(install secret, "csrf|" + sha256(session))`. The site reads it from `GET /v1/auth/web/csrf`, which needs the cookie and is CORS-readable only by `TAC_SITE_ORIGINS`.
+  - `Sec-Fetch-Site`, when the browser sends it, must be `same-origin` or `same-site`.
+  - SameSite=Lax alone would still let a same-site sibling (any `*.terminalart.club`) or a top-level GET through; the header closes that.
+  - Bearer requests are exempt: a browser never attaches the header on its own.
+- **Login CSRF:** a dev login POST with `Sec-Fetch-Site: cross-site` is refused. In GitHub mode, the OAuth `state` is HMAC-signed and bound to a nonce cookie scoped to `/v1/auth/web/`.
+- **Open redirect:**
+  - `return` must be a relative path: it starts with exactly one `/`, has no backslash, whitespace or control chars, no scheme or host, and is ≤ 512 chars. Anything else becomes `/`.
+  - The redirect target is `TAC_SITE_URL` (config) + that path.
+  - Tested against `//evil`, `/\evil`, `/\t/evil`, `https://evil` and `javascript:`.
+- **CORS:** `Access-Control-Allow-Origin: <origin>` + `Allow-Credentials: true` is sent only when Origin is in `TAC_SITE_ORIGINS`, and only on `/v1/*` site paths. Never on `/v1/admin*` or `/v1/render-io/*`. `community.json` and `/media` stay `*` without credentials.
+- **Login rate limits:** dev form 10 per 10 min per IP (salted hash). GitHub redirect 20 per 10 min per IP.
+- **Profile fields** (`display_name` ≤ 40, `bio` ≤ 280, `link` https only, ≤ 200, no userinfo, no whitespace):
+  - Control, zero-width and bidi-override characters are stripped; unknown keys are refused.
+  - They are stored as typed. The admin HTML escapes them (tested with `<script>`).
+  - `community.json` carries them as JSON strings in `artist`. The site must render them as text, never as HTML, and give the link `rel="nofollow noopener ugc"`.
+- **Unpublish:**
+  - Owner only; someone else's piece returns 404, not 403.
+  - Published or in_review → `rejected` with the reason recorded. Public media and render outputs are deleted.
+  - The private upload stays for the audit trail until the account is deleted. Audit-logged as the user.
+- **Account deletion:**
+  - Needs `{"confirm": "<handle>"}`.
+  - In one transaction it deletes the user, submissions, reports, views and rollups, Bearer tokens, web sessions and device codes. Then it removes all media and regenerates `community.json`.
+  - Refused with 409 while a render is in flight, so the worker can't write files for a deleted user.
+  - The audit log keeps rows naming the handle: the operational record, no content.
 
 ## 4. Rate limits and abuse
 

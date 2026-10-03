@@ -47,6 +47,8 @@ class Settings:
     anthropic_api_key_present: bool = False
 
     site_origins: tuple[str, ...] = ("http://localhost:5181", "https://terminalart.club")
+    site_url: str = ""  # web login redirects to site_url + return path; "" = relative (dev proxy)
+    cookie_domain: str = ""  # prod: .terminalart.club
     trust_proxy: bool = False  # honour Fly-Client-IP / X-Forwarded-For
     worker_enabled: bool = True
     submissions_per_day: int = 3
@@ -56,6 +58,8 @@ class Settings:
 
     def check_prod_safety(self) -> None:
         """Refuse to run in prod while renders would execute untrusted code unisolated on the API host."""
+        if self.env == "prod" and self.auth_mode != "github":
+            raise RuntimeError("TAC_ENV=prod requires TAC_AUTH=github: dev login lets anyone claim any handle")
         if self.env == "prod" and self.renderer not in ISOLATED_RENDERERS:
             raise RuntimeError(
                 f"TAC_ENV=prod refuses TAC_RENDERER={self.renderer!r}: the local subprocess renderer is not a "
@@ -97,6 +101,8 @@ class Settings:
                 for o in _env("TAC_SITE_ORIGINS", "http://localhost:5181,https://terminalart.club").split(",")
                 if o.strip()
             ),
+            site_url=_env("TAC_SITE_URL", "").rstrip("/"),
+            cookie_domain=_env("TAC_COOKIE_DOMAIN", ""),
             trust_proxy=_env("TAC_TRUST_PROXY", "0") == "1",
             worker_enabled=_env("TAC_WORKER", "1") == "1",
         )

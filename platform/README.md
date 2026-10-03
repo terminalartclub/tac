@@ -56,7 +56,15 @@ TAC_E2E_URL=http://127.0.0.1:8790 TAC_E2E_ADMIN_TOKEN=t uv run pytest tests/test
 | POST | `/v1/auth/device` | none | `{device_code, user_code, verification_uri, interval: 3, expires_in: 600}`; 30/h per IP |
 | POST | `/v1/auth/token` | none | `{device_code}`. 428 pending, 200 `{access_token, handle}`, 410 expired/used, 400 unknown |
 | GET/POST | `/device` | none | dev: code + handle form (10 tries / 10 min per IP); github: code, then OAuth |
-| GET | `/v1/me` | Bearer | `{handle}` |
+| GET | `/v1/auth/web/login?return=/path` | none | site sign-in. dev: handle form · github: OAuth redirect. Sets `tac_session` and 303s to `TAC_SITE_URL + return` (relative paths only) |
+| POST | `/v1/auth/web/login` | none | dev form submit (10 per 10 min per IP) |
+| GET | `/v1/auth/web/github/callback` | none | github mode OAuth return |
+| GET | `/v1/auth/web/csrf` | cookie | `{csrf, header: "X-TAC-CSRF"}` for cookie-authenticated state changes |
+| POST | `/v1/auth/web/logout` | cookie + CSRF | revokes the session, clears the cookie |
+| GET | `/v1/me` | cookie or Bearer | `{handle, display_name, bio, link, created}` |
+| PATCH | `/v1/me` | cookie+CSRF or Bearer | `{display_name ≤ 40, bio ≤ 280, link: https ≤ 200}`. Omitted = unchanged, `""`/null = cleared, unknown keys = 400 |
+| DELETE | `/v1/me` | cookie+CSRF or Bearer | `{"confirm": "<handle>"}`. Deletes the account, pieces, media, sessions and tokens; 409 while a render is running |
+| POST | `/v1/me/pieces/{id or handle/slug}/unpublish` | cookie+CSRF or Bearer, owner | published or in_review → rejected ("unpublished/withdrawn by the artist"); public + render media deleted |
 | POST | `/v1/submissions` | Bearer | multipart `piece`, `meta`, `notes?`, `process[≤4]`. 202 `{id, status, url}` |
 | GET | `/v1/submissions/{id}` | Bearer, owner | `{id, status, reasons, preview_url, critique}`; others get 404 |
 | GET | `/v1/submissions/{id}/preview.webp` | signed URL | pre-publish preview (HMAC, 7-day expiry) |
@@ -64,7 +72,7 @@ TAC_E2E_URL=http://127.0.0.1:8790 TAC_E2E_ADMIN_TOKEN=t uv run pytest tests/test
 | GET | `/media/{handle}/{slug}/...` | none | preview.webp, og.jpg, piece.py, process/NN.webp |
 | POST | `/v1/pieces/{handle}/{slug}/report` | none | `{reason}`; 5/h per IP; 3 distinct IPs hide the piece |
 | POST | `/v1/pieces/{handle}/{slug}/view` | none | private view count; 204 always (see below) |
-| GET | `/v1/me/pieces` | Bearer | own pieces: `{pieces: [{id: "handle/slug", slug, title, status (+ "hidden"), views_total, views_7d, views_28d[28 ints, oldest→newest, last = today UTC], url}]}` (pinned with the plugin) |
+| GET | `/v1/me/pieces` | cookie or Bearer | own pieces: `{pieces: [{id: "handle/slug", slug, title, status (+ "hidden"), views_total, views_7d, views_28d[28 ints, oldest→newest, last = today UTC], url, critique, reasons}]}` (pinned with the plugin) |
 | GET | `/admin`, `/admin/login?token=` | admin | HTML queue: in review, hidden, published, audit log |
 | GET | `/v1/admin/queue` | admin | JSON version of the queue |
 | POST | `/v1/admin/submissions/{id}/approve` · `/reject {reason}` | admin | from `in_review` only (409 otherwise) |
@@ -73,6 +81,21 @@ TAC_E2E_URL=http://127.0.0.1:8790 TAC_E2E_ADMIN_TOKEN=t uv run pytest tests/test
 | POST | `/v1/admin/users/{handle}/house {house}` | admin | sets `house_artist` on all of that handle's pieces in community.json; clients can't set it (ignored in meta) |
 
 Errors are always `{"error": "<code>", "detail"?: ...}`. Admin auth is the `X-Admin-Token` header or the `tac_admin` cookie. Cookie-authenticated POSTs also need `X-TAC-Admin-CSRF: 1`.
+
+## Web sign-in (site)
+
+```
+site ──GET /api/v1/auth/web/login?return=/me──▶ dev: handle form ─POST─┐   prod: GitHub OAuth ─callback─┐
+                                                                        ▼                                ▼
+                          user (same row as the plugin's device login) ─▶ session: 32 random bytes in cookie,
+                          sha256 in DB, 30 days, rotated on login ─▶ Set-Cookie tac_session (HttpOnly, SameSite=Lax,
+                          Path=/, Secure in prod, Domain=TAC_COOKIE_DOMAIN) ─▶ 303 TAC_SITE_URL + return
+site JS: GET /api/v1/auth/web/csrf → X-TAC-CSRF on every PATCH/POST/DELETE made with the cookie
+```
+
+- **Dev:** the site's vite dev server proxies `/api` → `http://127.0.0.1:8790` (the site builder adds the proxy). So the cookie is first-party on `localhost:5181`, and `TAC_SITE_URL` / `TAC_COOKIE_DOMAIN` stay unset.
+- Dev login lets anyone sign in as any handle, existing or new; it is for local use only. `TAC_ENV=prod` refuses to start unless `TAC_AUTH=github`.
+- **GitHub OAuth app:** set the authorization callback URL to `TAC_PUBLIC_BASE_URL`. Both `/device/github/callback` and `/v1/auth/web/github/callback` are sub-paths of it, which GitHub accepts.
 
 ## Submission meta
 
@@ -134,7 +157,9 @@ site ──POST /v1/pieces/h/s/view──▶ day_salt(UTC day) ─▶ hash = sha
 | `TAC_THEMES_FILE` | `platform/themes.json` | `{"2026-W40": {"title", "blurb"}}`, upserted at startup |
 | `ANTHROPIC_API_KEY` | unset | enables automod; never passed to renders |
 | `TAC_AUTOMOD_MODEL` / `TAC_AUTOMOD_EFFORT` | `claude-opus-5-5` / `low` | |
-| `TAC_SITE_ORIGINS` | `http://localhost:5181,https://terminalart.club` | origins allowed to POST views cross-origin |
+| `TAC_SITE_ORIGINS` | `http://localhost:5181,https://terminalart.club` | the only origins that get credentialed CORS on `/v1/*` (never `/v1/admin`, `/v1/render-io`) |
+| `TAC_SITE_URL` | unset | web login redirects to `TAC_SITE_URL + return`; unset = relative (dev proxy). Prod: `https://terminalart.club` |
+| `TAC_COOKIE_DOMAIN` | unset | `tac_session` cookie domain. Prod: `.terminalart.club`; dev: unset (host-only) |
 | `TAC_TRUST_PROXY` | `0` | `1` = take the client IP from `Fly-Client-IP` / `X-Forwarded-For` (only behind Fly's proxy) |
 | `TAC_WORKER` | `1` | `0` = don't start the in-process pipeline worker |
 
