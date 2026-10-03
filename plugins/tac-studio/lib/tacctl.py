@@ -13,7 +13,7 @@
     tacctl play <name>                 print the live `tac play` command, build + open the review page
     tacctl gallery                     curated pieces (house artists, club picks) as handle/slug lines
 
-Env: TAC_API (default http://127.0.0.1:8790), TAC_WORK (default ./tac-work), TAC_SITE_URL (optional:
+Env: TAC_API (default https://api.terminalart.club; dev: http://127.0.0.1:8790), TAC_WORK (default ./tac-work), TAC_SITE_URL (optional:
 the gallery site's origin, for trusting piece links; default = the API host's last two labels).
 """
 
@@ -46,7 +46,7 @@ import check_piece  # noqa: E402
 import meta as metamod  # noqa: E402
 import notes as notesmod  # noqa: E402
 
-DEFAULT_API = "http://127.0.0.1:8790"
+DEFAULT_API = "https://api.terminalart.club"  # the public platform; TAC_API overrides (dev: http://127.0.0.1:8790)
 PROCESS_W = 540
 # Same patterns as platform/src/tac_platform/models.py (HANDLE_RE, SLUG_RE); tests pin them equal.
 HANDLE_RE = re.compile(r"^[a-z0-9-]{2,24}$")

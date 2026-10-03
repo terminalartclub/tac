@@ -12,7 +12,8 @@ This logs in to the TAC community platform only. It never reads or touches Anthr
    the code is approved and saves the token to `~/.config/tac/credentials.json` (mode 600).
 3. Report the handle it prints. If it fails or expires, show the error and offer to start again.
 
-If `TAC_API` is set in the environment, that platform is used (default `http://127.0.0.1:8790`).
+If `TAC_API` is set in the environment, that platform is used (default: the public platform,
+`https://api.terminalart.club`; a local dev platform is `TAC_API=http://127.0.0.1:8790`).
 It must be `https://`; plain `http://` is refused except on localhost. tacctl opens the browser only
 for pages on that same host, over https, or plain http when the API is a loopback dev address (localhost,
 127.0.0.1, ::1); for anything else it does not open the browser.
