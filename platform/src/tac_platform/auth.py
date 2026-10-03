@@ -7,6 +7,7 @@ Tokens are 32 random bytes; the DB stores only sha256(token).
 
 import hmac
 import html
+import logging
 import secrets
 import sqlite3
 import time
@@ -22,6 +23,7 @@ from .sessions import cookie_secure, require_csrf, session_row
 from .web import ApiError, ip_key, page, sha256_hex, take_rate_token
 
 router = APIRouter()
+log = logging.getLogger("tac.auth")
 
 USER_CODE_ALPHABET = "BCDFGHJKLMNPQRSTVWXZ"  # RFC 8628 §6.1: no vowels, no look-alikes
 DEVICE_TTL_S = 600
@@ -225,28 +227,43 @@ def _sign(value: str, secret: str) -> str:
     return hmac.new(secret.encode(), value.encode(), "sha256").hexdigest()[:32]
 
 
+def _github_client() -> httpx.AsyncClient:
+    return httpx.AsyncClient(timeout=10)
+
+
 async def github_identity(st, code: str) -> tuple[int, str] | None:
-    """OAuth code -> (github user id, lowercased login), or None if GitHub refused."""
-    async with httpx.AsyncClient(timeout=10) as client:
-        tok = await client.post(
-            "https://github.com/login/oauth/access_token",
-            data={
-                "client_id": st.settings.github_client_id,
-                "client_secret": st.settings.github_client_secret,
-                "code": code,
-            },
-            headers={"Accept": "application/json"},
-        )
-        gh_token = tok.json().get("access_token")
-        if not gh_token:
-            return None
-        prof = (
-            await client.get(
+    """OAuth code -> (github user id, lowercased login), or None if GitHub refused, failed or answered garbage."""
+    try:
+        async with _github_client() as client:
+            tok = await client.post(
+                "https://github.com/login/oauth/access_token",
+                data={
+                    "client_id": st.settings.github_client_id,
+                    "client_secret": st.settings.github_client_secret,
+                    "code": code,
+                },
+                headers={"Accept": "application/json"},
+            )
+            if tok.status_code != 200:
+                return None
+            body = tok.json()
+            gh_token = body.get("access_token") if isinstance(body, dict) else None
+            if not isinstance(gh_token, str) or not gh_token:
+                return None
+            resp = await client.get(
                 "https://api.github.com/user",
                 headers={"Authorization": f"Bearer {gh_token}", "Accept": "application/vnd.github+json"},
             )
-        ).json()
-    return int(prof["id"]), str(prof["login"]).lower()
+            if resp.status_code != 200:
+                return None
+            prof = resp.json()
+            gh_id, login = prof["id"], prof["login"]
+            if isinstance(gh_id, bool) or not isinstance(gh_id, int) or not isinstance(login, str):
+                return None
+    except (httpx.HTTPError, ValueError, KeyError, TypeError) as e:  # ValueError covers JSONDecodeError
+        log.warning("github identity lookup failed: %s", type(e).__name__)
+        return None
+    return gh_id, login.lower()
 
 
 async def user_for_github(st, gh_id: int, login: str):

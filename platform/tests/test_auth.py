@@ -1,5 +1,13 @@
+import json
 import re
+from types import SimpleNamespace
+from urllib.parse import parse_qs, urlsplit
 
+import httpx
+import pytest
+
+from conftest import make_ctx
+from tac_platform import auth
 from tac_platform.web import sha256_hex
 
 
@@ -73,3 +81,74 @@ async def test_device_form_rate_limited(ctx):
         codes = [r.status_code for r in [await c.post("/device", data={"user_code": "BBBB-BBBB", "handle": "xx"})
                                          for _ in range(11)]]
     assert codes[:10] == [400] * 10 and codes[10] == 429
+
+
+# ---------------------------------------------------------------- github_identity against a misbehaving GitHub
+
+GH_TOKEN_URL = "https://github.com/login/oauth/access_token"
+
+
+def _github(token_resp, user_resp=None):
+    """MockTransport: token endpoint -> token_resp, /user -> user_resp. A callable raises/returns per request."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        resp = token_resp if str(request.url) == GH_TOKEN_URL else user_resp
+        return resp(request) if callable(resp) else resp
+
+    return lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler), timeout=10)
+
+
+def _timeout(request):
+    raise httpx.ReadTimeout("timed out", request=request)
+
+
+def _json_resp(status, body):
+    return httpx.Response(status, content=json.dumps(body).encode(), headers={"content-type": "application/json"})
+
+
+OK_TOKEN = _json_resp(200, {"access_token": "gho_x"})
+GITHUB_FAILURES = {
+    "token_not_json": (httpx.Response(200, text="<html>rate limited</html>"), None),
+    "token_5xx": (httpx.Response(502, text="bad gateway"), None),
+    "token_error_body": (_json_resp(200, {"error": "bad_verification_code"}), None),
+    "token_json_list": (_json_resp(200, ["x"]), None),
+    "token_timeout": (_timeout, None),
+    "user_401_no_id": (OK_TOKEN, _json_resp(401, {"message": "Bad credentials"})),
+    "user_200_no_id": (OK_TOKEN, _json_resp(200, {"login": "alex"})),
+    "user_not_json": (OK_TOKEN, httpx.Response(200, text="oops")),
+    "user_id_not_int": (OK_TOKEN, _json_resp(200, {"id": "12", "login": "alex"})),
+    "user_timeout": (OK_TOKEN, _timeout),
+    "connect_error": (lambda r: (_ for _ in ()).throw(httpx.ConnectError("refused", request=r)), None),
+}
+ST = SimpleNamespace(settings=SimpleNamespace(github_client_id="cid", github_client_secret="sec"))
+
+
+@pytest.mark.parametrize("case", sorted(GITHUB_FAILURES))
+async def test_github_identity_failures_return_none(case, monkeypatch):
+    monkeypatch.setattr(auth, "_github_client", _github(*GITHUB_FAILURES[case]))
+    assert await auth.github_identity(ST, "code") is None
+
+
+async def test_github_identity_ok(monkeypatch):
+    monkeypatch.setattr(auth, "_github_client", _github(OK_TOKEN, _json_resp(200, {"id": 7, "login": "Alex"})))
+    assert await auth.github_identity(ST, "code") == (7, "alex")
+
+
+@pytest.mark.parametrize("case", ["token_not_json", "user_200_no_id", "user_timeout"])
+async def test_github_callbacks_clean_400_on_github_failure(case, tmp_path, monkeypatch):
+    monkeypatch.setattr(auth, "_github_client", _github(*GITHUB_FAILURES[case]))
+    async with make_ctx(tmp_path, worker_enabled=False, auth_mode="github", github_client_id="cid") as ctx:
+        async with ctx.client() as c:
+            # web sign-in callback
+            r = await c.get("/v1/auth/web/login", params={"return": "/me"})
+            state = parse_qs(urlsplit(r.headers["location"]).query)["state"][0]
+            cb = await c.get("/v1/auth/web/github/callback", params={"code": "x", "state": state})
+            assert cb.status_code == 400 and "GitHub did not authorize" in cb.text
+            assert "tac_session" not in cb.headers.get("set-cookie", "")
+            # device-flow callback
+            d = (await c.post("/v1/auth/device", json={})).json()
+            r = await c.post("/device/github", data={"user_code": d["user_code"]})
+            state = parse_qs(urlsplit(r.headers["location"]).query)["state"][0]
+            cb = await c.get("/device/github/callback", params={"code": "x", "state": state})
+            assert cb.status_code == 400 and "GitHub did not authorize" in cb.text
+            assert (await c.post("/v1/auth/token", json={"device_code": d["device_code"]})).status_code == 428
