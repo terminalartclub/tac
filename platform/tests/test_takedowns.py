@@ -712,6 +712,14 @@ async def test_every_published_piece_is_reachable_by_page_or_find(ctx, monkeypat
         assert hide(h, s1) in page and "<form class=find method=get" in page
 
 
+async def test_admin_page_number_is_clamped(ctx):
+    async with ctx.admin() as a:
+        for n, want in ((10**30, 10**6), (-5, 1), (0, 1)):
+            r = await a.get("/v1/admin/queue", params={"page": n})
+            assert r.status_code == 200 and r.json()["published_page"]["page"] == want, n
+            assert (await a.get("/admin", params={"page": n})).status_code == 200
+
+
 # ---------------------------------------------------------------- migration
 
 

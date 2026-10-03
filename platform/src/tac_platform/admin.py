@@ -92,6 +92,7 @@ def _high_tokens(meta_json: str) -> bool:
 
 
 PER_PAGE = 50
+MAX_PAGE = 10**6
 
 
 def _find_terms(q: str) -> tuple[str, str]:
@@ -130,7 +131,7 @@ async def _queue(request: Request, page: int = 1, find: str = "") -> dict:
         where += (" AND (u.handle = ? OR u.handle || '/' || s.slug = ? OR s.slug LIKE ? ESCAPE '\\'"
                   " OR s.title LIKE ? ESCAPE '\\')")
         params = (exact, exact, like, like)
-    page = max(1, page)
+    page = min(max(1, page), MAX_PAGE)  # OFFSET must stay inside SQLite's 64-bit integer
     total = (await db.fetchone(
         f"SELECT COUNT(*) AS n FROM submissions s JOIN users u ON u.id = s.user_id WHERE {where}", params))["n"]
     published = await db.fetchall(
