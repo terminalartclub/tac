@@ -5,6 +5,7 @@ replacing this module with an asyncpg-backed one exposing the same five methods.
 """
 
 import asyncio
+import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -101,7 +102,8 @@ CREATE TABLE IF NOT EXISTS audit_log (
     from_status   TEXT,
     to_status     TEXT,
     detail        TEXT,
-    target        TEXT   -- what a moderation action hit: "handle/slug" or "handle" (survives row deletes)
+    target        TEXT,  -- what a moderation action hit: "handle/slug" or "handle" (survives row deletes)
+    data_json     TEXT   -- structured extras, e.g. delete_account {"ig": ["handle/slug", ...]}
 );
 CREATE TABLE IF NOT EXISTS views (          -- per-viewer dedupe; purged after 30 days
     submission_id TEXT NOT NULL,
@@ -176,8 +178,10 @@ class Database:
                 await self.conn.execute(f"ALTER TABLE users ADD COLUMN {col} TEXT")
         if "ig_posted_at" not in {r["name"] for r in await self.fetchall("PRAGMA table_info(submissions)")}:
             await self.conn.execute("ALTER TABLE submissions ADD COLUMN ig_posted_at TEXT")
-        if "target" not in {r["name"] for r in await self.fetchall("PRAGMA table_info(audit_log)")}:
-            await self.conn.execute("ALTER TABLE audit_log ADD COLUMN target TEXT")
+        audit_cols = {r["name"] for r in await self.fetchall("PRAGMA table_info(audit_log)")}
+        for col in ("target", "data_json"):
+            if col not in audit_cols:
+                await self.conn.execute(f"ALTER TABLE audit_log ADD COLUMN {col} TEXT")
 
     async def close(self) -> None:
         if self._conn is not None:
@@ -237,9 +241,11 @@ class Tx:
         to_status: str | None = None,
         detail: str | None = None,
         target: str | None = None,
+        data: dict | None = None,
     ) -> None:
         await self.execute(
-            "INSERT INTO audit_log (at, actor, action, submission_id, from_status, to_status, detail, target)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (now_iso(), actor, action, submission_id, from_status, to_status, detail, target),
+            "INSERT INTO audit_log (at, actor, action, submission_id, from_status, to_status, detail, target, data_json)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (now_iso(), actor, action, submission_id, from_status, to_status, detail, target,
+             json.dumps(data) if data else None),
         )

@@ -358,7 +358,8 @@ async def unblock(ref: str, body: ReasonIn, request: Request) -> dict:
 async def _takedowns(request: Request) -> list[dict]:
     marks = ",".join("?" * len(TAKEDOWN_ACTIONS))
     rows = await request.app.state.db.fetchall(
-        "SELECT a.at, a.actor, a.action, a.target, a.detail, a.submission_id, u.handle, s.slug, s.status, s.hidden,"
+        "SELECT a.at, a.actor, a.action, a.target, a.detail, a.data_json, a.submission_id, u.handle, s.slug,"
+        " s.status, s.hidden,"
         " s.ig_posted_at FROM audit_log a LEFT JOIN submissions s ON s.id = a.submission_id"
         f" LEFT JOIN users u ON u.id = s.user_id WHERE a.action IN ({marks}) ORDER BY a.id DESC LIMIT ?",
         (*TAKEDOWN_ACTIONS, TAKEDOWN_LOG_ROWS),
@@ -366,12 +367,15 @@ async def _takedowns(request: Request) -> list[dict]:
     out = []
     for r in rows:
         down = r["status"] == "rejected" or (r["status"] == "published" and r["hidden"])
+        ig = (json.loads(r["data_json"]).get("ig") or []) if r["data_json"] else []
         out.append({
             "at": r["at"], "actor": r["actor"], "action": r["action"],
             "target": r["target"] or (f"{r['handle']}/{r['slug']}" if r["handle"] else r["submission_id"] or ""),
             "reason": r["detail"] or "",
             # still on our Instagram while it's off the site
-            "reminder": IG_REMINDER if r["ig_posted_at"] and down and r["action"] in ("hide", "delete") else None,
+            "reminder": IG_REMINDER if (r["ig_posted_at"] and down and r["action"] in ("hide", "delete")) or ig
+            else None,
+            "ig": ig,  # delete_account: the IG-posted pieces of the deleted account (their rows are gone)
         })
     return out
 
@@ -722,7 +726,8 @@ async def takedowns_page(request: Request):
     rows = "".join(
         f"<tr><td>{e(r['at'])}</td><td>{e(r['action'])}</td><td>{e(r['target'])}</td><td>{e(r['reason'])}</td>"
         f"<td>{e(r['actor'])}</td>"
-        f"<td>{IG_CHIP if r['reminder'] else ''}</td></tr>"
+        f"<td>{IG_CHIP if r['reminder'] else ''}{' <span class=muted>' + e(', '.join(r['ig'])) + '</span>' if r['ig'] else ''}"
+        "</td></tr>"
         for r in await _takedowns(request)
     )
     head = "<tr><th>time (UTC)</th><th>action</th><th>target</th><th>reason</th><th>by</th><th></th></tr>"

@@ -382,7 +382,11 @@ async def test_admin_deletes_a_suspended_account_into_the_takedown_log(ctx):
         assert r.json() == {"handle": h, "deleted": True, "reminder": f"also remove from Instagram: {h}/{s}"}
         log = (await a.get("/v1/admin/takedowns")).json()["actions"]
     assert (log[0]["action"], log[0]["target"], log[0]["actor"]) == ("delete_account", h, "admin")
-    assert log[0]["reason"] == f"ERASE-2026-001 [also remove from Instagram: {h}/{s}]"  # durable: the rows are gone
+    assert (log[0]["reason"], log[0]["ig"], log[0]["reminder"]) == (  # structured, durable: the rows are gone
+        "ERASE-2026-001", [f"{h}/{s}"], "also remove from Instagram")
+    async with ctx.admin() as a:
+        row = re.search(r"<tr><td>[^<]*</td><td>delete_account</td>.*?</tr>", (await a.get("/admin/takedowns")).text)
+    assert "chip warn'>also remove from Instagram</span> <span class=muted>" + f"{h}/{s}" in row.group(0)
     for table in ("users", "submissions", "access_tokens", "web_sessions"):
         assert (await db.fetchone(f"SELECT COUNT(*) AS n FROM {table}"))["n"] == 0, table
     assert await ctx.app.state.store.list(f"public/{h}/") == []
@@ -746,7 +750,8 @@ async def test_takedown_columns_migrate_onto_an_old_db(tmp_path):
         assert tuple(row) == (None, None)
         assert "ig_posted_at" in {r["name"] for r in await db.fetchall("PRAGMA table_info(submissions)")}
         async with db.tx() as tx:
-            await tx.audit("admin", "suspend", target="old", detail="x")
-        assert (await db.fetchone("SELECT target FROM audit_log"))["target"] == "old"
+            await tx.audit("admin", "suspend", target="old", detail="x", data={"ig": ["old/a"]})
+        row = await db.fetchone("SELECT target, data_json FROM audit_log")
+        assert (row["target"], json.loads(row["data_json"])) == ("old", {"ig": ["old/a"]})
     finally:
         await db.close()

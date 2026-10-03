@@ -206,8 +206,8 @@ class Publisher:
                 if actor is None:
                     await tx.audit(f"user:{handle}", "account_deleted", detail=f"{len(ids)} submissions", target=handle)
                 else:  # the IG list goes in the row: the submissions it names are gone after this commit
-                    ig_note = f" [also remove from Instagram: {', '.join(on_ig)}]" if on_ig else ""
-                    await tx.audit(actor, "delete_account", target=handle, detail=f"{reason}{ig_note}")
+                    await tx.audit(actor, "delete_account", target=handle, detail=reason,
+                                   data={"ig": on_ig} if on_ig else None)
             for sid in ids:
                 await self.store.delete_prefix(f"submissions/{sid}")
             await self.store.delete_prefix(f"public/{handle}")
