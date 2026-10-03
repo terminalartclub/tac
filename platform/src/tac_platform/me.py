@@ -16,10 +16,12 @@ PROFILE_UPDATES_PER_HOUR = 30  # each one by a published artist regenerates comm
 
 # C0/C1 controls, zero-width, bidi marks/overrides/isolates, invisible operators, BOM and tag chars
 # (spoofing); \t and \n are handled per field
-_CTRL = re.compile(
-    "[\\x00-\\x08\\x0b-\\x1f\\x7f-\\x9f\\u00ad\\u061c\\u180e\\u200b-\\u200f\\u2028-\\u202e"
-    "\\u2060-\\u2064\\u2066-\\u2069\\ufeff\\U000e0000-\\U000e007f]"
+_INVISIBLE = (
+    "\\x00-\\x08\\x0b-\\x1f\\x7f-\\x9f\\u00ad\\u061c\\u180e\\u200b\\u200c\\u200e\\u200f\\u2028-\\u202e"
+    "\\u2060-\\u2064\\u2066-\\u2069\\ufeff\\U000e0000-\\U000e007f"
 )
+_CTRL = re.compile(f"[{_INVISIBLE}]")  # display_name/bio: stripped. ZWJ (U+200D) kept: it joins emoji (👩‍💻)
+_LINK_CTRL = re.compile(f"[{_INVISIBLE}\\u200d]")  # link: refused, ZWJ included
 
 
 def _clean(v: str, allow_newlines: bool) -> str:
@@ -64,7 +66,7 @@ class ProfileIn(BaseModel):
         if v is None or v.strip() == "":
             return "" if v is not None else None
         v = v.strip()
-        if len(v) > 200 or any(c.isspace() for c in v) or _CTRL.search(v):  # reject, never silently rewrite a URL
+        if len(v) > 200 or any(c.isspace() for c in v) or _LINK_CTRL.search(v):  # reject, never silently rewrite a URL
             raise ValueError("link must be a single https URL of at most 200 characters")
         parts = urlsplit(v)
         if parts.scheme != "https" or not parts.hostname or "." not in parts.hostname or "@" in parts.netloc:

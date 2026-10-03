@@ -210,7 +210,7 @@ async def test_profile_validation_and_escaping(ctx):
                                           "link": "https://example.com/a?b=<c>"}
 
 
-INVISIBLES = ["\u202e", "\u202d", "\u2066", "\u2069", "\u061c", "\u200b", "\u200d", "\u2060", "\ufeff",
+INVISIBLES = ["\u202e", "\u202d", "\u2066", "\u2069", "\u061c", "\u200b", "\u200c", "\u2060", "\ufeff",
               "\u00ad", "\u180e", "\u2028", "\x85", "\U000e0041"]
 
 
@@ -223,6 +223,17 @@ async def test_profile_strips_bidi_and_zero_width(ctx, ch):
         for link in (f"https://example.com/{ch}gnp.exe", f"https://exa{ch}mple.com/"):
             assert (await b.patch("/v1/me", json={"link": link})).status_code == 400, link
         assert (await b.get("/v1/me")).json()["link"] == ""
+
+
+async def test_profile_keeps_zwj_in_text_refuses_it_in_link(ctx):
+    coder = "\U0001f469\u200d\U0001f4bb"  # woman technologist: woman + ZWJ + laptop
+    token = await ctx.login("alex")
+    async with ctx.client(authorization=f"Bearer {token}") as b:
+        r = await b.patch("/v1/me", json={"display_name": f"alex {coder}", "bio": f"codes {coder}\nart"})
+        assert r.status_code == 200
+        assert r.json()["display_name"] == f"alex {coder}" and r.json()["bio"] == f"codes {coder}\nart"
+        for link in ("https://example.com/a\u200db", "https://exa\u200dmple.com/"):
+            assert (await b.patch("/v1/me", json={"link": link})).status_code == 400, link
 
 
 async def test_profile_update_rate_limited_per_user(ctx, monkeypatch):
