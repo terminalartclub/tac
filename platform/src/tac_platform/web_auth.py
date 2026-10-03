@@ -5,6 +5,7 @@
   GET  /v1/auth/web/github/callback      github: code -> user -> session cookie -> 303 to return
   GET  /v1/auth/web/csrf                 {"csrf": ...} for the X-TAC-CSRF header (session required)
   POST /v1/auth/web/logout               revoke session, clear cookie
+  POST /v1/auth/web/logout-all           revoke every web session of this user, clear cookie
 """
 
 import base64
@@ -160,6 +161,21 @@ async def web_logout(request: Request):
         async with request.app.state.db.tx() as tx:
             await tx.execute("DELETE FROM web_sessions WHERE session_sha256 = ?", (row["session_sha256"],))
             await tx.audit(f"user:{row['handle']}", "web_logout")
+    resp = Response(status_code=204)
+    clear_session_cookie(request, resp)
+    return resp
+
+
+@router.post("/v1/auth/web/logout-all", status_code=204)
+async def web_logout_all(request: Request):
+    """Sign out everywhere: every web session of this user. Plugin Bearer tokens are separate and stay."""
+    row = await session_row(request)
+    if row is None:
+        raise ApiError(401, "no_session")
+    require_csrf(request, row["session_sha256"])
+    async with request.app.state.db.tx() as tx:
+        n = await tx.execute("DELETE FROM web_sessions WHERE user_id = ?", (row["id"],))
+        await tx.audit(f"user:{row['handle']}", "web_logout_all", detail=f"{n} sessions")
     resp = Response(status_code=204)
     clear_session_cookie(request, resp)
     return resp

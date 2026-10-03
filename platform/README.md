@@ -61,6 +61,7 @@ TAC_E2E_URL=http://127.0.0.1:8790 TAC_E2E_ADMIN_TOKEN=t uv run pytest tests/test
 | GET | `/v1/auth/web/github/callback` | none | github mode OAuth return |
 | GET | `/v1/auth/web/csrf` | cookie | `{csrf, header: "X-TAC-CSRF"}` for cookie-authenticated state changes |
 | POST | `/v1/auth/web/logout` | cookie + CSRF | revokes the session, clears the cookie |
+| POST | `/v1/auth/web/logout-all` | cookie + CSRF | revokes every web session of the user (sign out everywhere), clears the cookie; plugin tokens stay |
 | GET | `/v1/me` | cookie or Bearer | `{handle, display_name, bio, link, created}` |
 | PATCH | `/v1/me` | cookie+CSRF or Bearer | `{display_name ≤ 40, bio ≤ 280, link: https ≤ 200}`. Omitted = unchanged, `""`/null = cleared, unknown keys = 400 |
 | DELETE | `/v1/me` | cookie+CSRF or Bearer | `{"confirm": "<handle>"}`. Deletes the account, pieces, media, sessions and tokens; 409 while a render is running |

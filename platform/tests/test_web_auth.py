@@ -70,6 +70,24 @@ async def test_login_logout_same_user_as_plugin(ctx):
         assert (await b.get("/v1/me")).json()["handle"] == "alex"
 
 
+async def test_logout_all_revokes_every_session(ctx):
+    token = await ctx.login("alex")
+    laptop, phone, bea = await web_login(ctx, "alex"), await web_login(ctx, "alex"), await web_login(ctx, "bea")
+    async with aclosing(laptop), aclosing(phone), aclosing(bea):
+        assert (await phone.get("/v1/me")).status_code == 200
+        assert (await laptop.post("/v1/auth/web/logout-all")).status_code == 403  # CSRF-protected
+        r = await laptop.post("/v1/auth/web/logout-all", headers=await csrf(laptop))
+        assert r.status_code == 204 and "tac_session=" in r.headers["set-cookie"]
+        assert (await laptop.get("/v1/me")).status_code == 401
+        assert (await phone.get("/v1/me")).status_code == 401  # the other session is gone too
+        assert (await bea.get("/v1/me")).json()["handle"] == "bea"  # other users untouched
+        assert (await laptop.post("/v1/auth/web/logout-all")).status_code == 401
+    async with ctx.client(authorization=f"Bearer {token}") as b:
+        assert (await b.get("/v1/me")).status_code == 200  # plugin token is not a web session
+    audit = await ctx.app.state.db.fetchone("SELECT detail FROM audit_log WHERE action = 'web_logout_all'")
+    assert audit["detail"] == "2 sessions"
+
+
 async def test_redirect_and_cookie_flags_dev(ctx):
     async with ctx.client() as c:
         r = await c.post("/v1/auth/web/login", data={"handle": "alex", "return": "//evil.example/x"})
