@@ -248,3 +248,16 @@ async def test_backfill_holds_media_lock_per_piece_and_skips_hidden(site, monkey
     assert await pub.backfill_cards() == 0
     assert await site.app.state.store.get(f"public/{h}/{s}/share.jpg") is None  # hidden stays unpublished
 
+
+async def test_card_render_failure_still_publishes(site, monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("pillow exploded")
+
+    monkeypatch.setattr(cards, "share_jpg", boom)
+    h, s = await publish(site)  # publish() asserts the piece reached "published"
+    store = site.app.state.store
+    assert await store.get(f"public/{h}/{s}/preview.webp") and await store.get(f"public/{h}/{s}/share.jpg") is None
+    doc = await site.app.state.publisher.regenerate()
+    assert [p["id"] for p in doc["pieces"]] == [f"{h}/{s}"]
+    m = metas((await get_og(site, f"/night-shift/{h}/{s}")).text)
+    assert m["og:image"][0].endswith("/og.jpg")  # falls back to the render's own still

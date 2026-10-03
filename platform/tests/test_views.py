@@ -263,3 +263,28 @@ async def test_events_rate_limit_shared_across_ipv6_64(ctx):
     n = (await ctx.app.state.db.fetchone("SELECT n FROM event_days WHERE name = 'install_copy'"))["n"]
     assert n == events.EVENTS_PER_HOUR  # one /64 = one rate bucket, however many addresses
 
+
+async def test_regen_loop_survives_a_failing_regenerate(ctx, monkeypatch):
+    import asyncio
+
+    from tac_platform import publish
+
+    pub = ctx.app.state.publisher
+    calls = []
+    real = pub.regenerate
+
+    async def flaky():
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("db locked")
+        return await real()
+
+    monkeypatch.setattr(pub, "regenerate", flaky)
+    task = asyncio.create_task(publish.regen_loop(pub, every_s=0.01))
+    for _ in range(200):
+        if len(calls) >= 3:
+            break
+        await asyncio.sleep(0.01)
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    assert len(calls) >= 3  # the first failure was logged, the loop kept going
