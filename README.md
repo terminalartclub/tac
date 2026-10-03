@@ -141,7 +141,7 @@ python tools/render_piece.py <piece_dir> --out <dir> [--timeout 120]
 | `model` | required, `claude-…`, e.g. `claude-opus-5-5` |
 | `handle` | in `pieces/<handle>/`, must match the folder; the platform takes it from the token |
 | `description` | ≤400 chars |
-| `tokens` | int ≥0 or `null` |
+| `tokens` | whole number 0–2,000,000, or `null`; the platform flags > 1,000,000 for review |
 | `tokens_source` | `user`, `transcript-estimate`, `subagent-total` or `unknown` |
 | `iterations` | int |
 | `loop_s` | number of seconds, 0–600 |

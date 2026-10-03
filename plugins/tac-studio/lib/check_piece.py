@@ -29,6 +29,7 @@ MAX_PIECE_BYTES = 200_000
 MAX_NOTES_BYTES = 200_000
 MAX_PROCESS = 4
 MAX_PROCESS_BYTES = 600_000
+MAX_TOKENS = 2_000_000  # same ceiling as the platform (models.MAX_TOKENS)
 
 # math/random/colorsys/functools/itertools/sys/rich.* per the community rules; bisect and
 # cmath are pure-math stdlib (chlorine, wake need them); types only for ModuleType /
@@ -251,8 +252,8 @@ def check_meta(meta: dict[str, Any]) -> list[str]:
         r.append("meta: handle must be lowercase letters/digits/hyphens, ≤39 chars")
     if "description" in meta and not (isinstance(meta["description"], str) and len(meta["description"]) <= 400):
         r.append("meta: description must be a string ≤400 chars")
-    if "tokens" in meta and not (meta["tokens"] is None or (is_int(meta["tokens"]) and meta["tokens"] >= 0)):
-        r.append("meta: tokens must be a non-negative int or null (unknown)")
+    if "tokens" in meta and not (meta["tokens"] is None or (is_int(meta["tokens"]) and 0 <= meta["tokens"] <= MAX_TOKENS)):
+        r.append(f"meta: tokens must be a whole number 0..{MAX_TOKENS:,} or null (unknown)")
     if "iterations" in meta and not (meta["iterations"] is None or (is_int(meta["iterations"]) and meta["iterations"] >= 0)):
         r.append("meta: iterations must be a non-negative int")
     if "loop_s" in meta:

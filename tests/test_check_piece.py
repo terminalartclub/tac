@@ -134,6 +134,8 @@ def test_line_numbers_match_the_file() -> None:
     ({"title": "x", "model": "claude-opus-5-5", "tokens": -1}, "tokens"),
     ({"title": "x", "model": "claude-opus-5-5", "tokens": True}, "tokens"),
     ({"title": "x", "model": "claude-opus-5-5", "tokens": "lots"}, "tokens"),
+    ({"title": "x", "model": "claude-opus-5-5", "tokens": 2_000_001}, "tokens"),
+    ({"title": "x", "model": "claude-opus-5-5", "tokens": 1.0}, "tokens"),
     ({"title": "x", "model": "claude-opus-5-5", "loop_s": 0}, "loop_s"),
     ({"title": "x", "model": "claude-opus-5-5", "created": "Oct 2"}, "created"),
     ({"title": "x", "model": "claude-opus-5-5", "handle": "Bad Handle"}, "handle"),
@@ -220,3 +222,10 @@ def test_no_reachable_module_passes_the_lint() -> None:
                 else:
                     leaks.append(f"{mod.__name__}.{k} -> {v.__name__}")
     assert leaks == []
+
+
+@pytest.mark.parametrize("tokens", [0, 2_000_000, None])
+def test_tokens_boundaries_pass(good: Path, tokens) -> None:
+    (good / "meta.yaml").unlink()
+    (good / "meta.json").write_text(json.dumps({"title": "x", "model": "claude-opus-5-5", "tokens": tokens}))
+    assert not [r for r in check_dir(good) if "tokens" in r]

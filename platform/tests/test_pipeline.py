@@ -1,6 +1,7 @@
 import json
 
 import httpx
+import pytest
 
 from conftest import META, PIECE, fake_claude, handle_slug, make_ctx, png_bytes
 
@@ -323,3 +324,36 @@ async def test_house_piece_seeds_through_the_upload_path(tmp_path):
 async def test_piece_url_absent_without_site_url(ctx):
     token = await ctx.login("alex")
     assert (await ctx.submit(token)).json()["piece_url"] is None
+
+
+@pytest.mark.parametrize("tokens,ok", [(0, True), (None, True), (530_000, True), (2_000_000, True),
+                                        (2_000_001, False), (-1, False), (1.5, False), (1.0, False),
+                                        ("12", False), (True, False)])
+async def test_tokens_validation_bounds(ctx, tokens, ok):
+    token = await ctx.login("alex")
+    r = await ctx.submit(token, meta={**META, "tokens": tokens})
+    if ok:
+        assert r.status_code == 202, r.text
+    else:
+        assert r.status_code == 400 and r.json()["error"] == "invalid_meta"
+        assert any(d.startswith("tokens:") for d in r.json()["detail"]), r.json()
+        if tokens == 2_000_001:
+            assert "at most 2,000,000" in r.json()["detail"][0]
+
+
+async def test_high_tokens_flag_in_review_queue_and_tokens_in_community_json(ctx):
+    token = await ctx.login("alex")
+    big = (await ctx.submit(token, meta={**META, "title": "big", "tokens": 1_000_001})).json()
+    edge = (await ctx.submit(token, meta={**META, "title": "edge", "tokens": 1_000_000})).json()
+    for sid in (big["id"], edge["id"]):
+        await ctx.wait(token, sid)
+    async with ctx.admin() as a:
+        q = {it["title"]: it for it in (await a.get("/v1/admin/queue")).json()["in_review"]}
+        assert q["big"]["high_tokens"] is True and q["edge"]["high_tokens"] is False
+        page = (await a.get("/admin")).text
+        assert page.count("<span class=chip>high_tokens</span>") == 1
+        assert (await a.post(f"/v1/admin/submissions/{big['id']}/approve")).status_code == 200
+    await ctx.wait(token, big["id"], until=("published",))
+    doc = await ctx.app.state.publisher.regenerate()
+    assert [(p["title"], p["tokens"]) for p in doc["pieces"]] == [("big", 1_000_001)]  # tokens published per piece
+    assert doc["totals"]["tokens"] == 1_000_001

@@ -9,7 +9,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from pydantic import BaseModel
 
-from .models import RejectIn
+from .models import HIGH_TOKENS, RejectIn
 from .views import views_summary
 from .web import ApiError, page
 
@@ -68,6 +68,13 @@ async def admin_media(sub_id: str, path: str, request: Request):
 # ------------------------------------------------------------------ JSON
 
 
+def _high_tokens(meta_json: str) -> bool:
+    """Self-reported tokens over HIGH_TOKENS (1M): plausible but rare, so a human checks it before it
+    lands in the public spare-tokens counter."""
+    t = json.loads(meta_json).get("tokens")
+    return isinstance(t, int) and not isinstance(t, bool) and t > HIGH_TOKENS
+
+
 async def _queue(request: Request) -> dict:
     db = request.app.state.db
     cols = (
@@ -100,6 +107,7 @@ async def _queue(request: Request) -> dict:
             "hidden": bool(r["hidden"]),
             "trusted": bool(r["trusted"]),
             "house_artist": bool(r["house_artist"]),
+            "high_tokens": _high_tokens(r["meta_json"]),
             "display_name": r["display_name"] or "",
             "link": r["link"] or "",
             "meta": json.loads(r["meta_json"]),
@@ -254,7 +262,8 @@ async def _card(request: Request, it: dict, mode: str) -> str:
         f"<h2>{e(it['title'])} <span class=count>by {h}"
         f"{' (' + e(it['display_name']) + ')' if it['display_name'] else ''}"
         f"{' · ' + e(it['link']) if it['link'] else ''} · {e(it['created_at'][:16])}"
-        f"{' · trusted' if it['trusted'] else ''}{' · house artist' if it['house_artist'] else ''} · {it['views_7d']} views 7d · human: {e(it['meta'].get('human_role', 'none'))} · {e(it['meta'].get('size', 'full'))}</span></h2>"
+        f"{' · trusted' if it['trusted'] else ''}{' · house artist' if it['house_artist'] else ''}"
+        f"{' <span class=chip>high_tokens</span>' if it['high_tokens'] else ''} · {it['views_7d']} views 7d · human: {e(it['meta'].get('human_role', 'none'))} · {e(it['meta'].get('size', 'full'))}</span></h2>"
         f"<p>{e(it['meta'].get('description', ''))}</p>"
         f"<div>{flags}{reasons}</div>"
         + (f"<p><b>critique</b> {e(it['critique'])}</p>" if it["critique"] else "<p class=muted>no critique</p>")
