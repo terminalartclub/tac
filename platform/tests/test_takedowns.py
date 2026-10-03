@@ -491,6 +491,28 @@ async def test_github_identity_of_a_deleted_suspended_account_cant_re_register(t
             assert (await web(c)).status_code == 200  # unblocked: signs up again
 
 
+async def test_unblock_needs_admin_and_cookie_csrf(ctx):
+    await ctx.login("alex")
+    async with ctx.admin() as a:
+        await a.post("/v1/admin/users/alex/suspend", json={"reason": "x"})
+        await a.post("/v1/admin/users/alex/delete", json={"reason": "x"})
+    db = ctx.app.state.db
+    bid = (await db.fetchone("SELECT id FROM blocked_identities"))["id"]
+    url = f"/v1/admin/blocked/{bid}/unblock"
+    async with ctx.client() as c:
+        r = await c.post(url, json={"reason": "x"})
+        assert r.status_code == 401 and r.json()["error"] == "admin_auth_required"
+        c.cookies.set("tac_admin", "wrong-token")
+        assert (await c.post(url, json={"reason": "x"}, headers=CSRF)).status_code == 401
+        c.cookies.set("tac_admin", "test-admin-token")
+        r = await c.post(url, json={"reason": "x"})  # cookie, no CSRF header
+        assert r.status_code == 403 and r.json()["error"] == "csrf_check_failed"
+        r = await c.post(url, json={"reason": "x"}, headers={**CSRF, "sec-fetch-site": "same-site"})
+        assert r.status_code == 403 and r.json()["error"] == "csrf_check_failed"
+        assert (await db.fetchone("SELECT COUNT(*) AS n FROM blocked_identities"))["n"] == 1  # nothing lifted
+        assert (await c.post(url, json={"reason": "x"}, headers=CSRF)).status_code == 200
+
+
 async def test_unblock_lifts_exactly_one_block_when_two_share_a_handle(tmp_path, monkeypatch):
     """Two GitHub people held the handle "alex" in turn and were each deleted while suspended: unblocking one
     must leave the other barred, and the audit row must say which block went."""
