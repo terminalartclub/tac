@@ -56,9 +56,13 @@ TERMINAL = {"rejected", "in_review", "published"}
 
 # C0 (incl. ESC), DEL and C1: a server string printed raw could move the cursor, rewrite earlier
 # lines or set the window title. Tabs/newlines become spaces so one field can't fake another line.
-# Also zero-width (U+200B-U+200D) and direction marks/overrides/isolates (U+200E-U+200F, U+202A-U+202E,
-# U+2066-U+2069): they reorder or hide text, so what the user reads isn't what Claude or a terminal gets.
-_INVISIBLE = "\u200b-\u200f\u202a-\u202e\u2066-\u2069"
+# Also the invisible/spoofing class, the same set as the platform's me._INVISIBLE: zero-width
+# (U+200B-U+200D), direction marks/overrides/isolates (U+200E-U+200F, U+202A-U+202E, U+2066-U+2069),
+# line/paragraph separators (U+2028-U+2029), word joiner and invisible operators (U+2060-U+2064), BOM
+# (U+FEFF), soft hyphen, Arabic letter mark, Mongolian vowel separator and tag characters. They reorder,
+# hide or break text, so what the user reads isn't what Claude or a terminal gets.
+_INVISIBLE = ("\u00ad\u061c\u180e\u200b-\u200f\u2028-\u202e\u2060-\u2064\u2066-\u2069\ufeff"
+              "\U000e0000-\U000e007f")
 _CTRL = re.compile(f"[\\x00-\\x1f\\x7f-\\x9f{_INVISIBLE}]")
 
 

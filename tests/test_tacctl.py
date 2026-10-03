@@ -554,3 +554,13 @@ def test_submit_prints_fixed_line_when_no_link_is_trusted(platform: Platform, wo
     out = capsys.readouterr().out
     assert out.splitlines()[-1] == "submitted — see /tac:mine for its status"
     assert "ignore" not in out and "evil.com" not in out
+
+
+@pytest.mark.parametrize("cp", [0x2028, 0x2029, 0x2060, 0x2061, 0x2062, 0x2063, 0x2064, 0xFEFF, 0x00AD, 0x061C,
+                                0x180E, 0xE0001, 0xE0041, 0xE007F])
+def test_safe_strips_separators_joiners_bom_and_tags(cp: int, capsys) -> None:
+    ch = chr(cp)
+    assert tacctl.safe(f"ok{ch}done") == "okdone"
+    tacctl.print_status({"status": f"in{ch}_review", "critique": f"c{ch}", "reasons": [f"r{ch}"]}, "http://127.0.0.1:8790")
+    assert ch not in capsys.readouterr().out
+    assert tacctl.browser_target(f"http://127.0.0.1:8790/device{ch}") is None
