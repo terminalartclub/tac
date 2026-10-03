@@ -650,10 +650,14 @@ async def test_no_raw_github_id_survives_account_deletion(tmp_path, monkeypatch,
             tok = re.search(r"name=token value='([^']+)'", step.text).group(1)
             assert (await c.post("/v1/auth/web/terms", data={"token": tok, "agree": "1"})).status_code == 303
             csrf = (await c.get("/v1/auth/web/csrf")).json()["csrf"]
-            # a user_created row as written before this fix (prod rows predate it)
-            await db.execute("INSERT INTO audit_log (at, actor, action, detail) VALUES ('x', 'user:alexgh',"
-                             " 'user_created', ?)", (f"github:{RAW_GH_ID}",))
+            # the user_created row as written before the raw id was dropped (prod rows predate that fix)
+            await db.execute("UPDATE audit_log SET detail = ? WHERE action = 'user_created' AND actor = 'user:alexgh'",
+                             (f"github:{RAW_GH_ID}",))
             assert await _rows_holding(db, str(RAW_GH_ID)) == ["users.github_id", "audit_log.detail"]
+            await db.execute("UPDATE users SET instagram = 'alex.ig.handle' WHERE handle = 'alexgh'")
+            async with ctx.admin() as a:  # admin rows that name the handle in detail, not actor/target
+                await a.post("/v1/admin/users/alexgh/trust", json={"trusted": True})
+                await a.post("/v1/admin/users/alexgh/instagram-confirm", json={"instagram": "alex.ig.handle"})
             await db.checkpoint_truncate()
             assert any(_file_hits(db, ID_BYTES).values())  # the scan does see a live id
             if path == "self":
@@ -672,10 +676,67 @@ async def test_no_raw_github_id_survives_account_deletion(tmp_path, monkeypatch,
         await db.checkpoint_truncate()  # and stays gone once everything is in the main file
         assert _file_hits(db, ID_BYTES) == {db.path.name: [], db.path.name + "-wal": []}
         assert (await db.fetchone("SELECT COUNT(*) AS n FROM users"))["n"] == 0
-        created = await db.fetchall("SELECT detail FROM audit_log WHERE action = 'user_created'")
-        assert [x["detail"] for x in created] == ["github", "github"]  # the handle stays in actor; the id doesn't
+        created = await db.fetchall("SELECT actor, detail FROM audit_log WHERE action = 'user_created'")
+        assert [x["detail"] for x in created] == ["github"]
+        pseud = created[0]["actor"]
+        assert re.fullmatch(r"deleted:[0-9a-f]{12}", pseud)
+        if path != "admin_suspended":  # one pseudonym for the whole account
+            assert {x["actor"] for x in await db.fetchall("SELECT actor FROM audit_log WHERE actor LIKE 'user:%'"
+                                                          " OR actor LIKE 'deleted:%'")} == {pseud}
+        handle_bytes = {"handle": b"alexgh", "ig_handle": b"alex.ig.handle"}
+        if path == "admin_suspended":  # repeat-infringer evidence keeps the handle, on moderation rows only
+            kept = await db.fetchall("SELECT action FROM audit_log WHERE actor LIKE '%alexgh%'"
+                                     " OR target LIKE '%alexgh%' OR detail LIKE '%alexgh%'")
+            assert sorted({x["action"] for x in kept}) == ["block", "delete_account", "suspend"]
+            assert (await db.fetchone("SELECT ref FROM blocked_identities"))["ref"] == "alexgh"
+            others = await db.fetchall("SELECT DISTINCT action FROM audit_log WHERE actor = ?", (pseud,))
+            assert {"user_created", "terms_accepted", "web_login"} <= {x["action"] for x in others}
+            assert _file_hits(db, {"ig_handle": b"alex.ig.handle"}) == {db.path.name: [],
+                                                                         db.path.name + "-wal": []}
+        else:  # erasure: no row anywhere names the handle (or the IG handle); the bytes don't either
+            assert await _rows_holding(db, "alexgh") == [] and await _rows_holding(db, "alex.ig.handle") == []
+            assert _file_hits(db, handle_bytes) == {db.path.name: [], db.path.name + "-wal": []}
+            actions = {x["action"] for x in await db.fetchall("SELECT action FROM audit_log")}
+            assert {"user_created", "terms_accepted", "trust", "instagram_confirm"} <= actions  # what/when stays
+            if path == "admin_active":
+                row = await db.fetchone("SELECT target, detail FROM audit_log WHERE action = 'delete_account'")
+                assert (row["target"], row["detail"]) == (pseud, "ERASE-1")
         blocked = (await db.fetchone("SELECT COUNT(*) AS n FROM blocked_identities"))["n"]
         assert blocked == (1 if path == "admin_suspended" else 0)
+
+
+async def test_erasure_leaves_an_earlier_owner_of_the_handle_alone(ctx):
+    """alex #1 is deleted while suspended (moderation rows keep "alex"); alex #2 later takes the handle and
+    erases their account: only alex #2's rows get a pseudonym, alex #1's evidence still says "alex"."""
+    await ctx.login("alex")
+    async with ctx.admin() as a:
+        await a.post("/v1/admin/users/alex/suspend", json={"reason": "DMCA-2026-008"})
+        await a.post("/v1/admin/users/alex/delete", json={"reason": "ERASE-2"})
+        bid = (await ctx.app.state.db.fetchone("SELECT id FROM blocked_identities"))["id"]
+        await a.post(f"/v1/admin/blocked/{bid}/unblock", json={"reason": "x"})  # dev identity = handle: free it
+    token = await ctx.login("alex")  # a different person
+    async with ctx.client(authorization=f"Bearer {token}") as c:
+        assert (await c.request("DELETE", "/v1/me", json={"confirm": "alex"})).status_code == 204
+    db = ctx.app.state.db
+    kept = await db.fetchall("SELECT action FROM audit_log WHERE target = 'alex' ORDER BY id")
+    assert [x["action"] for x in kept] == ["suspend", "block", "delete_account", "unblock"]  # alex #1 only
+    second = await db.fetchall("SELECT DISTINCT actor FROM audit_log WHERE action = 'account_deleted'")
+    assert len(second) == 1 and second[0]["actor"].startswith("deleted:")
+    first_created = await db.fetchall("SELECT actor FROM audit_log WHERE action = 'user_created' ORDER BY id")
+    assert first_created[0]["actor"].startswith("deleted:")  # alex #1's non-moderation rows: its own pseudonym
+    assert first_created[1]["actor"] == second[0]["actor"] != first_created[0]["actor"]
+
+
+async def test_erasure_covers_rows_before_a_stray_user_created_row(ctx):
+    """A second user_created row for the same handle (legacy data, junk timestamp) must not move the start of
+    the account's rows: everything it wrote is pseudonymised."""
+    token = await ctx.login("alex")
+    db = ctx.app.state.db
+    await db.execute("INSERT INTO audit_log (at, actor, action, detail) VALUES ('x', 'user:alex', 'user_created', 'dup')")
+    async with ctx.client(authorization=f"Bearer {token}") as c:
+        assert (await c.request("DELETE", "/v1/me", json={"confirm": "alex"})).status_code == 204
+    assert await _rows_holding(db, "user:alex") == []
+    assert len({r["actor"] for r in await db.fetchall("SELECT actor FROM audit_log WHERE actor LIKE 'deleted:%'")}) == 1
 
 
 async def test_first_open_vacuums_away_rows_deleted_before_secure_delete(tmp_path):

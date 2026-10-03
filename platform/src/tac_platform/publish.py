@@ -20,6 +20,10 @@ log = logging.getLogger("tac.publish")
 PUBLIC_FILES = ("preview.webp", "og.jpg")
 STATS_KEYS = ("motion_median", "seam", "void")
 REGEN_EVERY_S = 3600  # view counts in community.json are at most this stale
+# Audit actions that keep the handle when an admin deletes a SUSPENDED account: the repeat-infringer evidence
+# and the takedown log. Every other row of that account, and every row of an erased account, gets a pseudonym.
+MODERATION_ACTIONS = ("suspend", "unsuspend", "hide", "unhide", "delete", "delete_account", "block", "unblock",
+                      "reject", "ig_posted", "ig_removed")
 # CAS guard for every transition that puts a piece (back) on the wall: a suspended owner's pieces never go
 # public, whether by admin approve, trusted auto-publish or unhide.
 NOT_SUSPENDED = " AND NOT EXISTS (SELECT 1 FROM users WHERE users.id = submissions.user_id AND users.suspended_at IS NOT NULL)"
@@ -44,6 +48,25 @@ def iso_z(stamp: str) -> str:
 def iso_week(dt: datetime | None = None) -> str:
     year, week, _ = (dt or datetime.now(UTC)).isocalendar()
     return f"{year}-W{week:02d}"
+
+
+async def _pseudonymise(tx, handle: str, pseud: str, first_id: int, keep_moderation: bool) -> None:
+    """Replace `handle` with `pseud` in this account's audit rows (id >= first_id): actor user:<handle>, target
+    <handle> or <handle>/<slug>, and the details that are just the handle (trust, house) or start with it
+    (instagram_confirm, which also names the Instagram handle: dropped). What happened and when stays."""
+    n = len(handle)
+    # block/unblock rows always describe a deleted, banned holder of the handle (never this live account): kept
+    keep = MODERATION_ACTIONS if keep_moderation else ("block", "unblock")
+    skip = (f" AND action NOT IN ({','.join('?' * len(keep))})", keep)
+    scope = f"id >= ?{skip[0]}"
+    await tx.execute(f"UPDATE audit_log SET actor = ? WHERE actor = ? AND {scope}",
+                     (pseud, f"user:{handle}", first_id, *skip[1]))
+    await tx.execute(f"UPDATE audit_log SET target = ? WHERE target = ? AND {scope}", (pseud, handle, first_id, *skip[1]))
+    await tx.execute(
+        f"UPDATE audit_log SET target = ? || substr(target, ?) WHERE substr(target, 1, ?) = ? AND {scope}",
+        (pseud, n + 1, n + 1, f"{handle}/", first_id, *skip[1]))
+    await tx.execute(f"UPDATE audit_log SET detail = ? WHERE (detail = ? OR substr(detail, 1, ?) = ?) AND {scope}",
+                     (pseud, handle, n + 2, f"{handle}: ", first_id, *skip[1]))
 
 
 class NotSuspended(Exception):
@@ -179,7 +202,11 @@ class Publisher:
         "handle/slug" ids that were marked posted to Instagram (those posts must be removed by hand).
         actor/reason: an admin deletion (audit action delete_account, in the takedown log); default = the user's own.
         An admin deletion of an account that is suspended at that moment also blocks the identity from signing up
-        again (blocked_identities, same transaction); a self-deletion never does."""
+        again (blocked_identities, same transaction); a self-deletion never does.
+
+        Audit rows outlive the account; in the same transaction their handle is replaced with a per-account
+        pseudonym (_pseudonymise). Self-deletion or admin deletion of an active account = erasure: every row.
+        Admin deletion of a suspended account: every row except MODERATION_ACTIONS, which keep the handle."""
         async with self._media_lock:
             async with self.db.tx() as tx:
                 if await tx.fetchone(
@@ -196,7 +223,16 @@ class Publisher:
                     ):
                         return None
                 # suspended at this moment (same transaction as the delete) decides the block
-                u = await tx.fetchone("SELECT github_id, suspended_at FROM users WHERE id = ?", (user_id,))
+                u = await tx.fetchone("SELECT github_id, suspended_at, created_at FROM users WHERE id = ?", (user_id,))
+                banned = actor is not None and u is not None and u["suspended_at"] is not None
+                # This account's rows start after the previous owner of the handle ended. An erased previous owner
+                # left no row naming the handle; a banned one kept its moderation rows, ending in delete_account.
+                prev = await tx.fetchone("SELECT MAX(id) AS id FROM audit_log WHERE action = 'delete_account'"
+                                         " AND target = ?", (handle,))
+                first_id = (prev["id"] or 0) + 1
+                own = await tx.fetchone("SELECT MIN(id) AS id FROM audit_log WHERE actor = ? AND id >= ?",
+                                        (f"user:{handle}", first_id))
+                pseud = blocklist.account_pseudonym(self.secret, user_id, u["created_at"] if u else "", own["id"] or 0)
                 ids = [r[0] for r in await tx.conn.execute_fetchall("SELECT id FROM submissions WHERE user_id = ?", (user_id,))]
                 on_ig = [f"{handle}/{r[0]}" for r in await tx.conn.execute_fetchall(
                     "SELECT slug FROM submissions WHERE user_id = ? AND ig_posted_at IS NOT NULL ORDER BY slug", (user_id,))]
@@ -210,7 +246,7 @@ class Publisher:
                 await tx.execute("DELETE FROM users WHERE id = ?", (user_id,))
                 if u is not None and u["github_id"] is not None:  # rows written before user_created dropped the id
                     await tx.execute("UPDATE audit_log SET detail = 'github' WHERE detail = ?", (f"github:{u['github_id']}",))
-                if actor is not None and u is not None and u["suspended_at"] is not None:
+                if banned:
                     blocked = await tx.fetchone(
                         "INSERT INTO blocked_identities (github_id_hash, created_at, ref) VALUES (?, ?, ?)"
                         " ON CONFLICT(github_id_hash) DO UPDATE SET ref = excluded.ref RETURNING id",
@@ -220,8 +256,10 @@ class Publisher:
                 if actor is None:
                     await tx.audit(f"user:{handle}", "account_deleted", detail=f"{len(ids)} submissions", target=handle)
                 else:  # the IG list goes in the row: the submissions it names are gone after this commit
+                    ig_logged = on_ig if banned else [pseud + i[len(handle):] for i in on_ig]
                     await tx.audit(actor, "delete_account", target=handle, detail=reason,
-                                   data={"ig": on_ig} if on_ig else None)
+                                   data={"ig": ig_logged} if on_ig else None)
+                await _pseudonymise(tx, handle, pseud, first_id, keep_moderation=banned)
             await self.db.checkpoint_truncate()  # no pre-delete page images left in the WAL
             for sid in ids:
                 await self.store.delete_prefix(f"submissions/{sid}")

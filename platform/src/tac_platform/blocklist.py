@@ -21,6 +21,13 @@ def identity_hash(secret: str, github_id: int | None, handle: str) -> str:
     return sha256_hex(f"{_salt(secret)}|{identity}")
 
 
+def account_pseudonym(secret: str, user_id: int, created_at: str, first_audit_id: int) -> str:
+    """What an erased account's audit rows say instead of its handle: stable per account (rows still link up),
+    distinct across accounts (SQLite can reuse a deleted user's rowid, even within the same second, so the
+    account's first audit row id is part of it), and not reversible to the handle without the salt."""
+    return "deleted:" + sha256_hex(f"{_salt(secret)}|acct:{user_id}:{created_at}:{first_audit_id}")[:12]
+
+
 async def is_blocked(tx, secret: str, github_id: int | None, handle: str) -> bool:
     """`tx` = a Tx or the Database: call it inside the transaction that creates the user."""
     return await tx.fetchone("SELECT 1 FROM blocked_identities WHERE github_id_hash = ?",

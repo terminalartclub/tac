@@ -215,6 +215,20 @@ docker run --rm --name tac-render-<random> --network none --read-only --tmpfs /t
     VACUUMs once to clear rows deleted before it.
   - Fly's daily volume snapshots (5-day retention) keep pre-delete copies of the whole DB until they rotate
     out: a deletion is complete everywhere after 5 days.
+  - Handles in the audit log after a delete (`Publisher._pseudonymise`, same transaction as the delete):
+    - self-deletion, or an admin deleting an ACTIVE account, is an erasure request: every audit row of that
+      account (actor `user:<handle>`, target `<handle>[/<slug>]`, details that are the handle or start with it,
+      incl. the confirmed Instagram handle) gets `deleted:<12 hex>` = sha256(blocklist salt | account id,
+      created_at, first audit row id). What happened and when stays; who it was doesn't.
+    - an admin deleting a SUSPENDED account keeps the handle on the moderation rows (suspend, unsuspend, hide,
+      unhide, delete, delete_account, block, unblock, reject, ig_posted, ig_removed) and in
+      `blocked_identities.ref`: the repeat-infringer evidence and the takedown log. Every other row is
+      pseudonymised the same way.
+    - Only this account's rows are rewritten: they start after the previous owner's `delete_account` row, and
+      block/unblock rows (always about a deleted, banned holder) are never touched.
+    - Caveats: the same handle string can reappear later if someone else claims it. Free-text moderator reasons
+      are not scanned (the runbook says reference IDs only). Access-log lines on admin paths
+      (`/v1/admin/users/<handle>/…`) carry the handle in stdout logs, which age out with Fly's log retention.
   - No raw GitHub id outlives the account: it lives only in `users.github_id` (deleted with the row). The
     `user_created` audit row says just `github`; older rows that carried `github:<id>` are scrubbed on delete
     and, once, at startup. The GitHub login is kept only as the handle it became (already public).
