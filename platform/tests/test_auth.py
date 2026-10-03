@@ -152,3 +152,52 @@ async def test_github_callbacks_clean_400_on_github_failure(case, tmp_path, monk
             cb = await c.get("/device/github/callback", params={"code": "x", "state": state})
             assert cb.status_code == 400 and "GitHub did not authorize" in cb.text
             assert (await c.post("/v1/auth/token", json={"device_code": d["device_code"]})).status_code == 428
+
+
+# ---------------------------------------------------------------- forms post relative (site's /api proxy)
+
+ABSOLUTE_ACTION = re.compile(r"""action\s*=\s*["']?/""", re.I)
+
+
+def _action(text: str) -> str:
+    m = re.search(r"""action\s*=\s*'([^']*)'""", text)
+    assert m, text
+    return m.group(1)
+
+
+def _resolve(page_path: str, action: str, prefix: str = "/api") -> str:
+    """What a browser on prefix+page_path posts to."""
+    return urlsplit(str(httpx.URL(f"https://terminalart.club{prefix}{page_path}").join(action))).path
+
+
+async def test_device_forms_post_relative_dev(ctx):
+    async with ctx.client() as c:
+        pages = [await c.get("/device"), await c.post("/device", data={"user_code": "nope", "handle": "alex"})]
+    for r in pages:  # the form, and its error re-render
+        assert not ABSOLUTE_ACTION.search(r.text), r.text
+        assert _resolve("/device", _action(r.text)) == "/api/device"  # behind the proxy
+        assert _resolve("/device", _action(r.text), prefix="") == "/device"  # direct
+
+
+async def test_device_forms_post_relative_github(tmp_path, monkeypatch):
+    monkeypatch.setattr(auth, "_github_client", _github(*GITHUB_FAILURES["token_5xx"]))
+    async with make_ctx(tmp_path, worker_enabled=False, auth_mode="github", github_client_id="cid") as ctx:
+        async with ctx.client() as c:
+            d = (await c.post("/v1/auth/device", json={})).json()
+            start = await c.post("/device/github", data={"user_code": d["user_code"]})
+            state = parse_qs(urlsplit(start.headers["location"]).query)["state"][0]
+            pages = {
+                "/device": await c.get("/device"),
+                "/device/github": await c.post("/device/github", data={"user_code": "nope"}),
+                "/device/github/callback": await c.get("/device/github/callback", params={"code": "x", "state": state}),
+            }
+    for path, r in pages.items():
+        assert not ABSOLUTE_ACTION.search(r.text), path
+        assert _resolve(path, _action(r.text)) == "/api/device/github", path
+        assert _resolve(path, _action(r.text), prefix="") == "/device/github", path
+
+
+def test_web_login_form_posts_relative():
+    from tac_platform.web_auth import _login_form
+
+    assert not ABSOLUTE_ACTION.search(_login_form("/me"))

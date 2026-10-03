@@ -133,7 +133,14 @@ async def poll_token(body: TokenIn, request: Request):
 # ---------------------------------------------------------------- verification page
 
 
-def _device_form(code: str = "", handle: str = "", error: str = "", github: bool = False) -> str:
+def relative_to(request: Request, target: str) -> str:
+    """`target` (an absolute app path) as a path relative to this request's URL, so a form posts back through
+    whatever prefix the browser used, e.g. the site's same-site /api proxy: /device -> "device",
+    /device/github/callback -> "../../device/github"."""
+    return "../" * (request.url.path.count("/") - 1) + target.lstrip("/")
+
+
+def _device_form(request: Request, code: str = "", handle: str = "", error: str = "", github: bool = False) -> str:
     err = f"<p class=err>{html.escape(error)}</p>" if error else ""
     handle_field = (
         ""
@@ -142,7 +149,7 @@ def _device_form(code: str = "", handle: str = "", error: str = "", github: bool
         f"<input id=handle name=handle type=text required pattern='[a-z0-9-]{{2,24}}' value='{html.escape(handle)}'"
         " autocomplete=off>"
     )
-    action = "/device/github" if github else "/device"
+    action = html.escape(relative_to(request, "/device/github" if github else "/device"))
     button = "continue with GitHub" if github else "connect"
     return page(
         "spare cycles · connect",
@@ -158,7 +165,7 @@ def _device_form(code: str = "", handle: str = "", error: str = "", github: bool
 @router.get("/device", response_class=HTMLResponse)
 async def device_page(request: Request, code: str = "") -> str:
     github = request.app.state.settings.auth_mode == "github"
-    return _device_form(code=normalize_user_code(code) or "", github=github)
+    return _device_form(request, code=normalize_user_code(code) or "", github=github)
 
 
 async def _approve(request: Request, user_code: str, user_id: int, handle: str) -> bool:
@@ -179,13 +186,13 @@ async def device_submit(request: Request, user_code: str = Form(""), handle: str
     if st.settings.auth_mode != "dev":
         raise ApiError(404, "not_found")
     if not await take_rate_token(st.db, f"device-form:{ip_key(request)}", 10, 600):
-        return HTMLResponse(_device_form(user_code, handle, "Too many attempts. Wait ten minutes."), 429)
+        return HTMLResponse(_device_form(request, user_code, handle, "Too many attempts. Wait ten minutes."), 429)
     code = normalize_user_code(user_code)
     handle = handle.strip().lower()
     if not code:
-        return HTMLResponse(_device_form(user_code, handle, "That code is not XXXX-XXXX."), 400)
+        return HTMLResponse(_device_form(request, user_code, handle, "That code is not XXXX-XXXX."), 400)
     if not HANDLE_RE.match(handle) or handle in RESERVED_HANDLES:
-        return HTMLResponse(_device_form(code, handle, "Handles are 2-24 of a-z, 0-9 and dash."), 400)
+        return HTMLResponse(_device_form(request, code, handle, "Handles are 2-24 of a-z, 0-9 and dash."), 400)
     # One transaction: code still pending + handle free -> create user + approve code.
     # Dev mode: a handle belongs to the first device that claims it; no re-login as an existing handle.
     error, status = "", 200
@@ -206,7 +213,7 @@ async def device_submit(request: Request, user_code: str = Form(""), handle: str
             await tx.audit(f"user:{handle}", "user_created")
             await tx.audit(f"user:{handle}", "device_approved")
     if error:
-        return HTMLResponse(_device_form(code, handle, error), status)
+        return HTMLResponse(_device_form(request, code, handle, error), status)
     return page(
         "spare cycles · connected",
         f"<h1>connected</h1><div class=card><p class=ok>You are <b>{html.escape(handle)}</b>.</p>"
@@ -291,7 +298,7 @@ async def github_start(request: Request, user_code: str = Form("")):
         "SELECT 1 FROM device_codes WHERE user_code = ? AND status = 'pending' AND expires_at > ?",
         (code, time.time()),
     ):
-        return HTMLResponse(_device_form(user_code, error="Unknown or expired code.", github=True), 400)
+        return HTMLResponse(_device_form(request, user_code, error="Unknown or expired code.", github=True), 400)
     nonce = secrets.token_urlsafe(16)
     state = f"{code}.{nonce}.{_sign(code + nonce, st.secret)}"
     query = urlencode(
@@ -319,14 +326,15 @@ async def github_callback(request: Request, code: str = "", state: str = ""):
         not hmac.compare_digest(sig.encode(), _sign(user_code + nonce, st.secret).encode())
         or request.cookies.get("tac_gh_nonce") != nonce
     ):
-        return HTMLResponse(_device_form(error="Login state mismatch. Start again.", github=True), 400)
+        return HTMLResponse(_device_form(request, error="Login state mismatch. Start again.", github=True), 400)
     ident = await github_identity(st, code)
     if ident is None:
-        return HTMLResponse(_device_form(error="GitHub did not authorize.", github=True), 400)
+        return HTMLResponse(_device_form(request, error="GitHub did not authorize.", github=True), 400)
     gh_id, login = ident
     row = await user_for_github(st, gh_id, login)
     if row is None:
-        return HTMLResponse(_device_form(error=f"Handle '{login}' is unavailable (TODO: pick one).", github=True), 409)
+        error = f"Handle '{login}' is unavailable (TODO: pick one)."
+        return HTMLResponse(_device_form(request, error=error, github=True), 409)
     if not await _approve(request, user_code, row["id"], row["handle"]):
-        return HTMLResponse(_device_form(error="That code expired. Start again.", github=True), 400)
+        return HTMLResponse(_device_form(request, error="That code expired. Start again.", github=True), 400)
     return page("spare cycles · connected", f"<h1>connected as {html.escape(row['handle'])}</h1>")
