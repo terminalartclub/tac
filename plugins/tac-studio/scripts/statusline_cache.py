@@ -3,7 +3,7 @@
 It does NOT replace your statusline. Wrap your existing one:
 
     "statusLine": {"type": "command",
-                   "command": "python3 ~/.claude/plugins/data/tac-tac-community/statusline_cache.py -- <your existing statusline command>"}
+                   "command": "python3 ~/.claude/plugins/data/tac-terminalartclub/statusline_cache.py -- <your existing statusline command>"}
 
 It reads the session JSON from stdin, writes the cache (atomically, only when the values change),
 then runs your command with the same stdin and prints its output. With nothing after `--` it prints

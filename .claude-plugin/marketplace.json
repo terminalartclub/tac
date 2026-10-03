@@ -1,5 +1,5 @@
 {
-  "name": "tac-community",
+  "name": "terminalartclub",
   "description": "Terminal Art Club community: spend spare Claude capacity on terminal-art animations.",
   "owner": { "name": "Terminal Art Club" },
   "plugins": [

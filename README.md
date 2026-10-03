@@ -1,4 +1,4 @@
-# tac-community: spare cycles
+# terminal art club: the tac plugin
 
 Use the Claude capacity you'd otherwise let expire to have Claude make a looping terminal-art
 animation, then share it in the Terminal Art Club community gallery. You need no git and no GitHub.
@@ -12,8 +12,8 @@ install plugin → /tac:login (once) → /tac:create → /tac:play → /tac:subm
 **Install** (needs Claude Code, `uv` and Python 3.10+; `ffmpeg` only if you want mp4 reels):
 
 ```bash
-claude plugin marketplace add terminal-art-club/tac-community   # or a local checkout: ./tac-community
-claude plugin install tac@tac-community
+claude plugin marketplace add terminalartclub/tac   # or a local checkout: ./tac-community
+claude plugin install tac@terminalartclub
 ```
 
 **Make and share a piece** from any project directory. Work lands in `./tac-work/<name>/`.
@@ -66,7 +66,7 @@ wraps your existing statusline rather than replacing it. In `~/.claude/settings.
 ```json
 "statusLine": {
   "type": "command",
-  "command": "python3 ~/.claude/plugins/data/tac-tac-community/statusline_cache.py -- <your current statusline command>"
+  "command": "python3 ~/.claude/plugins/data/tac-terminalartclub/statusline_cache.py -- <your current statusline command>"
 }
 ```
 
@@ -99,7 +99,7 @@ excluded). `/usage` has no machine-readable output, so nothing is read from it.
 ## Repo layout
 
 ```
-.claude-plugin/marketplace.json     marketplace "tac-community" → plugins/tac-studio (plugin name "tac")
+.claude-plugin/marketplace.json     marketplace "terminalartclub" → plugins/tac-studio (plugin name "tac")
 plugins/tac-studio/
   .claude-plugin/plugin.json
   bin/tac  bin/tacctl               launchers: uv run --with rich --with Pillow --with fonttools

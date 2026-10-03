@@ -14,7 +14,7 @@
     tacctl play <name>                 print the live `tac play` command, build + open the review page
 
 Env: TAC_API (default http://127.0.0.1:8790), TAC_REPO (PR fallback, default
-terminal-art-club/tac-community), TAC_WORK (default ./tac-work).
+terminalartclub/tac), TAC_WORK (default ./tac-work).
 """
 
 from __future__ import annotations
@@ -45,7 +45,7 @@ import meta as metamod  # noqa: E402
 import notes as notesmod  # noqa: E402
 
 DEFAULT_API = "http://127.0.0.1:8790"
-DEFAULT_REPO = "terminal-art-club/tac-community"
+DEFAULT_REPO = "terminalartclub/tac"
 PROCESS_W = 540
 TERMINAL = {"rejected", "in_review", "published"}
 
