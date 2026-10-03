@@ -46,6 +46,10 @@ def iso_week(dt: datetime | None = None) -> str:
     return f"{year}-W{week:02d}"
 
 
+class NotSuspended(Exception):
+    """A re-sweep was asked for a user who is not (or no longer) suspended."""
+
+
 class Publisher:
     def __init__(self, db: Database, store: MediaStore, secret: str = "") -> None:
         self.db = db
@@ -98,8 +102,10 @@ class Publisher:
                 await self.regenerate()
             return {"id": f"{row['handle']}/{row['slug']}", "status": "rejected"}
 
-    async def suspend(self, handle: str, reason: str, actor: str = "admin") -> dict | None:
+    async def suspend(self, handle: str, reason: str | None, actor: str = "admin",
+                      resweep_only: bool = False) -> dict | None:
         """Suspend `handle` (None if no such user). Idempotent: on an already-suspended user it only re-sweeps.
+        resweep_only: never suspends; raises NotSuspended (nothing written) if the user isn't suspended now.
 
         One transaction under the DB write lock: suspended_at, every token/session/device code revoked, and
         hidden=1 with one audit row per published piece, so the DB never shows a half-suspended user. After
@@ -112,6 +118,8 @@ class Publisher:
                 if user is None:
                     return None
                 uid, already = user["id"], user["suspended_at"] is not None
+                if resweep_only and not already:
+                    raise NotSuspended  # a stale page after an unsuspend: rolls back, nothing written
                 if not already:
                     await tx.execute("UPDATE users SET suspended_at = ?, suspended_reason = ? WHERE id = ?",
                                      (now_iso(), reason, uid))

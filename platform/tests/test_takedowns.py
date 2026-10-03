@@ -278,15 +278,37 @@ async def test_suspend_is_one_transaction_and_a_retry_finishes_a_failed_media_sw
     store.delete_prefix = real_delete  # store is back; the moderator clicks Re-sweep
     async with ctx.admin() as a:
         page = (await a.get("/admin")).text
-        btn = re.search(r"<button type=button data-act='([^']*)' data-body='([^']*)'>Re-sweep</button>", page)
-        assert btn and btn.group(1) == f"/v1/admin/users/{h}/suspend"
-        r = (await a.post(btn.group(1), json=json.loads(htmlmod.unescape(btn.group(2))))).json()
+        btn = re.search(r"<button type=button data-act='([^']*)'>Re-sweep</button>", page)
+        assert btn and btn.group(1) == f"/v1/admin/users/{h}/resweep"
+        r = (await a.post(btn.group(1))).json()
     assert r["already_suspended"] is True and r["hidden"] == []
     assert r["media_removed"] == [f"{h}/{s2}"] and r["media_failed"] == []
     async with ctx.client() as c:
         assert (await c.get(f"/media/{h}/{s2}/preview.webp")).status_code == 404
     assert [x["detail"] for x in await _audit(ctx, "suspend")] == ["DMCA-2026-001"]  # one suspend row, first reason
     assert (await db.fetchone("SELECT suspended_reason FROM users WHERE handle = ?", (h,)))[0] == "DMCA-2026-001"
+    async with ctx.admin() as a:  # a repeated /suspend with another reason also keeps the first
+        assert (await a.post(f"/v1/admin/users/{h}/suspend", json={"reason": "OTHER-1"})).json()["already_suspended"]
+    assert (await db.fetchone("SELECT suspended_reason FROM users WHERE handle = ?", (h,)))[0] == "DMCA-2026-001"
+    assert [x["detail"] for x in await _audit(ctx, "suspend")] == ["DMCA-2026-001"]
+
+
+async def test_resweep_from_a_stale_page_never_re_suspends(ctx):
+    _, _, h, s = await _published(ctx)
+    db = ctx.app.state.db
+    async with ctx.admin() as a:
+        await a.post(f"/v1/admin/users/{h}/suspend", json={"reason": "DMCA-2026-006"})
+        stale = (await a.get("/admin")).text  # the moderator's tab, before someone else unsuspends
+        assert f"data-act='/v1/admin/users/{h}/resweep'>Re-sweep<" in stale
+        await a.post(f"/v1/admin/users/{h}/unsuspend", json={"reason": "APPEAL-2026-002"})
+        r = await a.post(f"/v1/admin/users/{h}/resweep")
+        assert r.status_code == 409 and r.json()["error"] == "not_suspended"
+        assert (await a.post("/v1/admin/users/nobody/resweep")).status_code == 404
+    row = await db.fetchone("SELECT suspended_at, suspended_reason FROM users WHERE handle = ?", (h,))
+    assert tuple(row) == (None, None)
+    assert [x["detail"] for x in await _audit(ctx, "suspend")] == ["DMCA-2026-006"]  # no second suspend
+    async with ctx.client() as c:
+        assert (await c.post(f"/v1/admin/users/{h}/resweep")).status_code == 401
 
 
 async def test_suspend_rejects_queued_work_and_the_worker_skips_suspended_owners(tmp_path):

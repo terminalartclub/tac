@@ -15,6 +15,7 @@ from pydantic import BaseModel, StringConstraints
 from .models import HIGH_TOKENS, RejectIn
 from . import automod_budget
 from .db import now_iso
+from .publish import NotSuspended
 from .views import views_summary
 from .web import ApiError, page
 
@@ -311,6 +312,22 @@ async def suspend(handle: str, body: ReasonIn, request: Request) -> dict:
             "reminder": f"{IG_REMINDER}: {', '.join(on_ig)}" if on_ig else None}
 
 
+@router.post("/v1/admin/users/{handle}/resweep")
+async def resweep(handle: str, request: Request) -> dict:
+    """Finish a suspended user's sweep (hide anything visible, retry failed media deletes). Never suspends:
+    409 not_suspended if the user isn't suspended now. The suspension, its reason and audit row are untouched."""
+    require_admin(request)
+    try:
+        res = await request.app.state.publisher.suspend(handle, None, "admin", resweep_only=True)
+    except NotSuspended:
+        raise ApiError(409, "not_suspended", detail="the user is not suspended; nothing was done") from None
+    if res is None:
+        raise ApiError(404, "not_found")
+    on_ig = res.pop("ig_posted")
+    return {"handle": handle, "suspended": True, **res,
+            "reminder": f"{IG_REMINDER}: {', '.join(on_ig)}" if on_ig else None}
+
+
 @router.post("/v1/admin/users/{handle}/unsuspend")
 async def unsuspend(handle: str, body: ReasonIn, request: Request) -> dict:
     """Sign-in works again. Hidden pieces stay hidden: the moderator unhides them one by one."""
@@ -540,8 +557,9 @@ def _suspend_button(handle: str, suspended: bool) -> str:
 
 
 def _resweep_button(handle: str) -> str:
-    """Suspend again: idempotent, it hides anything visible and retries any public media delete that failed."""
-    return _button("Re-sweep", f"/v1/admin/users/{_seg(handle)}/suspend", {"reason": "re-sweep"})
+    """Hides anything visible and retries any failed public media delete. Its own endpoint, so a stale page
+    can't re-suspend a user who was unsuspended in the meantime (409 not_suspended)."""
+    return _button("Re-sweep", f"/v1/admin/users/{_seg(handle)}/resweep")
 
 
 def _delete_account_button(handle: str) -> str:

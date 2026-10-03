@@ -225,7 +225,8 @@ docker run --rm --name tac-render-<random> --network none --read-only --tmpfs /t
   the same guard. Publish and unhide are compare-and-swaps that require an unsuspended owner, so neither the
   admin nor trusted auto-publish can put a suspended artist's piece back up. After the commit, each
   `public/<handle>/<slug>` prefix is deleted in its own try (failures listed in the response) and
-  `community.json` is regenerated once. Suspend is idempotent: calling it again re-sweeps, so a retry
+  `community.json` is regenerated once. Suspend is idempotent: calling it again re-sweeps (the first reason is kept). The Re-sweep button posts to
+  `/resweep`, which never suspends (409 `not_suspended` from a stale page after an unsuspend), so a retry
   finishes a media delete that failed.
 - The moderator's reason is never shown to the suspended user; sign-in pages and the API show a fixed message.
 - Admin account deletion (`POST /v1/admin/users/{h}/delete {reason}`) reuses `delete_account`; it is how a
