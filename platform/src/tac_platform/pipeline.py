@@ -18,6 +18,7 @@ from pathlib import Path
 from .automod import Automod
 from .config import Settings
 from .db import Database, now_iso
+from .models import HIGH_TOKENS
 from .publish import Publisher
 from .renderer import Renderer, make_renderer
 from .storage import MediaStore
@@ -226,7 +227,9 @@ class Pipeline:
             return
         await self._finish(sub_id, "in_review", reasons)
         clean = am.verdict is not None and am.verdict.safe and am.verdict.on_brief
-        if clean and row["trusted"]:
+        tokens = json.loads(row["meta_json"]).get("tokens")
+        high_tokens = isinstance(tokens, int) and tokens > HIGH_TOKENS  # feeds the public counter: a human checks it
+        if clean and row["trusted"] and not high_tokens:
             await self.publisher.publish(sub_id, "system:trusted", from_status="in_review")
 
     async def _store_render(self, sub_id: str, out_dir: Path) -> tuple[dict, int]:

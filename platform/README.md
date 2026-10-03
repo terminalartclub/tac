@@ -105,7 +105,7 @@ site JS: GET /api/v1/auth/web/csrf → X-TAC-CSRF on every PATCH/POST/DELETE mad
 
 `meta` is a JSON string.
 - Required: `title` (≤ 80), `model` (`claude-…` id).
-- Optional: `description` (≤ 400), `tokens` (whole number 0–2,000,000 or null; > 1,000,000 shows a `high_tokens` badge in `/admin`), `iterations`, `loop_s`, `license`, `process_notes` (≤ 4 strings, one per process image), `human_role` (`none` default | `seeded` | `directed`, i.e. how much the person steered the piece).
+- Optional: `description` (≤ 400), `tokens` (whole number 0–2,000,000 or null; > 1,000,000 shows a `high_tokens` badge in `/admin` and is never auto-published, even for trusted handles), `iterations`, `loop_s`, `license`, `process_notes` (≤ 4 strings, one per process image), `human_role` (`none` default | `seeded` | `directed`, i.e. how much the person steered the piece).
 - Unknown keys are ignored.
 - `human_role` is passed through to `community.json` and shown in `/admin`.
 

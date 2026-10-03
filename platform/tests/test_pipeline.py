@@ -357,3 +357,20 @@ async def test_high_tokens_flag_in_review_queue_and_tokens_in_community_json(ctx
     doc = await ctx.app.state.publisher.regenerate()
     assert [(p["title"], p["tokens"]) for p in doc["pieces"]] == [("big", 1_000_001)]  # tokens published per piece
     assert doc["totals"]["tokens"] == 1_000_001
+
+
+
+@pytest.mark.parametrize("tokens,expect", [(1_000_001, "in_review"), (1_000_000, "published")])
+async def test_trusted_high_tokens_held_for_review(tmp_path, tokens, expect):
+    async with make_ctx(tmp_path, automod_client=fake_claude(SAFE)) as ctx:
+        token = await ctx.login("alex")
+        await ctx.app.state.db.execute("UPDATE users SET trusted = 1 WHERE handle = 'alex'")
+        sub = (await ctx.submit(token, meta={**META, "tokens": tokens})).json()
+        st = await ctx.wait(token, sub["id"], until=("published", "rejected", "in_review"))
+        if expect == "in_review":  # give a would-be auto-publish time to happen; it must not
+            import asyncio
+            await asyncio.sleep(0.3)
+            st = await ctx.wait(token, sub["id"], until=("published", "rejected", "in_review"))
+        else:
+            st = await ctx.wait(token, sub["id"], until=("published",))
+        assert st["status"] == expect
