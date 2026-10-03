@@ -6,7 +6,7 @@ import json
 import re
 from urllib.parse import quote, urlencode, urlsplit
 
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, Path, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from typing import Annotated
 
@@ -361,7 +361,7 @@ async def delete_user(handle: str, body: ReasonIn, request: Request) -> dict:
 
 
 @router.post("/v1/admin/blocked/{block_id}/unblock")
-async def unblock(block_id: int, body: ReasonIn, request: Request) -> dict:
+async def unblock(block_id: Annotated[int, Path(ge=1, le=2**63 - 1)], body: ReasonIn, request: Request) -> dict:
     """Undo ONE block, by its id (ref = a handle, which can belong to several blocked identities over time)."""
     require_admin(request)
     async with request.app.state.db.tx() as tx:

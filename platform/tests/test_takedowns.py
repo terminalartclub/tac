@@ -445,6 +445,10 @@ async def test_deleting_a_suspended_account_blocks_the_identity_until_unblocked(
     assert (await ctx.app.state.db.fetchone("SELECT COUNT(*) AS n FROM users"))["n"] == 0
     async with ctx.admin() as a:
         assert (await a.post("/v1/admin/blocked/999/unblock", json={"reason": "x"})).status_code == 404
+        for bad in ("99999999999999999999", str(2**63), "0", "-1"):  # outside SQLite's INTEGER / no such id
+            r = await a.post(f"/v1/admin/blocked/{bad}/unblock", json={"reason": "x"})
+            assert r.status_code == 400 and r.json()["error"] == "invalid_request", bad
+        assert (await a.post(f"/v1/admin/blocked/{2**63 - 1}/unblock", json={"reason": "x"})).status_code == 404
         assert (await a.post("/v1/admin/blocked/alex/unblock", json={"reason": "x"})).status_code == 400  # ids only
         assert (await a.post(f"/v1/admin/blocked/{bid}/unblock", json={})).status_code == 400  # reason required
         r = await a.post(f"/v1/admin/blocked/{bid}/unblock", json={"reason": "APPEAL-2026-001"})
