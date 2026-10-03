@@ -13,7 +13,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from . import admin, auth, events, me, moderation, render_io, submissions, views, web_auth
+from . import admin, auth, events, me, moderation, og, render_io, submissions, views, web_auth
 from .automod import Automod
 from .config import Settings
 from .db import Database
@@ -146,6 +146,8 @@ def create_app(settings: Settings | None = None, automod: Automod | None = None)
         pipeline = Pipeline(settings, db, store, publisher, automod or Automod(settings))
         app.state.settings, app.state.db, app.state.store = settings, db, store
         app.state.secret, app.state.publisher, app.state.pipeline = secret, publisher, pipeline
+        app.state.og_template = og.Template(f"{settings.site_url}/index.html")
+        await publisher.backfill_cards()
         await publisher.regenerate()
         if settings.worker_enabled:
             await pipeline.start()
@@ -185,7 +187,7 @@ def create_app(settings: Settings | None = None, automod: Automod | None = None)
     async def healthz() -> dict:
         return {"ok": True}
 
-    for r in (auth.router, web_auth.router, me.router, submissions.router, moderation.router, views.router, events.router,
+    for r in (auth.router, web_auth.router, me.router, submissions.router, moderation.router, views.router, events.router, og.router,
               render_io.router, admin.router):
         app.include_router(r)
     app.mount("/media", StaticFiles(directory=public_dir), name="media")

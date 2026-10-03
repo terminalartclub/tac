@@ -10,6 +10,7 @@ import logging
 import re
 from datetime import UTC, datetime
 
+from . import cards
 from .db import Database, now_iso
 from .storage import MediaStore
 from .views import utc_today, views_summary
@@ -133,6 +134,49 @@ class Publisher:
             raise RuntimeError("piece.py missing")
         await self.store.put(f"{dst}/piece.py", piece)
         await self.store.copy_prefix(f"{src}/render/process", f"{dst}/process")
+        await self.write_cards(handle, slug)
+
+    async def write_cards(self, handle: str, slug: str) -> bool:
+        """share.jpg (og:image) + card.jpg (twitter:image) from the public og.jpg. A failure is logged,
+        never fatal: the piece still publishes, and the og endpoint falls back to og.jpg."""
+        row = await self._piece_row(handle, slug)
+        og = await self.store.get(f"public/{handle}/{slug}/og.jpg")
+        if row is None or og is None:
+            return False
+        model = model_label(json.loads(row["meta_json"]).get("model", ""))
+        try:
+            share, _ = await asyncio.to_thread(cards.share_jpg, og, handle, model)
+            card = await asyncio.to_thread(cards.card_jpg, og, row["title"], handle, model)
+        except Exception:  # noqa: BLE001
+            log.exception("share card render failed for %s/%s", handle, slug)
+            return False
+        await self.store.put(f"public/{handle}/{slug}/share.jpg", share)
+        await self.store.put(f"public/{handle}/{slug}/card.jpg", card)
+        return True
+
+    async def backfill_cards(self) -> int:
+        """Startup: render cards for published pieces that lack them, or all of them when the card
+        layout (cards.VERSION) changed. Idempotent; returns how many were written."""
+        version = await self.db.fetchone("SELECT value FROM kv WHERE key = 'cards_version'")
+        stale = version is None or version["value"] != cards.VERSION
+        rows = await self.db.fetchall(
+            "SELECT u.handle, s.slug FROM submissions s JOIN users u ON u.id = s.user_id"
+            " WHERE s.status = 'published' AND s.hidden = 0"
+        )
+        n = 0
+        async with self._media_lock:  # never races a hide deleting the same public dir
+            for r in rows:
+                h, sl = r["handle"], r["slug"]
+                have = all([await self.store.get(f"public/{h}/{sl}/{f}") is not None for f in ("share.jpg", "card.jpg")])
+                if (stale or not have) and await self.write_cards(h, sl):
+                    n += 1
+        await self.db.execute(
+            "INSERT INTO kv (key, value) VALUES ('cards_version', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (cards.VERSION,),
+        )
+        if n:
+            log.info("rendered share cards for %d published pieces", n)
+        return n
 
     async def _row(self, sub_id: str):
         return await self.db.fetchone(
@@ -284,6 +328,8 @@ class Publisher:
                     "views": c["views_total"],  # public, anonymous: one per IP per piece per UTC day
                     "preview": f"{base}/preview.webp",
                     "og": f"{base}/og.jpg",
+                    "share": f"{base}/share.jpg",  # og:image (portrait, byline strip)
+                    "card": f"{base}/card.jpg",  # twitter:image (1200x630)
                     "source": f"{base}/piece.py",
                     "process": [
                         {

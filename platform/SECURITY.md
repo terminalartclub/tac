@@ -218,6 +218,15 @@ docker run --rm --name tac-render-<random> --network none --read-only --tmpfs /t
   anything else gets a 400. Only `event_days(name, day, n)` is stored, with no IP, hash, piece or cookie. The limit is
   60 per IP-day hash per hour, keyed with the same daily salt as views; over it the event is dropped with a 204.
 
+## 5b. Link-preview shell (`GET /v1/og`)
+
+- Public, unauthenticated HTML. The input is one `path` parameter, matched against fixed `/night-shift` shapes with the
+  same `HANDLE_RE` / `SLUG_RE` as uploads. Anything else is a 404, and so are unknown, hidden and unpublished pieces.
+- The page is the site's own `index.html`. It is fetched only from the configured `TAC_SITE_URL` (never a
+  request-supplied URL, so there is no SSRF), with no redirects, ≤ 512 KB, and cached for 10 minutes.
+- Every interpolated value (title, handle, model, URLs) goes through `html.escape(quote=True)`. The raw path is never
+  reflected: `og:url` is rebuilt from the validated handle and slug. A title such as `"><script>` comes out as text (tested).
+
 ## 6. Automod
 
 - The submission (code, title, description) is untrusted. The system prompt marks it as data, and the reply is forced into a JSON schema (`output_config.format`).
