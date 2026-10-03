@@ -79,7 +79,8 @@ async def _queue(request: Request) -> dict:
     db = request.app.state.db
     cols = (
         "s.id, s.slug, s.title, s.status, s.hidden, s.meta_json, s.reasons_json, s.critique, s.flags_json,"
-        " s.stats_json, s.process_n, s.created_at, u.handle, u.trusted, u.house_artist, u.display_name, u.link"
+        " s.stats_json, s.process_n, s.created_at, u.handle, u.trusted, u.house_artist, u.display_name, u.link,"
+        " u.instagram"
     )
     review = await db.fetchall(
         f"SELECT {cols} FROM submissions s JOIN users u ON u.id = s.user_id"
@@ -110,6 +111,7 @@ async def _queue(request: Request) -> dict:
             "high_tokens": _high_tokens(r["meta_json"]),
             "display_name": r["display_name"] or "",
             "link": r["link"] or "",
+            "instagram": r["instagram"] or "",
             "meta": json.loads(r["meta_json"]),
             "reasons": json.loads(r["reasons_json"]),
             "critique": r["critique"],
@@ -261,7 +263,8 @@ async def _card(request: Request, it: dict, mode: str) -> str:
         f"<div class=procs>{procs}</div></div><div>"
         f"<h2>{e(it['title'])} <span class=count>by {h}"
         f"{' (' + e(it['display_name']) + ')' if it['display_name'] else ''}"
-        f"{' · ' + e(it['link']) if it['link'] else ''} · {e(it['created_at'][:16])}"
+        f"{' · ' + e(it['link']) if it['link'] else ''}"
+        f"{' · ig @' + e(it['instagram']) if it['instagram'] else ''} · {e(it['created_at'][:16])}"
         f"{' · trusted' if it['trusted'] else ''}{' · house artist' if it['house_artist'] else ''}"
         f"{' <span class=chip>high_tokens</span>' if it['high_tokens'] else ''} · {it['views_7d']} views 7d · human: {e(it['meta'].get('human_role', 'none'))} · {e(it['meta'].get('size', 'full'))}</span></h2>"
         f"<p>{e(it['meta'].get('description', ''))}</p>"

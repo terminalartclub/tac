@@ -32,6 +32,10 @@ def _clean(v: str, allow_newlines: bool) -> str:
     return v.strip()
 
 
+# Instagram's own username rules: 1-30 of A-Z a-z 0-9 . _, no "..", no leading or trailing ".".
+IG_RE = re.compile(r"^(?!\.)(?!.*\.\.)(?!.*\.$)[A-Za-z0-9._]{1,30}$")
+
+
 class ProfileIn(BaseModel):
     """PATCH semantics: omitted = unchanged, "" or null = cleared."""
 
@@ -40,6 +44,7 @@ class ProfileIn(BaseModel):
     display_name: str | None = None
     bio: str | None = None
     link: str | None = None
+    instagram: str | None = None
 
     @field_validator("display_name")
     @classmethod
@@ -75,6 +80,21 @@ class ProfileIn(BaseModel):
         return v
 
 
+    @field_validator("instagram")
+    @classmethod
+    def v_instagram(cls, v):
+        if v is None or v.strip() == "":
+            return "" if v is not None else None
+        v = v.strip()
+        if "/" in v or ":" in v or "instagram.com" in v.lower():  # refuse, never parse a handle out of a URL
+            raise ValueError("instagram must be a bare handle such as @name, not a URL")
+        v = v.removeprefix("@")
+        if not IG_RE.fullmatch(v):
+            raise ValueError("instagram must be 1-30 letters, digits, '.' or '_', with no '..' and no leading "
+                             "or trailing '.'")
+        return v
+
+
 class DeleteIn(BaseModel):
     confirm: str
 
@@ -85,13 +105,14 @@ def profile_out(row) -> dict:
         "display_name": row["display_name"] or "",
         "bio": row["bio"] or "",
         "link": row["link"] or "",
+        "instagram": row["instagram"] or "",
         "created": row["created_at"][:10],
     }
 
 
 async def _load(request: Request, user_id: int):
     return await request.app.state.db.fetchone(
-        "SELECT handle, display_name, bio, link, created_at FROM users WHERE id = ?", (user_id,)
+        "SELECT handle, display_name, bio, link, instagram, created_at FROM users WHERE id = ?", (user_id,)
     )
 
 
@@ -109,7 +130,7 @@ async def patch_me(body: ProfileIn, request: Request) -> dict:
         raise ApiError(429, "rate_limited", detail=f"at most {PROFILE_UPDATES_PER_HOUR} profile updates per hour")
     changes = body.model_dump(exclude_unset=True)
     if changes:
-        cols = ", ".join(f"{k} = ?" for k in changes)  # keys are the model's three field names only
+        cols = ", ".join(f"{k} = ?" for k in changes)  # keys are ProfileIn's field names only (extra="forbid")
         async with st.db.tx() as tx:
             await tx.execute(f"UPDATE users SET {cols} WHERE id = ?", (*[v or None for v in changes.values()], user["id"]))
             await tx.audit(f"user:{user['handle']}", "profile_update", detail=",".join(sorted(changes)))

@@ -38,7 +38,7 @@ async def test_device_flow_dev_mode(ctx):
         assert r.status_code == 410
 
         me = await c.get("/v1/me", headers={"authorization": f"Bearer {token}"})
-        assert me.json()["handle"] == "alex" and set(me.json()) == {"handle", "display_name", "bio", "link", "created"}
+        assert me.json()["handle"] == "alex" and set(me.json()) == {"handle", "display_name", "bio", "link", "instagram", "created"}
         assert (await c.get("/v1/me", headers={"authorization": "Bearer nope"})).status_code == 401
         assert (await c.get("/v1/me")).status_code == 401
 

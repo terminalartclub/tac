@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS users (
     display_name TEXT,
     bio          TEXT,
     link         TEXT,
+    instagram    TEXT,                       -- bare IG handle (public, for tagging in posts)
     created_at  TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS access_tokens (
@@ -145,7 +146,7 @@ class Database:
         cols = {r["name"] for r in await self.fetchall("PRAGMA table_info(users)")}
         if "house_artist" not in cols:
             await self.conn.execute("ALTER TABLE users ADD COLUMN house_artist INTEGER NOT NULL DEFAULT 0")
-        for col in ("display_name", "bio", "link"):
+        for col in ("display_name", "bio", "link", "instagram"):
             if col not in cols:
                 await self.conn.execute(f"ALTER TABLE users ADD COLUMN {col} TEXT")
 

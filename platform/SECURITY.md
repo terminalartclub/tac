@@ -217,6 +217,9 @@ docker run --rm --name tac-render-<random> --network none --read-only --tmpfs /t
 - **Exposure:** view counts are public, aggregated and anonymous. `community.json` carries per-piece totals,
   per-artist totals and the current ISO week's sum, rebuilt hourly. It carries no hashes, no per-day series and nothing
   per viewer. The owner (`/v1/me/pieces`, Bearer) also sees the 7-day count and the 28-day series.
+- **Instagram handle** (`PATCH /v1/me` `instagram`) is public: when set, it appears in `community.json` as
+  `artists.<handle>.instagram` (and in `/admin`) so pieces can be tagged in posts. It is opt-in, a bare handle only
+  (URLs refused), and validated to Instagram's own rules.
 - **Site events** (`POST /v1/events`): an allowlist of three names (`piece_share`, `install_copy`, `install_send`);
   anything else gets a 400. Only `event_days(name, day, n)` is stored, with no IP, hash, piece or cookie. The limit is
   60 per IP-day hash per hour, keyed with the same daily salt as views; over it the event is dropped with a 204.

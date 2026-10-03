@@ -307,7 +307,7 @@ class Publisher:
 
     async def build(self) -> dict:
         rows = await self.db.fetchall(
-            "SELECT s.*, u.handle, u.house_artist, u.display_name, u.bio, u.link"
+            "SELECT s.*, u.handle, u.house_artist, u.display_name, u.bio, u.link, u.instagram"
             " FROM submissions s JOIN users u ON u.id = s.user_id"
             " WHERE s.status = 'published' AND s.hidden = 0 ORDER BY s.published_at DESC, s.id"
         )
@@ -322,7 +322,10 @@ class Publisher:
             meta = json.loads(r["meta_json"])
             c = counts[r["id"]]
             week_views += sum(c["views_28d"][-week_days:])
-            artists.setdefault(r["handle"], {"views": 0})["views"] += c["views_total"]
+            artist = artists.setdefault(r["handle"], {"views": 0})
+            artist["views"] += c["views_total"]
+            if r["instagram"]:  # public, opt-in; the key is absent when unset
+                artist["instagram"] = r["instagram"]
             stats = json.loads(r["stats_json"] or "{}")
             base = f"{r['handle']}/{r['slug']}"
             notes = meta.get("process_notes") or []

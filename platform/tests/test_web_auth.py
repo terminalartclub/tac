@@ -53,7 +53,7 @@ async def test_login_logout_same_user_as_plugin(ctx):
     c = await web_login(ctx, "alex", "/p/alex")
     async with aclosing(c):
         me = (await c.get("/v1/me")).json()
-        assert me["handle"] == "alex" and set(me) == {"handle", "display_name", "bio", "link", "created"}
+        assert me["handle"] == "alex" and set(me) == {"handle", "display_name", "bio", "link", "instagram", "created"}
         # rotation: logging in again replaces the session
         old = c.cookies.get("tac_session")
         r = await c.post("/v1/auth/web/login", data={"handle": "alex", "return": "/"})
@@ -384,3 +384,57 @@ async def test_admin_token_unrelated_to_session(ctx):
         assert (await c.get("/v1/admin/queue")).status_code == 401
         c.cookies.set("tac_admin", ADMIN)
         assert (await c.get("/v1/admin/queue")).status_code == 200
+
+
+@pytest.mark.parametrize("given,stored", [
+    ("terminal.art_club", "terminal.art_club"), ("@alex", "alex"), ("  @Alex_99 ", "Alex_99"),
+    ("a", "a"), ("x" * 30, "x" * 30), ("", ""),
+])
+async def test_instagram_valid_and_at_stripped(ctx, given, stored):
+    token = await ctx.login("alex")
+    async with ctx.client(authorization=f"Bearer {token}") as b:
+        r = await b.patch("/v1/me", json={"instagram": given})
+        assert r.status_code == 200, r.text
+        assert r.json()["instagram"] == stored and (await b.get("/v1/me")).json()["instagram"] == stored
+
+
+@pytest.mark.parametrize("bad", [
+    "https://instagram.com/alex", "instagram.com/alex", "www.instagram.com/alex", "http://x.y/z", "alex/x",
+    "ig:alex", "@@alex", "x" * 31, ".alex", "alex.", "al..ex", "al ex", "al-ex", "alex!", "алекс",
+    "<script>", "alex‮", "@",
+])
+async def test_instagram_invalid_or_url_refused(ctx, bad):
+    token = await ctx.login("alex")
+    async with ctx.client(authorization=f"Bearer {token}") as b:
+        assert (await b.patch("/v1/me", json={"instagram": "kept"})).status_code == 200
+        r = await b.patch("/v1/me", json={"instagram": bad})
+        assert r.status_code == 400, bad
+        assert (await b.get("/v1/me")).json()["instagram"] == "kept"  # a refused update writes nothing
+
+
+async def test_instagram_in_community_artists_only_when_set(ctx):
+    alex, bea = await ctx.login("alex"), await ctx.login("bea")
+    await published(ctx, alex)
+    await published(ctx, bea)
+    async with ctx.client(authorization=f"Bearer {alex}") as b:
+        assert (await b.patch("/v1/me", json={"instagram": "@alex.makes"})).status_code == 200
+    async with ctx.client() as c:
+        doc = (await c.get("/v1/community.json")).json()
+    assert doc["artists"]["alex"]["instagram"] == "alex.makes"
+    assert "instagram" not in doc["artists"]["bea"]
+    assert all("instagram" not in p.get("artist", {}) for p in doc["pieces"])  # artists map only
+    async with ctx.client(authorization=f"Bearer {alex}") as b:
+        assert (await b.patch("/v1/me", json={"instagram": ""})).json()["instagram"] == ""  # cleared
+    async with ctx.client() as c:
+        assert "instagram" not in (await c.get("/v1/community.json")).json()["artists"]["alex"]
+
+
+async def test_instagram_shown_in_admin_queue(ctx):
+    token = await ctx.login("alex")
+    async with ctx.client(authorization=f"Bearer {token}") as b:
+        await b.patch("/v1/me", json={"instagram": "alex.makes"})
+    sub = (await ctx.submit(token)).json()
+    await ctx.wait(token, sub["id"])
+    async with ctx.admin() as a:
+        assert (await a.get("/v1/admin/queue")).json()["in_review"][0]["instagram"] == "alex.makes"
+        assert "ig @alex.makes" in (await a.get("/admin")).text
