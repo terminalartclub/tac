@@ -116,7 +116,10 @@ async def test_suspend_revokes_everything_hides_everything_and_blocks_sign_in(ct
         body = r.json()
         assert body["suspended"] is True and body["revoked_tokens"] == 1 and body["revoked_sessions"] == 1
         assert sorted(body["hidden"]) == sorted([f"{h}/{s1}", f"{h}/{s2}"]) and body["reminder"] is None
-        assert (await a.post("/v1/admin/users/alex/suspend", json={"reason": "x"})).status_code == 409
+        assert body["already_suspended"] is False and body["media_failed"] == []
+        assert sorted(body["media_removed"]) == sorted([f"{h}/{s1}", f"{h}/{s2}"])
+        again = (await a.post("/v1/admin/users/alex/suspend", json={"reason": "x"})).json()  # idempotent re-sweep
+        assert again["already_suspended"] is True and again["hidden"] == [] and again["media_removed"] == []
 
     assert await _public_ids(ctx) == [f"{oh}/{os_}"]  # other artists untouched
     db = ctx.app.state.db
@@ -227,6 +230,46 @@ async def test_sign_in_refusal_holds_inside_the_write_transaction(tmp_path, monk
                                                   (d["user_code"],))
             assert row["status"] == "pending"  # never approved
         assert (await ctx.app.state.db.fetchone("SELECT COUNT(*) AS n FROM web_sessions"))["n"] == 0
+
+
+async def test_suspend_is_one_transaction_and_a_retry_finishes_a_failed_media_sweep(ctx):
+    token, _, h, s1 = await _published(ctx)
+    _, _, _, s2 = await _published(ctx, token=token, title="Second Light")
+    pub, store, db = ctx.app.state.publisher, ctx.app.state.store, ctx.app.state.db
+    real_delete, real_regen = store.delete_prefix, pub.regenerate
+    regens = []
+
+    async def flaky_delete(prefix):  # the store dies after the first piece
+        if prefix == f"public/{h}/{s2}":
+            raise OSError("store unavailable")
+        await real_delete(prefix)
+
+    async def counting_regen():
+        regens.append(1)
+        return await real_regen()
+
+    store.delete_prefix, pub.regenerate = flaky_delete, counting_regen
+    async with ctx.admin() as a:
+        r = (await a.post(f"/v1/admin/users/{h}/suspend", json={"reason": "DMCA-2026-001"})).json()
+    assert r["media_removed"] == [f"{h}/{s1}"] and r["media_failed"] == [f"{h}/{s2}"]
+    assert len(regens) == 1  # once for the whole sweep, not per piece
+    # the DB side is complete despite the media failure: both hidden, each with its own audit row
+    rows = await db.fetchall("SELECT hidden FROM submissions WHERE status = 'published'")
+    assert [x["hidden"] for x in rows] == [1, 1]
+    assert sorted(x["target"] for x in await _audit(ctx, "hide")) == sorted([f"{h}/{s1}", f"{h}/{s2}"])
+    assert await _public_ids(ctx) == []
+    async with ctx.client() as c:
+        assert (await c.get(f"/media/{h}/{s2}/preview.webp")).status_code == 200  # the leftover
+
+    store.delete_prefix = real_delete  # store is back; the moderator retries
+    async with ctx.admin() as a:
+        r = (await a.post(f"/v1/admin/users/{h}/suspend", json={"reason": "retry"})).json()
+    assert r["already_suspended"] is True and r["hidden"] == []
+    assert r["media_removed"] == [f"{h}/{s2}"] and r["media_failed"] == []
+    async with ctx.client() as c:
+        assert (await c.get(f"/media/{h}/{s2}/preview.webp")).status_code == 404
+    assert [x["detail"] for x in await _audit(ctx, "suspend")] == ["DMCA-2026-001"]  # one suspend row, first reason
+    assert (await db.fetchone("SELECT suspended_reason FROM users WHERE handle = ?", (h,)))[0] == "DMCA-2026-001"
 
 
 # ---------------------------------------------------------------- Instagram

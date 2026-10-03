@@ -97,6 +97,62 @@ class Publisher:
                 await self.regenerate()
             return {"id": f"{row['handle']}/{row['slug']}", "status": "rejected"}
 
+    async def suspend(self, handle: str, reason: str, actor: str = "admin") -> dict | None:
+        """Suspend `handle` (None if no such user). Idempotent: on an already-suspended user it only re-sweeps.
+
+        One transaction under the DB write lock: suspended_at, every token/session/device code revoked, and
+        hidden=1 with one audit row per published piece, so the DB never shows a half-suspended user. After
+        the commit: every public/<handle>/<slug> prefix is deleted (each in its own try, failures reported)
+        and community.json regenerated once. A retry (the already-suspended path) finishes whatever failed.
+        _media_lock first, then the transaction: the same order as every other transition here."""
+        async with self._media_lock:
+            async with self.db.tx() as tx:
+                user = await tx.fetchone("SELECT id, suspended_at FROM users WHERE handle = ?", (handle,))
+                if user is None:
+                    return None
+                uid, already = user["id"], user["suspended_at"] is not None
+                if not already:
+                    await tx.execute("UPDATE users SET suspended_at = ?, suspended_reason = ? WHERE id = ?",
+                                     (now_iso(), reason, uid))
+                    await tx.audit(actor, "suspend", target=handle, detail=reason)
+                tokens = await tx.execute("DELETE FROM access_tokens WHERE user_id = ?", (uid,))
+                sessions = await tx.execute("DELETE FROM web_sessions WHERE user_id = ?", (uid,))
+                await tx.execute("DELETE FROM device_codes WHERE user_id = ?", (uid,))  # approved, not yet polled
+                visible = await tx.conn.execute_fetchall(
+                    "SELECT id, slug, ig_posted_at FROM submissions WHERE user_id = ? AND status = 'published'"
+                    " AND hidden = 0", (uid,))
+                for p in visible:
+                    await tx.execute("UPDATE submissions SET hidden = 1, updated_at = ? WHERE id = ?", (now_iso(), p[0]))
+                    await tx.audit(actor, "hide", p[0], "published", "published", "account suspended",
+                                   target=f"{handle}/{p[1]}")
+                slugs = {r[0] for r in await tx.conn.execute_fetchall(
+                    "SELECT slug FROM submissions WHERE user_id = ?", (uid,))}
+            removed, failed = [], []
+            try:  # also public dirs no row names any more
+                slugs |= {k.split("/")[2] for k in await self.store.list(f"public/{handle}/") if k.count("/") >= 3}
+            except Exception:  # noqa: BLE001
+                log.exception("suspend %s: listing public media failed", handle)
+                failed.append(f"{handle}/*")
+            for slug in sorted(slugs):
+                prefix = f"public/{handle}/{slug}"
+                try:
+                    if await self.store.list(f"{prefix}/"):
+                        await self.store.delete_prefix(prefix)
+                        removed.append(f"{handle}/{slug}")
+                except Exception:  # noqa: BLE001
+                    log.exception("suspend %s: deleting %s failed", handle, prefix)
+                    failed.append(f"{handle}/{slug}")
+            await self.regenerate()
+            return {
+                "already_suspended": already,
+                "revoked_tokens": tokens,
+                "revoked_sessions": sessions,
+                "hidden": [f"{handle}/{p[1]}" for p in visible],
+                "ig_posted": [f"{handle}/{p[1]}" for p in visible if p[2]],
+                "media_removed": removed,
+                "media_failed": failed,
+            }
+
     async def delete_account(self, user_id: int, handle: str) -> bool:
         """Remove a user and everything they own. False if a render is in flight (worker holds a row)."""
         async with self._media_lock:

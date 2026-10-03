@@ -268,35 +268,15 @@ async def instagram_posted(handle: str, slug: str, body: IgPostedIn, request: Re
 @router.post("/v1/admin/users/{handle}/suspend")
 async def suspend(handle: str, body: ReasonIn, request: Request) -> dict:
     """Repeat infringer: no sign-in, no submissions, every token and session revoked, every published piece
-    hidden. The revocation is one transaction under the DB write lock, so no request authenticated by a
-    revoked credential can start after it commits, and every sign-in path re-checks suspended_at inside its
-    own transaction. Pieces are hidden after the commit; publish/unhide refuse a suspended owner meanwhile."""
+    hidden, all in one transaction (Publisher.suspend). Calling it again on a suspended user re-sweeps: any
+    visible piece is hidden and any public media left by a failed delete is removed."""
     require_admin(request)
-    st = request.app.state
-    async with st.db.tx() as tx:
-        user = await tx.fetchone("SELECT id, suspended_at FROM users WHERE handle = ?", (handle,))
-        if user is None:
-            raise ApiError(404, "not_found")
-        if user["suspended_at"]:
-            raise ApiError(409, "already_suspended")
-        await tx.execute("UPDATE users SET suspended_at = ?, suspended_reason = ? WHERE id = ?",
-                         (now_iso(), body.reason, user["id"]))
-        tokens = await tx.execute("DELETE FROM access_tokens WHERE user_id = ?", (user["id"],))
-        sessions = await tx.execute("DELETE FROM web_sessions WHERE user_id = ?", (user["id"],))
-        await tx.execute("DELETE FROM device_codes WHERE user_id = ?", (user["id"],))  # approved, not yet polled
-        await tx.audit("admin", "suspend", target=handle, detail=body.reason)
-    pieces = await st.db.fetchall(
-        "SELECT slug, ig_posted_at FROM submissions WHERE user_id = ? AND status = 'published' AND hidden = 0",
-        (user["id"],),
-    )
-    hidden, on_ig = [], []
-    for p in pieces:
-        if await st.publisher.hide(handle, p["slug"], "admin", detail="account suspended"):
-            hidden.append(f"{handle}/{p['slug']}")
-            if p["ig_posted_at"]:
-                on_ig.append(f"{handle}/{p['slug']}")
-    return {"handle": handle, "suspended": True, "revoked_tokens": tokens, "revoked_sessions": sessions,
-            "hidden": hidden, "reminder": f"{IG_REMINDER}: {', '.join(on_ig)}" if on_ig else None}
+    res = await request.app.state.publisher.suspend(handle, body.reason, "admin")
+    if res is None:
+        raise ApiError(404, "not_found")
+    on_ig = res.pop("ig_posted")
+    return {"handle": handle, "suspended": True, **res,
+            "reminder": f"{IG_REMINDER}: {', '.join(on_ig)}" if on_ig else None}
 
 
 @router.post("/v1/admin/users/{handle}/unsuspend")

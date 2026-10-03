@@ -213,13 +213,16 @@ docker run --rm --name tac-render-<random> --network none --read-only --tmpfs /t
   is the same transition as a report auto-hide (`Publisher.hide`): public media deleted, `community.json`
   regenerated, og/share 404. Reversible with unhide. Then delete, unhide, or suspend.
 - **Suspend** is one `BEGIN IMMEDIATE` transaction under the DB write lock: set `suspended_at`, delete every
-  `access_tokens`, `web_sessions` and `device_codes` row of the user, write the audit row. No request
+  `access_tokens`, `web_sessions` and `device_codes` row of the user, set `hidden=1` on every published
+  piece (one audit row each), write the suspend audit row. No request
   authenticated by a revoked credential can start after it commits. Every path that creates a credential
   re-checks `suspended_at` inside its own transaction (web session insert, device approval, token mint), and
   `current_user` refuses a suspended user (403 `suspended`) as a second line. The submission `INSERT` carries
   the same guard. Publish and unhide are compare-and-swaps that require an unsuspended owner, so neither the
-  admin nor trusted auto-publish can put a suspended artist's piece back up. Pieces are hidden after the
-  commit, each through `Publisher.hide`.
+  admin nor trusted auto-publish can put a suspended artist's piece back up. After the commit, each
+  `public/<handle>/<slug>` prefix is deleted in its own try (failures listed in the response) and
+  `community.json` is regenerated once. Suspend is idempotent: calling it again re-sweeps, so a retry
+  finishes a media delete that failed.
 - The moderator's reason is never shown to the suspended user; sign-in pages and the API show a fixed message.
 - Every hide, unhide, delete, suspend and unsuspend writes an audit row with its reason and a `target`
   (`handle/slug` or `handle`) that survives row deletion. `/admin/takedowns` lists the last 100.
