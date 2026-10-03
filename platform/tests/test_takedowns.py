@@ -762,6 +762,58 @@ async def test_first_open_vacuums_away_rows_deleted_before_secure_delete(tmp_pat
         await db.close()
 
 
+async def test_scrub_migration_is_all_or_nothing_and_retries(tmp_path):
+    import sqlite3
+
+    from tac_platform.db import SCHEMA, Database
+
+    path = tmp_path / "old.sqlite3"
+    con = sqlite3.connect(path)
+    con.executescript(SCHEMA)
+    con.executemany("INSERT INTO audit_log (at, actor, action, detail) VALUES ('x', ?, 'user_created', ?)",
+                    [(f"user:u{i}", f"github:{10_000_000 + i}") for i in range(50)])
+    con.execute("CREATE TRIGGER boom BEFORE UPDATE ON audit_log WHEN old.actor = 'user:u30'"
+                " BEGIN SELECT RAISE(ABORT, 'simulated crash'); END")  # dies partway through the UPDATE
+    con.commit()
+    con.close()
+
+    def state():
+        c = sqlite3.connect(path)
+        try:
+            return (c.execute("SELECT COUNT(*) FROM audit_log WHERE detail LIKE 'github:%'").fetchone()[0],
+                    c.execute("SELECT COUNT(*) FROM kv WHERE key = 'audit_github_ids_scrubbed'").fetchone()[0])
+        finally:
+            c.close()
+
+    db = Database(path)
+    with pytest.raises(Exception, match="simulated crash"):
+        await db.open()
+    assert not db.conn.in_transaction  # rolled back, not left open
+    await db.close()
+    assert state() == (50, 0)  # nothing half-done, no flag: the next boot retries
+    c = sqlite3.connect(path)
+    c.execute("DROP TRIGGER boom")
+    c.commit()
+    c.close()
+    db = Database(path)
+    await db.open()
+    await db.close()
+    assert state() == (0, 1)
+    db = Database(path)  # a racing process that read "no flag" before the other one committed it
+    await db.open()
+    real = db.fetchone
+
+    async def stale(sql, params=()):
+        return None if "audit_github_ids_scrubbed" in sql else await real(sql, params)
+
+    db.fetchone = stale
+    try:
+        await db._migrate()  # the flag already exists: must not raise IntegrityError
+    finally:
+        await db.close()
+    assert state() == (0, 1)
+
+
 async def test_raw_github_ids_in_old_audit_rows_are_scrubbed_once_on_open(tmp_path):
     import aiosqlite
 

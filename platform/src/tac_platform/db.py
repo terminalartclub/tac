@@ -188,26 +188,23 @@ class Database:
         if "ig_posted_at" not in {r["name"] for r in await self.fetchall("PRAGMA table_info(submissions)")}:
             await self.conn.execute("ALTER TABLE submissions ADD COLUMN ig_posted_at TEXT")
         if "id" not in {r["name"] for r in await self.fetchall("PRAGMA table_info(blocked_identities)")}:
-            # first shape keyed by the hash: rebuild with a surrogate id (can't ALTER in a PRIMARY KEY)
-            await self.conn.executescript(
-                "BEGIN IMMEDIATE;"
-                "ALTER TABLE blocked_identities RENAME TO blocked_identities_old;"
-                "CREATE TABLE blocked_identities (id INTEGER PRIMARY KEY, github_id_hash TEXT NOT NULL UNIQUE,"
-                " created_at TEXT NOT NULL, ref TEXT NOT NULL);"
-                "INSERT INTO blocked_identities (github_id_hash, created_at, ref)"
-                " SELECT github_id_hash, created_at, ref FROM blocked_identities_old ORDER BY created_at;"
-                "DROP TABLE blocked_identities_old;"
-                "COMMIT;"
-            )
+            # first shape keyed by the hash: rebuild with a surrogate id (can't ALTER in a PRIMARY KEY).
+            # tx(): a failure rolls the whole rebuild back (executescript would leave the transaction open).
+            async with self.tx() as tx:
+                await tx.execute("ALTER TABLE blocked_identities RENAME TO blocked_identities_old")
+                await tx.execute("CREATE TABLE blocked_identities (id INTEGER PRIMARY KEY, github_id_hash TEXT NOT NULL"
+                                 " UNIQUE, created_at TEXT NOT NULL, ref TEXT NOT NULL)")
+                await tx.execute("INSERT INTO blocked_identities (github_id_hash, created_at, ref)"
+                                 " SELECT github_id_hash, created_at, ref FROM blocked_identities_old ORDER BY created_at")
+                await tx.execute("DROP TABLE blocked_identities_old")
         if await self.fetchone("SELECT 1 FROM kv WHERE key = 'audit_github_ids_scrubbed'") is None:
             # once: user_created rows used to carry "github:<raw id>", which outlived account deletion. The live
-            # users row still has github_id; the log keeps only that the account came from GitHub.
-            await self.conn.executescript(
-                "BEGIN IMMEDIATE;"
-                "UPDATE audit_log SET detail = 'github' WHERE action = 'user_created' AND detail LIKE 'github:%';"
-                "INSERT INTO kv (key, value) VALUES ('audit_github_ids_scrubbed', '1');"
-                "COMMIT;"
-            )
+            # users row still has github_id; the log keeps only that the account came from GitHub. All or nothing,
+            # and idempotent if two processes race past the check (the flag is INSERT OR IGNORE).
+            async with self.tx() as tx:
+                await tx.execute("UPDATE audit_log SET detail = 'github' WHERE action = 'user_created'"
+                                 " AND detail LIKE 'github:%'")
+                await tx.execute("INSERT OR IGNORE INTO kv (key, value) VALUES ('audit_github_ids_scrubbed', '1')")
         audit_cols = {r["name"] for r in await self.fetchall("PRAGMA table_info(audit_log)")}
         for col in ("target", "data_json"):
             if col not in audit_cols:
