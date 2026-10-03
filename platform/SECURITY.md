@@ -131,6 +131,18 @@ docker run --rm --name tac-render-<random> --network none --read-only --tmpfs /t
 - Acceptance is stored per user (`terms_version`, `terms_accepted_at`) with an audit row per acceptance. Uploads
   are refused (403 `terms_not_accepted`) until the current version is accepted, and need `meta.rights_confirmed: true`.
 
+### Rights attestation
+
+- It's agent-mediated. `/tac:submit` tells the artist's own Claude to show the line *"You have the right to share
+  this, and it doesn't copy anyone else's characters, brands or logos."* and to pass `--confirm-rights` only after
+  the person confirms it in the conversation. `tacctl` refuses to upload without the flag.
+- The server records `rights_confirmed: true` in the piece's stored meta. With the uploader's accepted
+  `terms_version` (`terms_accepted_at`, and the `terms_accepted` audit row from sign-in), that says who uploaded
+  what under which terms.
+- It's a good-faith attestation, not proof. Nothing technical stops a client from setting the flag itself, and an
+  agent can misreport what the person said. It doesn't replace review, automod's `franchise_ip` flag, the report
+  flow or takedowns; it records that the uploader made the statement.
+
 
 - Device code: 32 random bytes, stored as sha256. The user code is 8 chars over the 20-letter RFC 8628 alphabet (20^8 ≈ 2.6e10), lives 10 min, and the form allows 10 attempts per 10 min per IP. Brute force is out of reach.
 - A device code is consumed exactly once (compare-and-swap `approved → consumed`). Replays get 410.
