@@ -133,3 +133,33 @@ async def test_code_sent_is_truncated_to_20k(tmp_path):
     text = client.messages.calls[0]["messages"][0]["content"][-1]["text"]
     assert res.verdict is not None and text.count("x") == 20_000 and 'truncated="true"' in text
     assert client.messages.calls[0]["output_config"]["format"]["schema"]["required"] == ["safe", "flags", "on_brief"]
+
+
+async def test_unexpected_automod_exception_goes_to_human_not_rejected(tmp_path, monkeypatch):
+    from tac_platform import automod as automod_mod
+
+    def boom(*a, **k):
+        raise KeyError("surprise")  # anything not anticipated, raised inside review()
+
+    monkeypatch.setattr(automod_mod, "neutralize", boom)
+    async with make_ctx(tmp_path, automod_client=fake_claude(SAFE)) as ctx:
+        token = await ctx.login("alex")
+        sub = (await ctx.submit(token)).json()
+        st = await ctx.wait(token, sub["id"])
+        assert st["status"] == "in_review" and st["reasons"] == ["automod error (KeyError)"]
+
+
+async def test_charge_failure_after_successful_call_is_logged_and_swallowed(tmp_path, monkeypatch, caplog):
+    async def broken_charge(db, usd, month=None):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(budget, "charge", broken_charge)
+    caplog.set_level("ERROR", logger="tac.automod")
+    client = usage_client(4000, 120)
+    async with make_ctx(tmp_path, automod_client=client) as ctx:
+        token = await ctx.login("alex")
+        await ctx.app.state.db.execute("UPDATE users SET trusted = 1 WHERE handle = 'alex'")
+        sub = (await ctx.submit(token)).json()
+        st = await ctx.wait(token, sub["id"], until=("published", "rejected"))
+        assert st["status"] == "published"  # the verdict still counts; only the ledger write failed
+    assert any("could not record automod spend" in r.message for r in caplog.records)

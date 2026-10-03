@@ -107,6 +107,16 @@ class Automod:
 
     async def review(self, code: str, preview_webp: bytes, title: str, description: str,
                      db: Database | None = None) -> AutomodResult:
+        """Never raises (except cancellation): anything unexpected becomes an error result, so the piece
+        goes to a human instead of the pipeline's crash handler rejecting it."""
+        try:
+            return await self._review(code, preview_webp, title, description, db)
+        except Exception as exc:  # noqa: BLE001
+            log.exception("automod failed unexpectedly")
+            return AutomodResult(error=f"automod error ({exc.__class__.__name__})")
+
+    async def _review(self, code: str, preview_webp: bytes, title: str, description: str,
+                      db: Database | None) -> AutomodResult:
         if self.client is None:
             return AutomodResult(skipped=True)
         if db is not None and await budget.over_budget(db, self.settings):
@@ -162,7 +172,10 @@ class Automod:
                  ("input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")}
         cost = budget.cost_usd(usage, self.price)
         if db is not None:
-            await budget.charge(db, cost)  # refusals and truncated answers are billed too
+            try:
+                await budget.charge(db, cost)  # refusals and truncated answers are billed too
+            except Exception:  # noqa: BLE001 - the call happened; losing one ledger entry beats losing the verdict
+                log.exception("could not record automod spend ($%.5f); the budget undercounts this call", cost)
         log.info("automod call: model=%s in=%d out=%d cache_w=%d cache_r=%d cost=$%.5f stop=%s", model,
                  usage["input_tokens"], usage["output_tokens"], usage["cache_creation_input_tokens"],
                  usage["cache_read_input_tokens"], cost, resp.stop_reason)
