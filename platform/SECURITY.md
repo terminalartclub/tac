@@ -125,6 +125,9 @@ docker run --rm --name tac-render-<random> --network none --read-only --tmpfs /t
 - Dev mode, device flow: whoever enters the code picks any free handle; there is no re-login into an existing handle.
 - Dev mode, web login: signs in as any handle, existing or new.
 - Dev mode is local-only, and `TAC_ENV=prod` refuses to start without `TAC_AUTH=github`, where the handle is the GitHub login.
+  - `TAC_ENV` is normalized (strip + lowercase) and must be `dev` or `prod`; `production`, `staging` or an empty value refuse to start instead of falling back to dev.
+  - `TAC_AUTH=dev` refuses to start unless `TAC_PUBLIC_BASE_URL` and `TAC_SITE_URL` (when set) are loopback.
+  - Prod refuses to start without `TAC_SITE_ORIGINS`, or with any non-`https://` origin.
 - Inherent to device flow: a phished user code can approve an attacker's device. The page shows nothing about the requesting device yet (TODO: show request time/IP region).
 - Admin:
   - The token is compared in constant time.

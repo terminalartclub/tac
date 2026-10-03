@@ -2,7 +2,7 @@
 
 **Decided (operator):** prod renders with `FlyMachineRenderer`, one throwaway Fly Machine per job (option b). The code is built and tested against a mocked Machines API. **No Fly resources exist yet.** Everything under "Operator runs these" costs money and is for the operator to run.
 
-> **Gate:** with `TAC_ENV=prod` the API refuses to start unless `TAC_RENDERER` is an implemented isolated backend (`config.ISOLATED_RENDERERS` = `docker`, `fly-machine`).
+> **Gate:** with `TAC_ENV=prod` the API refuses to start unless `TAC_RENDERER` is an implemented isolated backend (`config.ISOLATED_RENDERERS` = `docker`, `fly-machine`), `TAC_AUTH=github`, and `TAC_SITE_ORIGINS` is set to https origins only. `TAC_ENV` must be exactly `dev` or `prod` (any case).
 > - With `fly-machine`, it also refuses to start without `FLY_API_TOKEN` and `TAC_FLY_RENDER_IMAGE`.
 > - The local `run_limited` subprocess renderer is never allowed in prod.
 
@@ -75,6 +75,7 @@ fly secrets set -a tac-api FLY_API_TOKEN=<token from step 3> TAC_ADMIN_TOKEN=<ra
 #    fly.toml [env]: TAC_ENV=prod TAC_RENDERER=fly-machine TAC_FLY_RENDER_APP=tac-render
 #      TAC_FLY_RENDER_IMAGE=registry.fly.io/tac-render:<sha> TAC_FLY_RENDER_REGION=<region>
 #      TAC_PUBLIC_BASE_URL=https://<api host> TAC_AUTH=github TAC_TRUST_PROXY=1 TAC_DATA_DIR=/data
+#      TAC_SITE_ORIGINS=https://terminalart.club TAC_SITE_URL=https://terminalart.club
 #      TAC_HOST=0.0.0.0
 fly deploy -a tac-api
 ```

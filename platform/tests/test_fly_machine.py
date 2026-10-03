@@ -323,7 +323,8 @@ async def test_real_bootstrap_drops_network_for_piece(tmp_path, monkeypatch):
 
     port = _free_port()
     base = f"http://host.docker.internal:{port}"
-    async with make_ctx(tmp_path, worker_enabled=False, public_base_url=base) as ctx:
+    # github auth: dev login refuses a non-loopback base URL
+    async with make_ctx(tmp_path, worker_enabled=False, public_base_url=base, auth_mode="github") as ctx:
         server = uvicorn.Server(uvicorn.Config(ctx.app, host="127.0.0.1", port=port, log_level="warning", lifespan="off"))
         serve = asyncio.create_task(server.serve())
         while not server.started:

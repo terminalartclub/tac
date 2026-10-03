@@ -1,19 +1,36 @@
 """Settings, read once from the environment. Every knob is listed in README.md."""
 
+import ipaddress
 import os
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlsplit
 
 PLATFORM_DIR = Path(__file__).resolve().parents[2]
 REPO_DIR = PLATFORM_DIR.parent
 # IMPLEMENTED render backends that isolate untrusted code (no secrets, no network, own container,
 # machine or namespace). Add a name here only together with its implementation (renderer.py).
 ISOLATED_RENDERERS: frozenset[str] = frozenset({"docker", "fly-machine"})
+ENVS: frozenset[str] = frozenset({"dev", "prod"})
+AUTH_MODES: frozenset[str] = frozenset({"dev", "github"})
+DEV_SITE_ORIGINS: tuple[str, ...] = ("http://localhost:5181",)  # dev only; prod must set TAC_SITE_ORIGINS
 
 
 def _env(name: str, default: str) -> str:
     return os.environ.get(name, default)
+
+
+def _is_loopback(url: str) -> bool:
+    host = urlsplit(url).hostname
+    if not host:
+        return False
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 @dataclass(frozen=True)
@@ -46,7 +63,7 @@ class Settings:
     automod_effort: str = "low"
     anthropic_api_key_present: bool = False
 
-    site_origins: tuple[str, ...] = ("http://localhost:5181", "https://terminalart.club")
+    site_origins: tuple[str, ...] = ()  # unset: DEV_SITE_ORIGINS in dev, refused in prod
     site_url: str = ""  # web login redirects to site_url + return path; "" = relative (dev proxy)
     trust_proxy: bool = False  # honour Fly-Client-IP / X-Forwarded-For
     worker_enabled: bool = True
@@ -55,14 +72,40 @@ class Settings:
     reports_to_hide: int = 3
     extra: dict = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        """Normalize env/auth once, failing closed: an unknown value must never fall back to dev behaviour."""
+        env = str(self.env).strip().lower()
+        if env not in ENVS:
+            raise RuntimeError(f"TAC_ENV={self.env!r} is not one of {sorted(ENVS)}; refusing to start")
+        auth = str(self.auth_mode).strip().lower()
+        if auth not in AUTH_MODES:
+            raise RuntimeError(f"TAC_AUTH={self.auth_mode!r} is not one of {sorted(AUTH_MODES)}; refusing to start")
+        object.__setattr__(self, "env", env)
+        object.__setattr__(self, "auth_mode", auth)
+        if not self.site_origins and env == "dev":
+            object.__setattr__(self, "site_origins", DEV_SITE_ORIGINS)
+
     def check_prod_safety(self) -> None:
-        """Refuse to run in prod while renders would execute untrusted code unisolated on the API host."""
+        """Refuse to start when a setting would expose dev login or run untrusted code unisolated."""
         if self.env == "prod" and self.auth_mode != "github":
             raise RuntimeError("TAC_ENV=prod requires TAC_AUTH=github: dev login lets anyone claim any handle")
         if self.env == "prod" and self.renderer not in ISOLATED_RENDERERS:
             raise RuntimeError(
                 f"TAC_ENV=prod refuses TAC_RENDERER={self.renderer!r}: the local subprocess renderer is not a "
                 f"sandbox. Isolated backends implemented: {', '.join(sorted(ISOLATED_RENDERERS)) or 'none yet'}; see DEPLOY.md."
+            )
+        if self.env == "prod":
+            if not self.site_origins:
+                raise RuntimeError("TAC_ENV=prod requires TAC_SITE_ORIGINS (the site's https origins)")
+            plain = [o for o in self.site_origins if not o.startswith("https://")]
+            if plain:
+                raise RuntimeError(f"TAC_ENV=prod refuses non-https TAC_SITE_ORIGINS: {', '.join(plain)}")
+        if self.auth_mode == "dev" and not (
+            _is_loopback(self.public_base_url) and (not self.site_url or _is_loopback(self.site_url))
+        ):
+            raise RuntimeError(
+                "TAC_AUTH=dev lets anyone sign in as any handle: it runs only with a loopback "
+                "TAC_PUBLIC_BASE_URL and TAC_SITE_URL (127.0.0.1, localhost, ::1)"
             )
 
     @property
@@ -95,11 +138,7 @@ class Settings:
             automod_model=_env("TAC_AUTOMOD_MODEL", "claude-opus-5-5"),
             automod_effort=_env("TAC_AUTOMOD_EFFORT", "low"),
             anthropic_api_key_present=bool(os.environ.get("ANTHROPIC_API_KEY")),
-            site_origins=tuple(
-                o.strip().rstrip("/")
-                for o in _env("TAC_SITE_ORIGINS", "http://localhost:5181,https://terminalart.club").split(",")
-                if o.strip()
-            ),
+            site_origins=tuple(o.strip().rstrip("/") for o in _env("TAC_SITE_ORIGINS", "").split(",") if o.strip()),
             site_url=_env("TAC_SITE_URL", "").rstrip("/"),
             trust_proxy=_env("TAC_TRUST_PROXY", "0") == "1",
             worker_enabled=_env("TAC_WORKER", "1") == "1",

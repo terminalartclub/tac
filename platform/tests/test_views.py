@@ -71,8 +71,10 @@ async def test_view_cors_only_site_origins(ctx):
     _, _, h, s = await _published(ctx)
     url = f"/v1/pieces/{h}/{s}/view"
     async with ctx.client() as c:
-        ok = await c.post(url, headers={"origin": "https://terminalart.club"})
-        assert ok.headers["access-control-allow-origin"] == "https://terminalart.club"
+        ok = await c.post(url, headers={"origin": "http://localhost:5181"})
+        assert ok.headers["access-control-allow-origin"] == "http://localhost:5181"
+        prod_site = await c.post(url, headers={"origin": "https://terminalart.club"})
+        assert "access-control-allow-origin" not in prod_site.headers  # dev default: the local site only
         evil = await c.post(url, headers={"origin": "https://evil.example"})
         assert "access-control-allow-origin" not in evil.headers
         pre = await c.options(url, headers={"origin": "http://localhost:5181", "access-control-request-method": "POST"})

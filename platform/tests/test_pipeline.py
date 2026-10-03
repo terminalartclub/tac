@@ -266,12 +266,14 @@ def test_prod_refuses_local_renderer(tmp_path):
     from tac_platform.app import create_app
     from tac_platform.config import Settings
 
+    ORIGINS = ("https://terminalart.club",)
     with pytest.raises(RuntimeError, match="TAC_ENV=prod"):
         create_app(Settings.from_env(data_dir=tmp_path, env="prod", auth_mode="github", renderer="local"))
     with pytest.raises(RuntimeError, match="implemented: docker, fly-machine"):
         create_app(Settings.from_env(data_dir=tmp_path, env="prod", auth_mode="github", renderer="nsjail"))
-    create_app(Settings.from_env(data_dir=tmp_path, env="prod", auth_mode="github", renderer="fly-machine"))
-    create_app(Settings.from_env(data_dir=tmp_path, env="prod", auth_mode="github", renderer="docker"))  # isolated: passes the gate
+    prod = dict(data_dir=tmp_path, env="prod", auth_mode="github", site_origins=ORIGINS)
+    create_app(Settings.from_env(**prod, renderer="fly-machine"))
+    create_app(Settings.from_env(**prod, renderer="docker"))  # isolated: passes the gate
     create_app(Settings.from_env(data_dir=tmp_path, env="dev"))  # dev still starts
     with pytest.raises(RuntimeError, match="TAC_AUTH=github"):  # dev login (claim any handle) never in prod
         create_app(Settings.from_env(data_dir=tmp_path, env="prod", auth_mode="dev", renderer="docker"))
