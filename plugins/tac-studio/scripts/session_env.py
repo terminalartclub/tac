@@ -13,7 +13,7 @@ import os
 import re
 import sys
 
-SESSION_RE = re.compile(r"^[A-Za-z0-9-]{1,64}$")  # the id ends up in a sourced shell file: no quoting games
+SESSION_RE = re.compile(r"[A-Za-z0-9-]{1,64}")  # the id ends up in a sourced shell file: no quoting games
 
 
 def main() -> int:
@@ -22,7 +22,7 @@ def main() -> int:
         sid = json.loads(sys.stdin.read() or "{}").get("session_id")
     except (json.JSONDecodeError, AttributeError):
         return 0
-    if not env_file or not isinstance(sid, str) or not SESSION_RE.match(sid):
+    if not env_file or not isinstance(sid, str) or not SESSION_RE.fullmatch(sid):
         return 0
     try:
         with open(env_file, "a", encoding="utf-8") as fh:

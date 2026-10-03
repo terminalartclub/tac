@@ -104,7 +104,8 @@ def test_hook_makes_no_network_calls(script: str) -> None:
 
 
 @pytest.mark.parametrize("sid,written", [("d4eac668-7812-49a5-876a-0edb5cddbf89", True), ("x; rm -rf ~", False),
-                                         ("$(id)", False), (None, False)])
+                                         ("$(id)", False), (None, False), ("abc\n", False),
+                                         ("abc\nexport PATH=/tmp", False)])
 def test_session_env_hook_exports_only_a_safe_id(tmp_path: Path, sid, written) -> None:
     env_file = tmp_path / "env"
     env_file.write_text("export OTHER=1\n")

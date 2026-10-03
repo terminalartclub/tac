@@ -384,7 +384,7 @@ def pick_process(wd: Path, src: Path, n_iter: int) -> list[tuple[str, Path]]:
 
 
 SESSIONS_FILE = ".sessions"  # tac-work/<name>/.sessions: one JSON line per Claude session that worked on it
-SESSION_ID_RE = re.compile(r"^[A-Za-z0-9-]{1,64}$")
+SESSION_ID_RE = re.compile(r"[A-Za-z0-9-]{1,64}")  # always fullmatch: "$" alone would accept a trailing newline
 WORK_END_SLACK_S = 300  # the turn that wrote the last file finishes a little after the write
 WORK_START_SLACK_S = 600  # the turns that planned the piece before its first file or `tacctl start`
 

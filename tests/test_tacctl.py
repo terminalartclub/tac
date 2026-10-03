@@ -707,7 +707,7 @@ def test_no_recorded_session_means_unknown(platform: Platform, work: Path, monke
     assert m["tokens"] is None and m["tokens_source"] == "unknown"
 
 
-@pytest.mark.parametrize("sid", ["", "a b", "x;rm -rf ~", "$(id)", "a" * 65])
+@pytest.mark.parametrize("sid", ["", "a b", "x;rm -rf ~", "$(id)", "a" * 65, "abc\n", "abc\nexport X=1"])
 def test_record_session_ignores_invalid_ids(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sid: str) -> None:
     monkeypatch.setenv("TAC_WORK", str(tmp_path / "tac-work"))
     monkeypatch.setenv("TAC_SESSION_ID", sid)
@@ -799,3 +799,11 @@ def test_session_windows_never_overlap_between_pieces(tmp_path: Path, monkeypatc
     ember = tacctl.tokens_from_transcripts(tmp_path / "tac-work" / "ember")
     hush = tacctl.tokens_from_transcripts(tmp_path / "tac-work" / "hush")
     assert (ember, hush) == (1000, 7)  # each token counted once, by the piece being worked on
+
+
+
+def test_read_sessions_skips_ids_with_trailing_newline(tmp_path: Path) -> None:
+    (tmp_path / ".sessions").write_text(json.dumps({"session": "ok-1", "at": 1.0}) + "\n"
+                                        + json.dumps({"session": "bad\n", "at": 2.0}) + "\n"
+                                        + json.dumps({"session": "ok-2", "at": True}) + "\n")
+    assert [r["session"] for r in tacctl.read_sessions(tmp_path)] == ["ok-1"]
