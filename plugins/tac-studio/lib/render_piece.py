@@ -30,6 +30,7 @@ PREVIEW_W, PREVIEW_H = 540, 960
 WEBP_QUALITY = 70
 OG_T = 1.0
 PROCESS_W = 540
+UV_DEPS = ("rich==15.0.0", "Pillow==12.3.0", "fonttools==4.66.1")  # same pins as bin/tac, bin/tacctl
 
 
 def _deps_ok() -> bool:
@@ -39,7 +40,7 @@ def _deps_ok() -> bool:
 def _worker_cmd() -> list[str]:
     if _deps_ok():
         return [sys.executable, str(Path(__file__).resolve())]
-    return ["uv", "run", "-q", "--with", "rich", "--with", "Pillow", "--with", "fonttools",
+    return ["uv", "run", "-q", "--no-project", *(a for d in UV_DEPS for a in ("--with", d)),
             "python3", str(Path(__file__).resolve())]
 
 

@@ -2,4 +2,7 @@
 # TAC virtual screen (bundled vscreen.py). Works from any cwd:  tac sheet piece.py --out dir/
 set -euo pipefail
 LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd)"
-exec uv run -q --with rich --with Pillow --with fonttools python3 "$LIB/vscreen.py" "$@"
+# Pinned, and --no-project: run from a repo with its own pyproject.toml, uv would otherwise sync that
+# project (its deps and build hooks) first. Bump the pins together with render_piece.py's.
+exec uv run -q --no-project --with 'rich==15.0.0' --with 'Pillow==12.3.0' --with 'fonttools==4.66.1' \
+  python3 "$LIB/vscreen.py" "$@"

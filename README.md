@@ -97,7 +97,7 @@ excluded). `/usage` has no machine-readable output, so nothing is read from it.
 .claude-plugin/marketplace.json     marketplace "terminalartclub" → plugins/tac-studio (plugin name "tac")
 plugins/tac-studio/
   .claude-plugin/plugin.json
-  bin/tac  bin/tacctl               launchers: uv run --with rich --with Pillow --with fonttools
+  bin/tac  bin/tacctl               launchers: uv run --no-project, rich/Pillow/fonttools pinned
   lib/vscreen.py                    bundled virtual screen (copy of TAC studio/vscreen.py + Linux fonts)
   lib/check_piece.py                lint (stdlib only)       ← tools/check_piece.py runs this
   lib/render_piece.py               preview/og/stats/process ← tools/render_piece.py runs this
