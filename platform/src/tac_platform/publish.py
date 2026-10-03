@@ -222,6 +222,7 @@ class Publisher:
                 else:  # the IG list goes in the row: the submissions it names are gone after this commit
                     await tx.audit(actor, "delete_account", target=handle, detail=reason,
                                    data={"ig": on_ig} if on_ig else None)
+            await self.db.checkpoint_truncate()  # no pre-delete page images left in the WAL
             for sid in ids:
                 await self.store.delete_prefix(f"submissions/{sid}")
             await self.store.delete_prefix(f"public/{handle}")

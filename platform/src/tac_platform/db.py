@@ -157,8 +157,16 @@ class Database:
         await self._conn.execute("PRAGMA journal_mode=WAL")
         await self._conn.execute("PRAGMA foreign_keys=ON")
         await self._conn.execute("PRAGMA busy_timeout=5000")
+        # Deleted rows are overwritten with zeros, not left in free pages: an erased account must not be
+        # recoverable from the file (see delete_account, which also truncates the WAL).
+        await self._conn.execute("PRAGMA secure_delete=ON")
         await self._conn.executescript(SCHEMA)
         await self._migrate()
+        if await self.fetchone("SELECT 1 FROM kv WHERE key = 'secure_delete_vacuumed'") is None:
+            # once: free pages written before secure_delete still hold deleted rows; VACUUM rebuilds the file.
+            await self.conn.execute("VACUUM")
+            await self.execute("INSERT OR IGNORE INTO kv (key, value) VALUES ('secure_delete_vacuumed', '1')")
+            await self.checkpoint_truncate()
 
     async def _migrate(self) -> None:
         """Additive column migrations for DBs created by earlier versions."""
@@ -204,6 +212,12 @@ class Database:
         for col in ("target", "data_json"):
             if col not in audit_cols:
                 await self.conn.execute(f"ALTER TABLE audit_log ADD COLUMN {col} TEXT")
+
+    async def checkpoint_truncate(self) -> None:
+        """Copy the WAL into the main file and truncate it to zero bytes: old WAL frames hold pre-delete page
+        images until the file is truncated (a normal checkpoint only rewinds it)."""
+        async with self._write_lock:
+            await self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
 
     async def close(self) -> None:
         if self._conn is not None:

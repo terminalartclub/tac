@@ -623,6 +623,18 @@ async def _rows_holding(db, needle: str) -> list[str]:
     return hits
 
 
+def _file_hits(db, needles: dict[str, bytes]) -> dict[str, list[str]]:
+    """Which needles occur in the raw bytes of the main DB file and its WAL (deleted rows included)."""
+    out = {}
+    for f in (db.path, db.path.with_name(db.path.name + "-wal")):
+        data = f.read_bytes() if f.exists() else b""
+        out[f.name] = [name for name, needle in needles.items() if needle in data]
+    return out
+
+
+ID_BYTES = {"id_text": str(RAW_GH_ID).encode(), "id_int48": RAW_GH_ID.to_bytes(6, "big")}  # a record stores it as a 6-byte BE int
+
+
 @pytest.mark.parametrize("path", ["self", "admin_suspended", "admin_active"])
 async def test_no_raw_github_id_survives_account_deletion(tmp_path, monkeypatch, path):
     async def fake_identity(st, code):
@@ -642,6 +654,8 @@ async def test_no_raw_github_id_survives_account_deletion(tmp_path, monkeypatch,
             await db.execute("INSERT INTO audit_log (at, actor, action, detail) VALUES ('x', 'user:alexgh',"
                              " 'user_created', ?)", (f"github:{RAW_GH_ID}",))
             assert await _rows_holding(db, str(RAW_GH_ID)) == ["users.github_id", "audit_log.detail"]
+            await db.checkpoint_truncate()
+            assert any(_file_hits(db, ID_BYTES).values())  # the scan does see a live id
             if path == "self":
                 r = await c.request("DELETE", "/v1/me", json={"confirm": "alexgh"},
                                     headers={"x-tac-csrf": csrf, "sec-fetch-site": "same-site"})
@@ -652,11 +666,39 @@ async def test_no_raw_github_id_survives_account_deletion(tmp_path, monkeypatch,
                     await a.post("/v1/admin/users/alexgh/suspend", json={"reason": "DMCA-2026-007"})
                 assert (await a.post("/v1/admin/users/alexgh/delete", json={"reason": "ERASE-1"})).status_code == 200
         assert await _rows_holding(db, str(RAW_GH_ID)) == []
+        # nor in the bytes: secure_delete zeroes the freed cells, the WAL was truncated after the delete
+        assert (await db.fetchone("PRAGMA secure_delete"))[0] == 1
+        assert _file_hits(db, ID_BYTES) == {db.path.name: [], db.path.name + "-wal": []}
+        await db.checkpoint_truncate()  # and stays gone once everything is in the main file
+        assert _file_hits(db, ID_BYTES) == {db.path.name: [], db.path.name + "-wal": []}
         assert (await db.fetchone("SELECT COUNT(*) AS n FROM users"))["n"] == 0
         created = await db.fetchall("SELECT detail FROM audit_log WHERE action = 'user_created'")
         assert [x["detail"] for x in created] == ["github", "github"]  # the handle stays in actor; the id doesn't
         blocked = (await db.fetchone("SELECT COUNT(*) AS n FROM blocked_identities"))["n"]
         assert blocked == (1 if path == "admin_suspended" else 0)
+
+
+async def test_first_open_vacuums_away_rows_deleted_before_secure_delete(tmp_path):
+    import aiosqlite
+
+    from tac_platform.db import Database
+
+    path = tmp_path / "old.sqlite3"
+    async with aiosqlite.connect(path) as c:  # an old file: a row deleted with secure_delete off
+        await c.execute("PRAGMA secure_delete=OFF")
+        await c.execute("CREATE TABLE t (x BLOB)")
+        await c.execute("INSERT INTO t VALUES (?)", (b"ERASED-ROW-MARKER" * 40,))
+        await c.commit()
+        await c.execute("DELETE FROM t")
+        await c.commit()
+    assert b"ERASED-ROW-MARKER" in path.read_bytes()  # the precondition the VACUUM fixes
+    db = Database(path)
+    await db.open()
+    try:
+        assert b"ERASED-ROW-MARKER" not in path.read_bytes()
+        assert (await db.fetchone("SELECT value FROM kv WHERE key = 'secure_delete_vacuumed'"))[0] == "1"
+    finally:
+        await db.close()
 
 
 async def test_raw_github_ids_in_old_audit_rows_are_scrubbed_once_on_open(tmp_path):
