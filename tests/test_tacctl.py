@@ -3,6 +3,7 @@
 import json
 import shutil
 import stat
+import sys
 import threading
 from email.parser import BytesParser
 from email.policy import HTTP
@@ -359,7 +360,8 @@ def test_api_base_refuses_plain_http_off_loopback(monkeypatch: pytest.MonkeyPatc
 def test_default_api_is_the_public_https_platform(monkeypatch: pytest.MonkeyPatch) -> None:
     """Installed from the marketplace with no TAC_API, the plugin talks to the prod platform over https."""
     assert tacctl.DEFAULT_API == "https://api.terminalart.club"
-    assert "TAC_API" not in tacctl.os.environ  # conftest cleared any dev-shell value
+    assert tacctl.os.environ["TAC_API"] == "http://127.0.0.1:9"  # conftest's dead loopback default
+    monkeypatch.delenv("TAC_API")  # as installed from the marketplace
     assert tacctl.api_base() == "https://api.terminalart.club"
     assert tacctl.session_base({}) == "https://api.terminalart.club"  # logged out / no stored api
     assert tacctl.site_hosts(tacctl.api_base()) == {"api.terminalart.club", "terminalart.club"}  # piece links
@@ -375,9 +377,19 @@ def test_default_api_is_the_public_https_platform(monkeypatch: pytest.MonkeyPatc
             tacctl.checked_base(bad)
 
 
-def test_conftest_blocks_reaching_the_prod_platform() -> None:
+@pytest.mark.parametrize("host", ["api.terminalart.club", "terminalart.club", "staging.api.terminalart.club",
+                                  "API.TerminalArt.Club."])
+def test_conftest_blocks_reaching_the_prod_platform(host: str) -> None:
     with pytest.raises(AssertionError, match="prod platform"):
-        tacctl.http("GET", f"{tacctl.DEFAULT_API}/v1/me", timeout=1)
+        tacctl.http("GET", f"https://{host}/v1/me", timeout=1)
+
+
+def test_subprocesses_inherit_a_dead_loopback_api() -> None:
+    import subprocess
+
+    out = subprocess.run([sys.executable, "-c", "import os; print(os.environ.get('TAC_API'))"],
+                         capture_output=True, text=True, check=True)
+    assert out.stdout.strip() == "http://127.0.0.1:9"
 
 
 def test_stored_plain_http_api_is_refused(platform: Platform, monkeypatch: pytest.MonkeyPatch, capsys) -> None:

@@ -247,8 +247,14 @@ class Database:
         reader in another connection (an operator shell, `sqlite3 .backup`) holds an older snapshot. Never
         waits for that reader, so the write lock (held so no write lands mid-checkpoint) is held for
         milliseconds, not the 5 s busy timeout."""
-        async with self._write_lock:
-            busy, _, _ = await asyncio.to_thread(self._checkpoint_truncate_sync)
+        try:
+            async with self._write_lock:
+                busy, _, _ = await asyncio.to_thread(self._checkpoint_truncate_sync)
+        except Exception:  # noqa: BLE001 - I/O error, "database is locked" during another process's recovery
+            # A cleanup step: never fail the request or the boot that asked for it. False = the caller's
+            # background retry takes over.
+            log.exception("WAL truncate failed; will retry")
+            return False
         return not busy
 
     async def truncate_or_retry(self, then: Callable[[], Awaitable[None]] | None = None) -> bool:

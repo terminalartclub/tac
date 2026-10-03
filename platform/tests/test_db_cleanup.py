@@ -219,3 +219,44 @@ async def test_blocked_retry_logs_first_every_tenth_and_success(tmp_path, caplog
         assert len(lines) == 1 + len(still) + 1  # nothing per attempt
     finally:
         await db.close()
+
+
+def _raising(*args, **kwargs):
+    raise sqlite3.OperationalError("database is locked")  # e.g. another process mid WAL recovery, or disk I/O
+
+
+async def test_a_raising_checkpoint_after_account_delete_is_a_204_with_a_retry(tmp_path, monkeypatch, caplog):
+    from conftest import make_ctx
+
+    async with make_ctx(tmp_path) as ctx:
+        db = ctx.app.state.db
+        db.truncate_retry_s = 0.05
+        token = await ctx.login("zz-raise-handle")
+        monkeypatch.setattr(Database, "_checkpoint_truncate_sync", _raising)
+        with caplog.at_level(logging.ERROR, logger="tac.db"):
+            async with ctx.client(authorization=f"Bearer {token}") as c:
+                r = await c.request("DELETE", "/v1/me", json={"confirm": "zz-raise-handle"})
+        assert r.status_code == 204  # the account is gone; the cleanup failing doesn't turn that into a 500
+        assert "WAL truncate failed" in caplog.text
+        assert (await db.fetchone("SELECT COUNT(*) AS n FROM users"))["n"] == 0
+        assert db._truncate_task is not None and not db._truncate_task.done()  # retry scheduled
+        monkeypatch.undo()  # the condition clears
+        await _until(lambda: _done(db))
+        assert b"zz-raise-handle" not in _bytes(db.path)
+
+
+async def test_a_raising_checkpoint_at_boot_never_stops_the_app(tmp_path, monkeypatch):
+    path = tmp_path / "x.sqlite3"
+    _old_file_with_residue(path)
+    monkeypatch.setattr(Database, "_checkpoint_truncate_sync", _raising)
+    db = Database(path)
+    db.truncate_retry_s = 0.05
+    await db.open()  # VACUUM ran; its truncate raised: still starts
+    try:
+        assert await _flag(db) is None  # not done until a truncate succeeds
+        await db.execute("INSERT INTO kv VALUES ('writable', '1')")
+        monkeypatch.undo()
+        await _until(lambda: _done(db))
+        assert (await _flag(db))["value"] == "1" and MARK not in _bytes(path)
+    finally:
+        await db.close()

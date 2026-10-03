@@ -218,7 +218,9 @@ docker run --rm --name tac-render-<random> --network none --read-only --tmpfs /t
     `sqlite3 .backup`) can block the truncate: it is never waited for (busy_timeout 0 for the checkpoint, the
     write and media locks free in milliseconds; the checkpoint runs on its own short-lived connection, so the
     shared connection's 5 s busy timeout is never lowered); one warning when first blocked, then one per 10
-    retries and one on success, while a background task retries every 30 s until it succeeds. The VACUUM is
+    retries and one on success, while a background task retries every 30 s until it succeeds. A checkpoint
+    that raises (I/O error, "database is locked" during another process's recovery) is logged and treated
+    the same way: the delete still answers 204 and the boot still starts. The VACUUM is
     a cleanup, never a boot blocker: a failure (disk full, I/O) is logged and retried next boot, and its done-flag is set only after a truncate that wasn't blocked.
   - Fly's daily volume snapshots (5-day retention) keep pre-delete copies of the whole DB until they rotate
     out: a deletion is complete everywhere after 5 days.
