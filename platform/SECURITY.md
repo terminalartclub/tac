@@ -207,6 +207,26 @@ docker run --rm --name tac-render-<random> --network none --read-only --tmpfs /t
   - Refused with 409 while a render is in flight, so the worker can't write files for a deleted user.
   - The audit log keeps rows naming the handle: the operational record, no content.
 
+### Takedowns and suspension
+
+- **Hide first, within minutes, then decide.** "Hide now" (`POST /v1/admin/pieces/{h}/{s}/hide {reason}`)
+  is the same transition as a report auto-hide (`Publisher.hide`): public media deleted, `community.json`
+  regenerated, og/share 404. Reversible with unhide. Then delete, unhide, or suspend.
+- **Suspend** is one `BEGIN IMMEDIATE` transaction under the DB write lock: set `suspended_at`, delete every
+  `access_tokens`, `web_sessions` and `device_codes` row of the user, write the audit row. No request
+  authenticated by a revoked credential can start after it commits. Every path that creates a credential
+  re-checks `suspended_at` inside its own transaction (web session insert, device approval, token mint), and
+  `current_user` refuses a suspended user (403 `suspended`) as a second line. The submission `INSERT` carries
+  the same guard. Publish and unhide are compare-and-swaps that require an unsuspended owner, so neither the
+  admin nor trusted auto-publish can put a suspended artist's piece back up. Pieces are hidden after the
+  commit, each through `Publisher.hide`.
+- The moderator's reason is never shown to the suspended user; sign-in pages and the API show a fixed message.
+- Every hide, unhide, delete, suspend and unsuspend writes an audit row with its reason and a `target`
+  (`handle/slug` or `handle`) that survives row deletion. `/admin/takedowns` lists the last 100.
+- All new endpoints sit under `/v1/admin/` behind `require_admin` (header token, or cookie + CSRF header +
+  same-origin), so the admin listener's path guard covers them. Reason prompts use a `data-prompt`
+  attribute read by the one delegated listener: no inline JS, no value in code.
+
 ## 4. Rate limits and abuse
 
 | limit | key | mechanism |

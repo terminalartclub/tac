@@ -76,15 +76,45 @@ TAC_E2E_URL=http://127.0.0.1:8790 TAC_E2E_ADMIN_TOKEN=t uv run pytest tests/test
 | POST | `/v1/pieces/{handle}/{slug}/view` | none | count a view; 204 always (see below) |
 | POST | `/v1/events` `{"name": "piece_share"\|"install_copy"\|"install_send"}` | none | per-day event counter; 204, or 400 for an unknown name |
 | GET | `/v1/me/pieces` | cookie or Bearer | own pieces: `{pieces: [{id: "handle/slug", slug, title, status (+ "hidden"), views_total, views_7d, views_28d[28 ints, oldest→newest, last = today UTC], url, critique, reasons}]}` (pinned with the plugin) |
-| GET | `/admin`, `/admin/login?token=` | admin | HTML queue: in review, hidden, published, audit log |
+| GET | `/admin`, `/admin/login?token=` | admin | HTML queue: in review, hidden, published, Instagram cleanup, suspended users, audit log |
+| GET | `/admin/takedowns` · `/v1/admin/takedowns` | admin | takedown log: the last 100 hide/unhide/delete/suspend/unsuspend actions with time, target, reason, actor (HTML, read-only · JSON) |
 | GET | `/v1/admin/queue` | admin | JSON version of the queue |
-| POST | `/v1/admin/submissions/{id}/approve` · `/reject {reason}` | admin | from `in_review` only (409 otherwise) |
-| POST | `/v1/admin/pieces/{handle}/{slug}/unhide` · `/delete {reason}` | admin | delete makes the piece `rejected` and removes its media |
+| POST | `/v1/admin/submissions/{id}/approve` · `/reject {reason}` | admin | from `in_review` only (409 otherwise; 409 `user_suspended` if the artist is suspended) |
+| POST | `/v1/admin/pieces/{handle}/{slug}/hide {reason}` | admin | reason required (1-200 chars). Takes the piece off the wall, gallery, community.json, og/share and media now, like a report auto-hide; 409 `not_visible` unless published and visible. Undo = unhide |
+| POST | `/v1/admin/pieces/{handle}/{slug}/unhide` · `/delete {reason}` | admin | delete makes the piece `rejected` and removes its media; unhide 409 `user_suspended` while the artist is suspended. hide and delete return `reminder: "also remove from Instagram"` when the piece is marked IG-posted |
+| POST | `/v1/admin/pieces/{handle}/{slug}/instagram-posted {posted}` | admin | sets/clears `ig_posted_at` (any status), which drives the Instagram reminder |
+| POST | `/v1/admin/users/{handle}/suspend {reason}` · `/unsuspend {reason}` | admin | see Takedowns. Suspend: 409 `already_suspended`; unsuspend: 409 `not_suspended` |
 | POST | `/v1/admin/users/{handle}/trust {trusted}` | admin | trusted + clean automod means auto-publish |
 | POST | `/v1/admin/users/{handle}/instagram-confirm {instagram}` | admin | confirms the user's current IG handle (compare-and-set: 409 if it changed); only confirmed handles are public and tagged |
 | POST | `/v1/admin/users/{handle}/house {house}` | admin | sets `house_artist` on all of that handle's pieces in community.json; clients can't set it (ignored in meta) |
 
 Errors are always `{"error": "<code>", "detail"?: ...}`. Admin auth is the `X-Admin-Token` header or the `tac_admin` cookie. Cookie-authenticated POSTs also need `X-TAC-Admin-CSRF: 1`.
+
+## Takedowns
+
+The terms promise copyright/hate takedowns within 72 hours and that repeat infringers lose their accounts.
+
+- **Hide first, within minutes.** `/admin` → "Hide now" on the piece, with a short reason. It is off the wall,
+  gallery, `community.json`, link previews and `/media` at once, and fully reversible ("Unhide").
+- **Then decide:** "Delete" (piece → `rejected`, media removed; the artist sees the reason), "Unhide" (claim
+  rejected), or "Suspend <handle>" for a repeat offender.
+- **Suspend** (`users.suspended_at`/`suspended_reason`): revokes every plugin token, web session and
+  approved device code in one transaction, hides every published piece (reason `account suspended`), and from
+  then on sign-in (web and device) is refused and submissions get 403 `suspended`. Approve/unhide of their
+  pieces is refused while suspended. **Unsuspend** restores sign-in only: unhide pieces one by one.
+- **Instagram:** the platform can't delete our IG posts. Mark a piece "posted to IG" when we post it; once
+  it's hidden or deleted, `/admin` shows "also remove from Instagram" (and the Instagram cleanup list) until
+  you click "Removed from IG".
+- **The log:** every hide, unhide, delete, suspend and unsuspend writes an audit row with its reason and
+  target. `/admin/takedowns` lists the last 100: the record to answer a copyright complaint with.
+
+**Moderator runbook.** *Copyright email:* hide the piece now with the claim reference as the reason (e.g.
+"DMCA from X, 2026-10-03"), reply that it's down, then delete if the claim holds or unhide if it doesn't; a
+second upheld claim against the same artist is grounds to suspend. *Hate content:* hide now, then delete
+with the reason, and suspend at once for anything deliberate (no strikes needed). *Repeat offender:* suspend
+with a reason that names the earlier takedowns (the log has them); their pieces all go down with it, and an
+appeal that succeeds is unsuspend plus unhiding only the pieces that were fine. In every case, if the piece
+was on Instagram, remove it there too and click "Removed from IG".
 
 ## Web sign-in (site)
 
