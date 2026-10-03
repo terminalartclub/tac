@@ -83,6 +83,7 @@ TAC_E2E_URL=http://127.0.0.1:8790 TAC_E2E_ADMIN_TOKEN=t uv run pytest tests/test
 | POST | `/v1/admin/pieces/{handle}/{slug}/hide {reason}` | admin | reason required (1-200 chars). Takes the piece off the wall, gallery, community.json, og/share and media now, like a report auto-hide; 409 `not_visible` unless published and visible. Undo = unhide |
 | POST | `/v1/admin/pieces/{handle}/{slug}/unhide` · `/delete {reason}` | admin | delete reason required (1-200 chars, shown to the artist); delete makes the piece `rejected` and removes its media; unhide 409 `user_suspended` while the artist is suspended. hide and delete return `reminder: "also remove from Instagram"` when the piece is marked IG-posted |
 | POST | `/v1/admin/pieces/{handle}/{slug}/instagram-posted {posted}` | admin | sets/clears `ig_posted_at` (any status), which drives the Instagram reminder |
+| POST | `/v1/admin/blocked/{ref}/unblock {reason}` | admin | removes the sign-up block recorded under `ref` (the deleted handle); 404 if none |
 | POST | `/v1/admin/users/{handle}/delete {reason}` | admin | deletes the account and everything it owns (as `DELETE /v1/me`), suspended or not; 409 `busy` while a render runs. Logged as `delete_account` (handle, reason, and any IG-posted pieces) in the takedown log. Button: Suspended users section, confirm + reason |
 | POST | `/v1/admin/users/{handle}/suspend {reason}` · `/unsuspend {reason}` | admin | see Takedowns. Suspend is idempotent: on a suspended user it re-sweeps (hides any visible piece, removes leftover public media) and reports `already_suspended`, `hidden`, `media_removed`, `media_failed`; unsuspend: 409 `not_suspended` |
 | POST | `/v1/admin/users/{handle}/trust {trusted}` | admin | trusted + clean automod means auto-publish |
@@ -118,7 +119,8 @@ same artist is grounds to suspend. *Hate content:* hide now, then delete, and su
 deliberate (no strikes needed). *Repeat offender:* suspend with a reason that lists the reference IDs of the
 earlier takedowns (the log has them); their pieces all go down with it, and an appeal that succeeds is
 unsuspend plus unhiding only the pieces that were fine. *Account deletion request from a suspended artist*
-(they can't sign in to do it): delete the account from /admin. In every case, if the piece was on Instagram,
+(they can't sign in to do it): delete the account from /admin. Deleting a suspended account also blocks that
+GitHub identity from signing up again; "Unblock" under Blocked identities undoes a mistake. In every case, if the piece was on Instagram,
 remove it there too and click "Removed from IG".
 
 ## Web sign-in (site)

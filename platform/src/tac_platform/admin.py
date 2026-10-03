@@ -26,7 +26,7 @@ MEDIA_TYPES = {".webp": "image/webp", ".jpg": "image/jpeg", ".png": "image/png"}
 IG_REMINDER = "also remove from Instagram"
 IG_CHIP = f"<span class='chip warn'>{IG_REMINDER}</span>"
 # The takedown log (/admin/takedowns): every action that takes something off the site or puts it back.
-TAKEDOWN_ACTIONS = ("hide", "unhide", "delete", "suspend", "unsuspend", "delete_account")
+TAKEDOWN_ACTIONS = ("hide", "unhide", "delete", "suspend", "unsuspend", "delete_account", "block", "unblock")
 TAKEDOWN_LOG_ROWS = 100
 
 
@@ -195,6 +195,8 @@ async def _queue(request: Request, page: int = 1, find: str = "") -> dict:
             it["views_7d"] = views[it["id"]]["views_7d"]  # private; never in community.json
     out["published_page"] = {"page": page, "per_page": PER_PAGE, "total": total, "find": find.strip()}
     out["suspended_users"] = [dict(r) for r in suspended]
+    out["blocked_identities"] = [dict(r) for r in await db.fetchall(
+        "SELECT ref, created_at FROM blocked_identities ORDER BY created_at DESC")]  # never the hash
     out["instagram_cleanup"] = [
         {"id": f"{r['handle']}/{r['slug']}", "handle": r["handle"], "slug": r["slug"], "title": r["title"],
          "state": "deleted" if r["status"] == "rejected" else "hidden", "ig_posted_at": r["ig_posted_at"]}
@@ -338,6 +340,18 @@ async def delete_user(handle: str, body: ReasonIn, request: Request) -> dict:
         raise ApiError(409, "busy", detail="a submission is rendering; try again in a few minutes")
     return {"handle": handle, "deleted": True,
             "reminder": f"{IG_REMINDER}: {', '.join(on_ig)}" if on_ig else None}
+
+
+@router.post("/v1/admin/blocked/{ref}/unblock")
+async def unblock(ref: str, body: ReasonIn, request: Request) -> dict:
+    """Undo a block (by the deleted handle it was recorded under): that identity can sign up again."""
+    require_admin(request)
+    async with request.app.state.db.tx() as tx:
+        n = await tx.execute("DELETE FROM blocked_identities WHERE ref = ?", (ref,))
+        if not n:
+            raise ApiError(404, "not_found")
+        await tx.audit("admin", "unblock", target=ref, detail=body.reason)
+    return {"ref": ref, "unblocked": n}
 
 
 async def _takedowns(request: Request) -> list[dict]:
@@ -666,6 +680,16 @@ async def admin_page(request: Request, page_n: int = Query(1, alias="page"), fin
     parts.append("<section><h2>Suspended users <span class=count>" + str(len(q["suspended_users"])) + "</span></h2>"
                  + (f"<div class=card><table class=audit>{sus}</table></div>" if sus else "<p class=muted>none</p>")
                  + "</section>")
+    blk = "".join(
+        f"<tr><td>{e(b['ref'])}</td><td>{e(b['created_at'])}</td><td>"
+        + _button(f"Unblock {b['ref']}", f"/v1/admin/blocked/{_seg(b['ref'])}/unblock",
+                  prompt=f"Unblock {b['ref']}: reason (reference ID only). They can sign up again.")
+        + "</td></tr>"
+        for b in q["blocked_identities"]
+    )
+    parts.append("<section><h2>Blocked identities <span class=count>" + str(len(q["blocked_identities"]))
+                 + "</span></h2><p class=muted>deleted while suspended: can't sign up again</p>"
+                 + (f"<div class=card><table class=audit>{blk}</table></div>" if blk else "") + "</section>")
     rows = "".join(
         "<tr>" + "".join(f"<td>{e(str(a[c] or ''))}</td>" for c in
                          ("at", "actor", "action", "submission_id", "target", "from_status", "to_status", "detail"))

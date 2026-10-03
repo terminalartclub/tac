@@ -125,6 +125,11 @@ CREATE TABLE IF NOT EXISTS automod_spend (  -- automod cost ledger, one row per 
     month TEXT PRIMARY KEY,                     -- YYYY-MM
     usd   REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS blocked_identities (  -- see blocklist.py; written when an admin deletes a suspended account
+    github_id_hash TEXT PRIMARY KEY,               -- sha256(salt | identity), never the raw id
+    created_at     TEXT NOT NULL,
+    ref            TEXT NOT NULL                   -- the deleted handle: what the admin unblocks by
+);
 CREATE TABLE IF NOT EXISTS kv (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL

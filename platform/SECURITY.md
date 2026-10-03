@@ -230,6 +230,11 @@ docker run --rm --name tac-render-<random> --network none --read-only --tmpfs /t
 - The moderator's reason is never shown to the suspended user; sign-in pages and the API show a fixed message.
 - Admin account deletion (`POST /v1/admin/users/{h}/delete {reason}`) reuses `delete_account`; it is how a
   suspended artist's erasure request is honoured.
+- Deleting an account that is suspended at that moment (admin only) writes `blocked_identities` in the same
+  transaction: `sha256(salt | "github:<id>")` (`"dev:<handle>"` in dev auth), salt =
+  `sha256("tac-blocked-identities|" + kv 'secret')`, the per-install secret. GitHub and dev sign-up refuse a
+  blocked identity with the suspended message, so a delete can't lift a ban. No raw id or login is kept; `ref` =
+  the deleted handle, for "Unblock" in /admin. Rotating the kv secret would void every block.
 - Every hide, unhide, delete, suspend, unsuspend and admin account deletion writes an audit row with its reason and a `target`
   (`handle/slug` or `handle`) that survives row deletion. `/admin/takedowns` lists the last 100.
 - All new endpoints sit under `/v1/admin/` behind `require_admin` (header token, or cookie + CSRF header +

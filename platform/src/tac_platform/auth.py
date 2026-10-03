@@ -17,7 +17,7 @@ import httpx
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
-from . import terms
+from . import blocklist, terms
 from .db import now_iso
 from .models import HANDLE_RE, DeviceCodeOut, TokenIn, TokenOut
 from .sessions import cookie_secure, require_csrf, session_row
@@ -33,6 +33,10 @@ RESERVED_HANDLES = {"admin", "api", "media", "device", "v1", "tac", "terminal-ar
 SUSPENDED_MSG = "This account is suspended by a moderator: it can't sign in or submit pieces."
 # Appended to a write's WHERE so it applies only while the user (bound as the last parameter) is active.
 USER_ACTIVE = " AND NOT EXISTS (SELECT 1 FROM users WHERE id = ? AND suspended_at IS NOT NULL)"
+
+
+class BlockedIdentity(Exception):
+    """Sign-up refused: an admin deleted this identity's suspended account (blocklist.py)."""
 
 
 def suspended_error() -> ApiError:
@@ -232,6 +236,8 @@ async def device_submit(request: Request, user_code: str = Form(""), handle: str
             error, status = "Unknown or expired code. Start again in your terminal.", 400
         elif await tx.fetchone("SELECT 1 FROM users WHERE handle = ?", (handle,)):
             error, status = "That handle is taken.", 409
+        elif await blocklist.is_blocked(tx, st.secret, None, handle):
+            error, status = SUSPENDED_MSG, 403
         else:
             await tx.execute("INSERT INTO users (handle, created_at) VALUES (?, ?)", (handle, now_iso()))
             user = await tx.fetchone("SELECT id FROM users WHERE handle = ?", (handle,))
@@ -304,11 +310,14 @@ async def github_identity(st, code: str) -> tuple[int, str] | None:
 
 
 async def user_for_github(st, gh_id: int, login: str):
-    """The user bound to this GitHub id; created on first login when the login is a free, valid handle."""
+    """The user bound to this GitHub id; created on first login when the login is a free, valid handle.
+    Raises BlockedIdentity when that GitHub id belonged to a suspended account an admin deleted."""
     async with st.db.tx() as tx:
         row = await tx.fetchone("SELECT id, handle FROM users WHERE github_id = ?", (gh_id,))
         if row is not None:
             return row
+        if await blocklist.is_blocked(tx, st.secret, gh_id, login):
+            raise BlockedIdentity
         if not HANDLE_RE.match(login) or login in RESERVED_HANDLES or await tx.fetchone(
             "SELECT 1 FROM users WHERE handle = ?", (login,)
         ):
@@ -361,7 +370,10 @@ async def github_callback(request: Request, code: str = "", state: str = ""):
     if ident is None:
         return HTMLResponse(_device_form(request, error="GitHub did not authorize.", github=True), 400)
     gh_id, login = ident
-    row = await user_for_github(st, gh_id, login)
+    try:
+        row = await user_for_github(st, gh_id, login)
+    except BlockedIdentity:
+        return HTMLResponse(_device_form(request, error=SUSPENDED_MSG, github=True), 403)
     if row is None:
         error = f"Handle '{login}' is unavailable (TODO: pick one)."
         return HTMLResponse(_device_form(request, error=error, github=True), 409)

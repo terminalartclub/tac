@@ -142,7 +142,7 @@ def create_app(settings: Settings | None = None, automod: Automod | None = None)
         secret = (await db.fetchone("SELECT value FROM kv WHERE key = 'secret'"))["value"]
         await _load_themes(db, settings)
         store = LocalStore(settings.data_dir, base_url=settings.public_base_url, secret=secret)
-        publisher = Publisher(db, store)
+        publisher = Publisher(db, store, secret=secret)
         pipeline = Pipeline(settings, db, store, publisher, automod or Automod(settings))
         app.state.settings, app.state.db, app.state.store = settings, db, store
         app.state.secret, app.state.publisher, app.state.pipeline = secret, publisher, pipeline

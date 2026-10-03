@@ -10,7 +10,7 @@ import logging
 import re
 from datetime import UTC, datetime
 
-from . import cards
+from . import blocklist, cards
 from .db import Database, now_iso
 from .storage import MediaStore
 from .views import utc_today, views_summary
@@ -47,9 +47,10 @@ def iso_week(dt: datetime | None = None) -> str:
 
 
 class Publisher:
-    def __init__(self, db: Database, store: MediaStore) -> None:
+    def __init__(self, db: Database, store: MediaStore, secret: str = "") -> None:
         self.db = db
         self.store = store
+        self.secret = secret  # install secret: salts the blocked-identity hashes
         self._regen_lock = asyncio.Lock()
         # Serialises every transition that touches public media (publish/hide/unhide/delete), so a
         # hide's delete_prefix can never wipe the files a concurrent unhide just copied back.
@@ -166,7 +167,9 @@ class Publisher:
                              reason: str | None = None) -> list[str] | None:
         """Remove a user and everything they own. None if a render is in flight (worker holds a row), else the
         "handle/slug" ids that were marked posted to Instagram (those posts must be removed by hand).
-        actor/reason: an admin deletion (audit action delete_account, in the takedown log); default = the user's own."""
+        actor/reason: an admin deletion (audit action delete_account, in the takedown log); default = the user's own.
+        An admin deletion of an account that is suspended at that moment also blocks the identity from signing up
+        again (blocked_identities, same transaction); a self-deletion never does."""
         async with self._media_lock:
             async with self.db.tx() as tx:
                 if await tx.fetchone(
@@ -182,6 +185,8 @@ class Publisher:
                         "SELECT 1 FROM submissions WHERE user_id = ? AND status = 'rendering'", (user_id,)
                     ):
                         return None
+                # suspended at this moment (same transaction as the delete) decides the block
+                u = await tx.fetchone("SELECT github_id, suspended_at FROM users WHERE id = ?", (user_id,))
                 ids = [r[0] for r in await tx.conn.execute_fetchall("SELECT id FROM submissions WHERE user_id = ?", (user_id,))]
                 on_ig = [f"{handle}/{r[0]}" for r in await tx.conn.execute_fetchall(
                     "SELECT slug FROM submissions WHERE user_id = ? AND ig_posted_at IS NOT NULL ORDER BY slug", (user_id,))]
@@ -193,6 +198,11 @@ class Publisher:
                 for table in ("access_tokens", "web_sessions", "device_codes"):
                     await tx.execute(f"DELETE FROM {table} WHERE user_id = ?", (user_id,))
                 await tx.execute("DELETE FROM users WHERE id = ?", (user_id,))
+                if actor is not None and u is not None and u["suspended_at"] is not None:
+                    await tx.execute(
+                        "INSERT OR IGNORE INTO blocked_identities (github_id_hash, created_at, ref) VALUES (?, ?, ?)",
+                        (blocklist.identity_hash(self.secret, u["github_id"], handle), now_iso(), handle))
+                    await tx.audit(actor, "block", target=handle, detail="suspended account deleted")
                 if actor is None:
                     await tx.audit(f"user:{handle}", "account_deleted", detail=f"{len(ids)} submissions", target=handle)
                 else:  # the IG list goes in the row: the submissions it names are gone after this commit

@@ -387,6 +387,98 @@ async def test_admin_deletes_a_suspended_account_into_the_takedown_log(ctx):
         assert (await c.post("/v1/admin/users/x/delete", json={"reason": "x"})).status_code == 401
 
 
+# ---------------------------------------------------------------- blocked identities
+
+
+async def _dev_device_signup(ctx, handle):
+    async with ctx.client() as c:
+        d = (await c.post("/v1/auth/device", json={})).json()
+        return await c.post("/device", data={"user_code": d["user_code"], "handle": handle, "agree": "1"})
+
+
+async def test_deleting_a_suspended_account_blocks_the_identity_until_unblocked(ctx):
+    await ctx.login("alex")
+    async with ctx.admin() as a:
+        await a.post("/v1/admin/users/alex/suspend", json={"reason": "DMCA-2026-005"})
+        assert (await a.post("/v1/admin/users/alex/delete", json={"reason": "ERASE-2026-002"})).status_code == 200
+        page = (await a.get("/admin")).text
+        assert "Blocked identities <span class=count>1</span>" in page and "Unblock alex" in page
+    row = await ctx.app.state.db.fetchone("SELECT * FROM blocked_identities")
+    assert row["ref"] == "alex" and len(row["github_id_hash"]) == 64 and "alex" not in row["github_id_hash"]
+    # the freed handle can't be taken back: web sign-up and device sign-up both refuse, with the fixed message
+    async with ctx.client() as c:
+        r = await c.post("/v1/auth/web/login", data={"handle": "alex", "agree": "1"})
+        assert r.status_code == 403 and "This account is suspended" in r.text and not c.cookies.get("tac_session")
+    r = await _dev_device_signup(ctx, "alex")
+    assert r.status_code == 403 and "This account is suspended" in r.text
+    assert (await ctx.app.state.db.fetchone("SELECT COUNT(*) AS n FROM users"))["n"] == 0
+    async with ctx.admin() as a:
+        assert (await a.post("/v1/admin/blocked/nobody/unblock", json={"reason": "x"})).status_code == 404
+        assert (await a.post("/v1/admin/blocked/alex/unblock", json={})).status_code == 400  # reason required
+        r = await a.post("/v1/admin/blocked/alex/unblock", json={"reason": "APPEAL-2026-001"})
+        assert r.json() == {"ref": "alex", "unblocked": 1}
+        log = (await a.get("/v1/admin/takedowns")).json()["actions"]
+    assert [(x["action"], x["target"]) for x in log[:3]] == [("unblock", "alex"), ("delete_account", "alex"),
+                                                              ("block", "alex")]
+    assert (await _dev_device_signup(ctx, "alex")).status_code == 200  # a mistake undone
+
+
+async def test_deleting_an_unsuspended_account_blocks_nothing(ctx):
+    token = await ctx.login("alex")
+    await ctx.login("sam")
+    async with ctx.admin() as a:
+        assert (await a.post("/v1/admin/users/sam/delete", json={"reason": "ERASE-2026-003"})).status_code == 200
+    async with ctx.client(authorization=f"Bearer {token}") as c:  # and the artist's own deletion
+        assert (await c.request("DELETE", "/v1/me", json={"confirm": "alex"})).status_code == 204
+    assert (await ctx.app.state.db.fetchone("SELECT COUNT(*) AS n FROM blocked_identities"))["n"] == 0
+    assert (await _dev_device_signup(ctx, "sam")).status_code == 200
+    async with ctx.client() as c:
+        assert (await c.post("/v1/auth/web/login", data={"handle": "alex", "agree": "1"})).status_code == 303
+
+
+async def test_github_identity_of_a_deleted_suspended_account_cant_re_register(tmp_path, monkeypatch):
+    gh = {"id": 4242, "login": "alexgh"}
+
+    async def fake_identity(st, code):
+        return gh["id"], gh["login"]
+
+    monkeypatch.setattr(web_auth, "github_identity", fake_identity)
+    monkeypatch.setattr(auth, "github_identity", fake_identity)
+    async with make_ctx(tmp_path, worker_enabled=False, auth_mode="github", github_client_id="cid") as ctx:
+        async def web(c):
+            r = await c.get("/v1/auth/web/login")
+            state = parse_qs(urlsplit(r.headers["location"]).query)["state"][0]
+            return await c.get("/v1/auth/web/github/callback", params={"code": "gh", "state": state})
+
+        async def device(c):
+            d = (await c.post("/v1/auth/device", json={})).json()
+            start = await c.post("/device/github", data={"user_code": d["user_code"]})
+            state = parse_qs(urlsplit(start.headers["location"]).query)["state"][0]
+            c.cookies.set("tac_gh_nonce", state.split(".")[1])
+            return await c.get("/device/github/callback", params={"code": "gh", "state": state})
+
+        async with ctx.client() as c:
+            assert (await web(c)).status_code == 200  # created; terms interstitial
+        async with ctx.admin() as a:
+            await a.post("/v1/admin/users/alexgh/suspend", json={"reason": "x"})
+            await a.post("/v1/admin/users/alexgh/delete", json={"reason": "x"})
+        gh["login"] = "alexgh-new"  # renamed on GitHub: the numeric id is what's blocked
+        async with ctx.client() as c:
+            r = await web(c)
+            assert r.status_code == 403 and "This account is suspended" in r.text
+            r = await device(c)
+            assert r.status_code == 403 and "This account is suspended" in r.text
+        assert (await ctx.app.state.db.fetchone("SELECT COUNT(*) AS n FROM users"))["n"] == 0
+        gh.update(id=5555, login="alexgh")  # a different GitHub account may take the freed handle
+        async with ctx.client() as c:
+            assert (await web(c)).status_code == 200
+        gh.update(id=4242, login="alexgh-new")
+        async with ctx.admin() as a:
+            assert (await a.post("/v1/admin/blocked/alexgh/unblock", json={"reason": "x"})).status_code == 200
+        async with ctx.client() as c:
+            assert (await web(c)).status_code == 200  # unblocked: signs up again
+
+
 # ---------------------------------------------------------------- Instagram
 
 

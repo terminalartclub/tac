@@ -17,9 +17,10 @@ from urllib.parse import urlencode, urlsplit
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
-from . import terms
+from . import blocklist, terms
 from .auth import (
     RESERVED_HANDLES,
+    BlockedIdentity,
     SUSPENDED_MSG,
     TERMS_ERROR,
     github_identity,
@@ -124,7 +125,9 @@ async def web_login_submit(request: Request, handle: str = Form(""), return_: st
     async with st.db.tx() as tx:
         row = await tx.fetchone("SELECT id, terms_version, suspended_at FROM users WHERE handle = ?", (handle,))
         behind = not terms.is_current(row, st.settings)  # also true for a new handle
-        if row is not None and row["suspended_at"]:
+        if (row is not None and row["suspended_at"]) or (
+            row is None and await blocklist.is_blocked(tx, st.secret, None, handle)
+        ):
             error = SUSPENDED_MSG
         elif behind and not terms.ticked(agree):
             error = TERMS_ERROR
@@ -163,7 +166,10 @@ async def web_github_callback(request: Request, code: str = "", state: str = "")
     if ident is None:
         return HTMLResponse(page("terminal art club · sign in", "<h1>sign in</h1><p class=err>GitHub did not authorize.</p>",
                                  home=site_home(request)), 400)
-    row = await user_for_github(st, *ident)
+    try:
+        row = await user_for_github(st, *ident)
+    except BlockedIdentity:
+        return _suspended_page(request)
     if row is None:
         return HTMLResponse(page(
             "terminal art club · sign in",
