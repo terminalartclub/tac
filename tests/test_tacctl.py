@@ -72,7 +72,13 @@ def platform(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
                     {"id": "sub-1", "slug": "ember", "title": "ember", "status": "published",
                      "views_total": 1234, "views_7d": 56, "views_28d": [0] * 20 + [1, 2, 4, 8, 4, 2, 1, 0]},
                     {"id": "sub-2", "slug": "hush-2", "title": "hush-2", "status": "in_review",
-                     "views_total": 0, "views_7d": 0, "views_28d": [{"date": "d", "views": 0}] * 28}]})
+                     "views_total": 0, "views_7d": 0, "views_28d": [{"date": "d", "views": 0}] * 28,
+                     "critique": None, "reasons": []},
+                    {"id": "sub-3", "slug": "glare", "title": "glare", "status": "rejected",
+                     "views_total": 0, "views_7d": 0, "views_28d": [0] * 28,
+                     "critique": "the first frame is a flat grey field; nothing reads at thumbnail size, "
+                                 "and the motion fills the whole frame instead of a fifth of it",
+                     "reasons": ["seam JUMP (4.2x p90 step)", "void 12% (needs ≥30%)"]}]})
             if self.path == "/v1/submissions/sub-1":
                 state.status_polls += 1
                 seq = ["queued", "rendering", "in_review"]
@@ -249,6 +255,16 @@ def test_mine_table_and_sparkline(platform: Platform, capsys) -> None:
     assert ember[:4] == ["ember", "published", "1234", "56"]
     assert ember[4] == "▁" * 20 + "▂▃▅█▅▃▂▁" and len(ember[4]) == 28
     assert out[3].split()[:4] == ["hush-2", "in_review", "0", "0"] and out[3].endswith("▁" * 28)
+    assert out[4].split()[:2] == ["glare", "rejected"]
+    body = out[5:]
+    assert body[-1] == "manage or unpublish at terminalart.club/me"
+    crit = [ln for ln in body if ln.startswith("    ") and not ln.lstrip().startswith("✗")
+            and not ln.startswith("      ")]
+    assert crit and crit[0].startswith("    the first frame is a flat grey field")
+    assert all(len(ln) <= 100 for ln in body)  # wrapped at the (fallback) terminal width
+    assert "    ✗ seam JUMP (4.2x p90 step)" in body and "    ✗ void 12% (needs ≥30%)" in body
+    assert "\x1b[" not in "\n".join(out)  # no ANSI when not a TTY
+    assert not any("✗" in ln for ln in out[2:5])  # published / in_review pieces show no reasons
 
 
 def test_mine_expired_login(platform: Platform, capsys) -> None:
@@ -261,3 +277,13 @@ def test_sparkline_edges() -> None:
     assert tacctl.sparkline([]) == ""
     assert tacctl.sparkline([0, 0]) == "▁▁"
     assert tacctl.sparkline([0, 7]) == "▁█"
+
+
+def test_mine_wraps_to_terminal_width(platform: Platform, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    import os as _os
+    tacctl.write_private(tacctl.cred_path(), {"access_token": "tok-123", "handle": "alex"})
+    monkeypatch.setattr(tacctl.shutil, "get_terminal_size", lambda fallback=None: _os.terminal_size((50, 20)))
+    assert tacctl.main(["mine"]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    crit = [ln for ln in lines if ln.startswith("    ") and "✗" not in ln]
+    assert len(crit) >= 3 and all(len(ln) <= 50 for ln in crit)

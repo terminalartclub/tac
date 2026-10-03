@@ -28,6 +28,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import textwrap
 import time
 import urllib.error
 import urllib.request
@@ -653,8 +654,14 @@ def cmd_mine(a: argparse.Namespace) -> int:
     if not pieces:
         print("  none yet — /tac:create, then /tac:submit")
         return 0
-    rows = []
+    rows, extra = [], []
     for p in pieces:
+        notes_ = []
+        if p.get("critique"):
+            notes_.append(("critique", str(p["critique"])))
+        if p.get("status") == "rejected":
+            notes_ += [("reason", str(r)) for r in (p.get("reasons") or [])]
+        extra.append(notes_)
         series = next((p[k] for k in ("views_28d", "series_28d", "series") if isinstance(p.get(k), list)), [])
         rows.append((str(p.get("title") or p.get("slug") or p.get("id")), str(p.get("status") or "?"),
                      str(p.get("views_total") if p.get("views_total") is not None else "–"),
@@ -663,8 +670,15 @@ def cmd_mine(a: argparse.Namespace) -> int:
     w = [max(len(hdr[i]), *(len(r[i]) for r in rows)) for i in range(4)]
     fmt = f"  {{:<{w[0]}}}  {{:<{w[1]}}}  {{:>{w[2]}}}  {{:>{w[3]}}}  {{}}"
     print(fmt.format(*hdr))
-    for r in rows:
+    width = max(40, shutil.get_terminal_size((100, 24)).columns)
+    dim = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
+    for r, notes_ in zip(rows, extra):
         print(fmt.format(*r))
+        for kind, text in notes_:
+            first, rest = ("    ", "    ") if kind == "critique" else ("    ✗ ", "      ")
+            line = textwrap.fill(" ".join(text.split()), width=width, initial_indent=first, subsequent_indent=rest)
+            print(f"\x1b[2m{line}\x1b[0m" if dim else line)
+    print("manage or unpublish at terminalart.club/me")
     return 0
 
 
