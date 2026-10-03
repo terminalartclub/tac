@@ -9,7 +9,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
-from conftest import handle_slug, make_ctx
+from conftest import META, handle_slug, make_ctx
 from tac_platform import auth, publish, web_auth
 from tac_platform.web import sha256_hex
 
