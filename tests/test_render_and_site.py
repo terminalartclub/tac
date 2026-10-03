@@ -57,6 +57,7 @@ def test_build_site_contract(good: Path, tmp_path: Path) -> None:
     assert doc["week"] == {"label": "2026-W40", "views": 0} and doc["theme"]["title"] == "first light"
     assert doc["totals"] == {"pieces": 1, "artists": 1, "tokens": 0}
     p = doc["pieces"][0]
+    assert p["created"] is None or (len(p["created"]) == 20 and p["created"].endswith("Z") and "T" in p["created"])
     assert set(p) == {"id", "handle", "slug", "title", "description", "model", "model_label", "house_artist",
                       "human_role", "tokens", "iterations", "size", "loop_s", "license", "created", "pick", "preview",
                       "og", "source", "process", "stats"}
@@ -86,3 +87,15 @@ def test_build_site_week_label_accepts_both_curation_shapes() -> None:
     assert bs.week_label("2026-W40") == "2026-W40"
     assert bs.week_label({"label": "2026-W41", "views": 9}) == "2026-W41"
     assert bs.week_label(None) == "" and bs.week_label({"views": 1}) == "" and bs.week_label(40) == ""
+
+
+
+def test_build_site_created_is_full_utc_timestamp() -> None:
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("build_site", BUILD)
+    bs = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(bs)
+    assert bs.created_utc("2026-10-02") == "2026-10-02T00:00:00Z"  # house meta has a date only: midnight UTC
+    assert bs.created_utc("2026-10-02T23:14:03+02:00") == "2026-10-02T21:14:03Z"
+    assert bs.created_utc(None) is None and bs.created_utc("") is None and bs.created_utc("Oct 2") is None

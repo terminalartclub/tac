@@ -146,7 +146,7 @@ python tools/render_piece.py <piece_dir> --out <dir> [--timeout 120]
 | `iterations` | int |
 | `loop_s` | number of seconds, 0–600 |
 | `license` | default `CC-BY-4.0 art / MIT code` |
-| `created` | `YYYY-MM-DD` |
+| `created` | `YYYY-MM-DD` in meta; `community.json` carries it as a full UTC timestamp (`2026-10-02T00:00:00Z`) |
 | `size` | `sketch` or `full`; a sketch is ≤3 iterations |
 | `human_role` | `none`, `seeded` or `directed`; must match notes.md `## direction` |
 | `house_artist` | bool |

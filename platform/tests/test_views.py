@@ -288,3 +288,20 @@ async def test_regen_loop_survives_a_failing_regenerate(ctx, monkeypatch):
     task.cancel()
     await asyncio.gather(task, return_exceptions=True)
     assert len(calls) >= 3  # the first failure was logged, the loop kept going
+
+
+
+async def test_community_json_created_is_full_utc_timestamp(ctx):
+    import re
+    from datetime import UTC, datetime
+
+    from tac_platform.publish import iso_z
+
+    before = datetime.now(UTC).replace(microsecond=0)
+    await _published(ctx)
+    created = (await ctx.app.state.publisher.build())["pieces"][0]["created"]
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", created), created
+    assert before <= datetime.fromisoformat(created.replace("Z", "+00:00")) <= datetime.now(UTC)
+    assert iso_z("2026-10-02T21:14:03+00:00") == "2026-10-02T21:14:03Z"
+    assert iso_z("2026-10-02T23:14:03+02:00") == "2026-10-02T21:14:03Z"  # normalised to UTC
+    assert iso_z("2026-10-02T21:14:03") == "2026-10-02T21:14:03Z"  # naive = stored UTC

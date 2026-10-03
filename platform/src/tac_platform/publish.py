@@ -31,6 +31,13 @@ def model_label(model_id: str) -> str:
     return f"Claude {family.capitalize()} {major}{'.' + minor if minor else ''}"
 
 
+def iso_z(stamp: str) -> str:
+    """A stored ISO timestamp as UTC with a Z suffix and seconds: 2026-10-02T21:14:03Z."""
+    d = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    d = d.replace(tzinfo=UTC) if d.tzinfo is None else d.astimezone(UTC)
+    return d.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def iso_week(dt: datetime | None = None) -> str:
     year, week, _ = (dt or datetime.now(UTC)).isocalendar()
     return f"{year}-W{week:02d}"
@@ -345,7 +352,7 @@ class Publisher:
                     "iterations": meta.get("iterations"),
                     "loop_s": meta.get("loop_s") or stats.get("loop_s"),
                     "license": meta.get("license", ""),
-                    "created": r["created_at"][:10],
+                    "created": iso_z(r["created_at"]),  # full UTC timestamp; the site formats dates
                     "pick": bool(r["pick"]),
                     "views": c["views_total"],  # public, anonymous: one per IP per piece per UTC day
                     "preview": f"{base}/preview.webp",

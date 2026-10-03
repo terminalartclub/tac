@@ -71,12 +71,26 @@ def piece_entry(piece: Path, build: Path, picks: set[str]) -> dict:
         "size": m.get("size") or "full",
         "loop_s": float(loop_s) if loop_s is not None else None,
         "license": m.get("license") or metamod.DEFAULT_LICENSE,
-        "created": m.get("created"),
+        "created": created_utc(m.get("created")),  # same full-UTC shape as the platform's feed
         "pick": pid in picks,
         "preview": f"{pid}/preview.webp", "og": f"{pid}/og.jpg", "source": f"{pid}/piece.py",
         "process": process,
         "stats": {"motion_median": stats["motion_median"], "seam": stats["seam"], "void": stats["void"]},
     }
+
+
+def created_utc(value: object) -> str | None:
+    """meta.yaml's `created` (a YYYY-MM-DD date, or a full timestamp) as 2026-10-02T00:00:00Z. A date-only
+    value has no time of day, so it is midnight UTC."""
+    if value is None or value == "":
+        return None
+    s = str(value).strip()
+    try:
+        d = dt.datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    d = d.replace(tzinfo=dt.timezone.utc) if d.tzinfo is None else d.astimezone(dt.timezone.utc)
+    return d.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def week_label(week: object) -> str:
@@ -114,8 +128,10 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{p}: not rendered — run with --render", file=sys.stderr)
             return 1
     entries = [piece_entry(p, a.build, picks) for p in pieces]
-    entries.sort(key=lambda e: (not e["pick"], -(dt.date.fromisoformat(e["created"]).toordinal()
-                                                 if e["created"] else 0), e["id"]))
+    # newest first; created is uniform "YYYY-MM-DDTHH:MM:SSZ" so the string order is time order
+    entries.sort(key=lambda e: e["id"])
+    entries.sort(key=lambda e: e["created"] or "", reverse=True)
+    entries.sort(key=lambda e: not e["pick"])
     now = dt.datetime.now(dt.timezone.utc)
     iso = now.isocalendar()
     doc = {
