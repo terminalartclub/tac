@@ -179,7 +179,7 @@ async def delete_me(body: DeleteIn, request: Request) -> Response:
     user = await current_user(request)
     if body.confirm != user["handle"]:
         raise ApiError(400, "confirm_mismatch", detail="send {\"confirm\": \"<your handle>\"}")
-    if not await st.publisher.delete_account(user["id"], user["handle"]):
+    if await st.publisher.delete_account(user["id"], user["handle"]) is None:
         raise ApiError(409, "busy", detail="a submission is rendering; try again in a few minutes")
     resp = Response(status_code=204)
     if user["via"] == "cookie":

@@ -228,7 +228,9 @@ docker run --rm --name tac-render-<random> --network none --read-only --tmpfs /t
   `community.json` is regenerated once. Suspend is idempotent: calling it again re-sweeps, so a retry
   finishes a media delete that failed.
 - The moderator's reason is never shown to the suspended user; sign-in pages and the API show a fixed message.
-- Every hide, unhide, delete, suspend and unsuspend writes an audit row with its reason and a `target`
+- Admin account deletion (`POST /v1/admin/users/{h}/delete {reason}`) reuses `delete_account`; it is how a
+  suspended artist's erasure request is honoured.
+- Every hide, unhide, delete, suspend, unsuspend and admin account deletion writes an audit row with its reason and a `target`
   (`handle/slug` or `handle`) that survives row deletion. `/admin/takedowns` lists the last 100.
 - All new endpoints sit under `/v1/admin/` behind `require_admin` (header token, or cookie + CSRF header +
   same-origin), so the admin listener's path guard covers them. Reason prompts use a `data-prompt`

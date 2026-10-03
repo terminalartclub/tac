@@ -162,8 +162,11 @@ class Publisher:
                 "media_failed": failed,
             }
 
-    async def delete_account(self, user_id: int, handle: str) -> bool:
-        """Remove a user and everything they own. False if a render is in flight (worker holds a row)."""
+    async def delete_account(self, user_id: int, handle: str, actor: str | None = None,
+                             reason: str | None = None) -> list[str] | None:
+        """Remove a user and everything they own. None if a render is in flight (worker holds a row), else the
+        "handle/slug" ids that were marked posted to Instagram (those posts must be removed by hand).
+        actor/reason: an admin deletion (audit action delete_account, in the takedown log); default = the user's own."""
         async with self._media_lock:
             async with self.db.tx() as tx:
                 if await tx.fetchone(
@@ -178,8 +181,10 @@ class Publisher:
                     if await tx.fetchone(
                         "SELECT 1 FROM submissions WHERE user_id = ? AND status = 'rendering'", (user_id,)
                     ):
-                        return False
+                        return None
                 ids = [r[0] for r in await tx.conn.execute_fetchall("SELECT id FROM submissions WHERE user_id = ?", (user_id,))]
+                on_ig = [f"{handle}/{r[0]}" for r in await tx.conn.execute_fetchall(
+                    "SELECT slug FROM submissions WHERE user_id = ? AND ig_posted_at IS NOT NULL ORDER BY slug", (user_id,))]
                 marks = ",".join("?" * len(ids))
                 if ids:
                     for table in ("reports", "views", "view_days"):
@@ -188,12 +193,16 @@ class Publisher:
                 for table in ("access_tokens", "web_sessions", "device_codes"):
                     await tx.execute(f"DELETE FROM {table} WHERE user_id = ?", (user_id,))
                 await tx.execute("DELETE FROM users WHERE id = ?", (user_id,))
-                await tx.audit(f"user:{handle}", "account_deleted", detail=f"{len(ids)} submissions")
+                if actor is None:
+                    await tx.audit(f"user:{handle}", "account_deleted", detail=f"{len(ids)} submissions", target=handle)
+                else:  # the IG list goes in the row: the submissions it names are gone after this commit
+                    ig_note = f" [also remove from Instagram: {', '.join(on_ig)}]" if on_ig else ""
+                    await tx.audit(actor, "delete_account", target=handle, detail=f"{reason}{ig_note}")
             for sid in ids:
                 await self.store.delete_prefix(f"submissions/{sid}")
             await self.store.delete_prefix(f"public/{handle}")
             await self.regenerate()
-            return True
+            return on_ig
 
     # ------------------------------------------------------------ media
 

@@ -83,6 +83,7 @@ TAC_E2E_URL=http://127.0.0.1:8790 TAC_E2E_ADMIN_TOKEN=t uv run pytest tests/test
 | POST | `/v1/admin/pieces/{handle}/{slug}/hide {reason}` | admin | reason required (1-200 chars). Takes the piece off the wall, gallery, community.json, og/share and media now, like a report auto-hide; 409 `not_visible` unless published and visible. Undo = unhide |
 | POST | `/v1/admin/pieces/{handle}/{slug}/unhide` · `/delete {reason}` | admin | delete reason required (1-200 chars, shown to the artist); delete makes the piece `rejected` and removes its media; unhide 409 `user_suspended` while the artist is suspended. hide and delete return `reminder: "also remove from Instagram"` when the piece is marked IG-posted |
 | POST | `/v1/admin/pieces/{handle}/{slug}/instagram-posted {posted}` | admin | sets/clears `ig_posted_at` (any status), which drives the Instagram reminder |
+| POST | `/v1/admin/users/{handle}/delete {reason}` | admin | deletes the account and everything it owns (as `DELETE /v1/me`), suspended or not; 409 `busy` while a render runs. Logged as `delete_account` (handle, reason, and any IG-posted pieces) in the takedown log. Button: Suspended users section, confirm + reason |
 | POST | `/v1/admin/users/{handle}/suspend {reason}` · `/unsuspend {reason}` | admin | see Takedowns. Suspend is idempotent: on a suspended user it re-sweeps (hides any visible piece, removes leftover public media) and reports `already_suspended`, `hidden`, `media_removed`, `media_failed`; unsuspend: 409 `not_suspended` |
 | POST | `/v1/admin/users/{handle}/trust {trusted}` | admin | trusted + clean automod means auto-publish |
 | POST | `/v1/admin/users/{handle}/instagram-confirm {instagram}` | admin | confirms the user's current IG handle (compare-and-set: 409 if it changed); only confirmed handles are public and tagged |
@@ -106,7 +107,7 @@ The terms promise copyright/hate takedowns within 72 hours and that repeat infri
 - **Instagram:** the platform can't delete our IG posts. Mark a piece "posted to IG" when we post it; once
   it's hidden or deleted, `/admin` shows "also remove from Instagram" (and the Instagram cleanup list) until
   you click "Removed from IG".
-- **The log:** every hide, unhide, delete, suspend and unsuspend writes an audit row with its reason and
+- **The log:** every hide, unhide, delete, suspend, unsuspend and admin account deletion writes an audit row with its reason and
   target. `/admin/takedowns` lists the last 100: the record to answer a copyright complaint with.
 
 **Moderator runbook.** Reasons are reference IDs only (e.g. `DMCA-2026-001`): no names, emails or

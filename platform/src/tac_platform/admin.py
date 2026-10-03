@@ -26,7 +26,7 @@ MEDIA_TYPES = {".webp": "image/webp", ".jpg": "image/jpeg", ".png": "image/png"}
 IG_REMINDER = "also remove from Instagram"
 IG_CHIP = f"<span class='chip warn'>{IG_REMINDER}</span>"
 # The takedown log (/admin/takedowns): every action that takes something off the site or puts it back.
-TAKEDOWN_ACTIONS = ("hide", "unhide", "delete", "suspend", "unsuspend")
+TAKEDOWN_ACTIONS = ("hide", "unhide", "delete", "suspend", "unsuspend", "delete_account")
 TAKEDOWN_LOG_ROWS = 100
 
 
@@ -295,6 +295,22 @@ async def unsuspend(handle: str, body: ReasonIn, request: Request) -> dict:
     return {"handle": handle, "suspended": False}
 
 
+@router.post("/v1/admin/users/{handle}/delete")
+async def delete_user(handle: str, body: ReasonIn, request: Request) -> dict:
+    """Delete an account and everything it owns (Publisher.delete_account), suspended or not: e.g. a suspended
+    artist's erasure request, since they can't sign in to do it. Handle + reason go to the takedown log."""
+    require_admin(request)
+    st = request.app.state
+    user = await st.db.fetchone("SELECT id FROM users WHERE handle = ?", (handle,))
+    if user is None:
+        raise ApiError(404, "not_found")
+    on_ig = await st.publisher.delete_account(user["id"], handle, actor="admin", reason=body.reason)
+    if on_ig is None:
+        raise ApiError(409, "busy", detail="a submission is rendering; try again in a few minutes")
+    return {"handle": handle, "deleted": True,
+            "reminder": f"{IG_REMINDER}: {', '.join(on_ig)}" if on_ig else None}
+
+
 async def _takedowns(request: Request) -> list[dict]:
     marks = ",".join("?" * len(TAKEDOWN_ACTIONS))
     rows = await request.app.state.db.fetchall(
@@ -378,7 +394,8 @@ e = html.escape
 
 # Buttons carry their action as data- attributes (html-escaped text, never code): data-act = the POST
 # path, data-body = a JSON object, data-reason = the id of a reason input, data-prompt = the question of a
-# required-reason prompt() (cancel or blank = no request). One delegated listener reads
+# required-reason prompt() (cancel or blank = no request), data-confirm = a confirm() asked first. One
+# delegated listener reads
 # them, so no value is ever interpolated into JavaScript and safety doesn't rest on the input validators.
 JS = """
 async function act(url, body) {
@@ -401,6 +418,7 @@ document.addEventListener('click', (ev) => {
   if (!b) return;
   const path = adminPath(b.dataset.act);
   if (!path) return;  // never POST anywhere else, whatever ended up in the attribute
+  if (b.dataset.confirm && !confirm(b.dataset.confirm)) return;  // irreversible actions ask first
   const body = b.dataset.body ? JSON.parse(b.dataset.body) : {};
   if (b.dataset.reason) body.reason = document.getElementById(b.dataset.reason).value || 'rejected by moderator';
   if (b.dataset.prompt) {  // required reason: cancel or blank sends nothing
@@ -422,7 +440,7 @@ def _seg(v: str) -> str:
 
 
 def _button(label: str, path: str, body: dict | None = None, reason_id: str | None = None, cls: str = "",
-            prompt: str | None = None) -> str:
+            prompt: str | None = None, confirm: str | None = None) -> str:
     attrs = f" class={cls}" if cls else ""
     attrs += f" data-act='{e(path, quote=True)}'"
     if body is not None:
@@ -431,6 +449,8 @@ def _button(label: str, path: str, body: dict | None = None, reason_id: str | No
         attrs += f" data-reason='{e(reason_id, quote=True)}'"
     if prompt is not None:
         attrs += f" data-prompt='{e(prompt, quote=True)}'"
+    if confirm is not None:
+        attrs += f" data-confirm='{e(confirm, quote=True)}'"
     return f"<button type=button{attrs}>{e(label)}</button>"
 
 
@@ -442,6 +462,12 @@ def _suspend_button(handle: str, suspended: bool) -> str:
     return _button(f"Suspend {handle}", f"{path}/suspend", cls="bad",
                    prompt=f"Suspend {handle}: reason (for the takedown log). Revokes every sign-in and hides "
                           "every published piece.")
+
+
+def _delete_account_button(handle: str) -> str:
+    return _button(f"Delete account {handle}", f"/v1/admin/users/{_seg(handle)}/delete", cls="bad",
+                   confirm=f"Permanently delete {handle} and all their pieces, media and sign-ins? This can't be undone.",
+                   prompt=f"Delete account {handle}: reason (reference ID only, for the takedown log)")
 
 
 def _ig_posted_button(handle: str, slug: str, posted: bool, label: str | None = None) -> str:
@@ -573,7 +599,7 @@ async def admin_page(request: Request):
                     else "<p class=muted>nothing taken down is still on Instagram</p>") + "</section>")
     sus = "".join(
         f"<tr><td>{e(u['handle'])}</td><td>{e(u['suspended_at'])}</td><td>{e(u['suspended_reason'] or '')}</td>"
-        f"<td>{_suspend_button(u['handle'], True)}</td></tr>"
+        f"<td>{_suspend_button(u['handle'], True)}{_delete_account_button(u['handle'])}</td></tr>"
         for u in q["suspended_users"]
     )
     parts.append("<section><h2>Suspended users <span class=count>" + str(len(q["suspended_users"])) + "</span></h2>"

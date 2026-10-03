@@ -360,6 +360,33 @@ async def test_unhide_cas_refuses_a_suspended_owner_when_the_precheck_is_stale(c
     assert await _public_ids(ctx) == []
 
 
+async def test_admin_deletes_a_suspended_account_into_the_takedown_log(ctx):
+    token, sub_id, h, s = await _published(ctx)
+    db = ctx.app.state.db
+    async with ctx.admin() as a:
+        await a.post(f"/v1/admin/pieces/{h}/{s}/instagram-posted", json={"posted": True})
+        await a.post(f"/v1/admin/users/{h}/suspend", json={"reason": "DMCA-2026-004"})
+        page = (await a.get("/admin")).text
+        btn = re.search(rf"<button type=button class=bad data-act='/v1/admin/users/{h}/delete'([^>]*)>", page)
+        assert btn and "data-confirm='Permanently delete" in btn.group(1) and "data-prompt=" in btn.group(1)
+        assert (await a.post(f"/v1/admin/users/{h}/delete", json={})).status_code == 400  # reason required
+        assert (await a.post("/v1/admin/users/nobody/delete", json={"reason": "x"})).status_code == 404
+        await db.execute("UPDATE submissions SET status = 'rendering' WHERE id = ?", (sub_id,))
+        r = await a.post(f"/v1/admin/users/{h}/delete", json={"reason": "ERASE-2026-001"})
+        assert r.status_code == 409 and r.json()["error"] == "busy"
+        await db.execute("UPDATE submissions SET status = 'published' WHERE id = ?", (sub_id,))
+        r = await a.post(f"/v1/admin/users/{h}/delete", json={"reason": "ERASE-2026-001"})
+        assert r.json() == {"handle": h, "deleted": True, "reminder": f"also remove from Instagram: {h}/{s}"}
+        log = (await a.get("/v1/admin/takedowns")).json()["actions"]
+    assert (log[0]["action"], log[0]["target"], log[0]["actor"]) == ("delete_account", h, "admin")
+    assert log[0]["reason"] == f"ERASE-2026-001 [also remove from Instagram: {h}/{s}]"  # durable: the rows are gone
+    for table in ("users", "submissions", "access_tokens", "web_sessions"):
+        assert (await db.fetchone(f"SELECT COUNT(*) AS n FROM {table}"))["n"] == 0, table
+    assert await ctx.app.state.store.list(f"public/{h}/") == []
+    async with ctx.client() as c:
+        assert (await c.post("/v1/admin/users/x/delete", json={"reason": "x"})).status_code == 401
+
+
 # ---------------------------------------------------------------- Instagram
 
 
@@ -488,6 +515,37 @@ for (let i = 0; i < n; i++)
   handler({ target: { closest: () => ({ dataset: { act: '/v1/admin/pieces/a/b/hide', prompt: 'why?' } }) } });
 setTimeout(() => console.log(JSON.stringify({ posts, alerts })), 20);
 """
+
+
+CONFIRM_HARNESS = r"""
+const posts = [];
+globalThis.location = { origin: 'https://api.terminalart.club', reload() {} };
+let handler;
+globalThis.document = { addEventListener: (t, f) => { handler = f; }, getElementById: () => ({ value: 'r' }) };
+globalThis.alert = () => {};
+const confirms = JSON.parse(process.argv[2]);
+globalThis.confirm = () => confirms.shift();
+globalThis.prompt = () => 'ERASE-1';
+globalThis.fetch = async (url, opts) => { posts.push([url, JSON.parse(opts.body)]); return { ok: true }; };
+eval(process.argv[1]);
+for (let i = 0; i < 2; i++)
+  handler({ target: { closest: () => ({ dataset: { act: '/v1/admin/users/a/delete', confirm: 'sure?', prompt: 'why?' } }) } });
+setTimeout(() => console.log(JSON.stringify(posts)), 20);
+"""
+
+
+def test_admin_listener_confirm_comes_before_the_prompt():
+    import shutil
+    import subprocess
+
+    from tac_platform.admin import JS
+
+    if not shutil.which("node"):
+        pytest.skip("node not installed")
+    out = subprocess.run(["node", "-e", CONFIRM_HARNESS, JS, json.dumps([False, True])], capture_output=True,
+                         text=True, timeout=20)
+    assert out.returncode == 0, out.stderr
+    assert json.loads(out.stdout) == [["/v1/admin/users/a/delete", {"reason": "ERASE-1"}]]  # declined = nothing
 
 
 def test_admin_listener_prompt_requires_a_reason():
