@@ -151,7 +151,7 @@ async def _accept(request: Request, user: dict, form, since: str, limit: int) ->
     st.pipeline.wake()
     site = st.settings.site_url
     return SubmissionAccepted(id=sub_id, status="queued", url=f"{st.settings.public_base_url}/v1/submissions/{sub_id}",
-                              piece_url=f"{site}/night-shift/{user['handle']}/{slug}" if site else None)
+                              piece_url=f"{site}/@{user['handle']}/{slug}" if site else None)
 
 
 @router.get("/v1/submissions/{sub_id}", response_model=SubmissionOut)

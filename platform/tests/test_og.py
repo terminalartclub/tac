@@ -107,14 +107,14 @@ async def test_backfill_is_idempotent_and_follows_layout_version(site):
 
 async def test_og_piece_meta_has_author_and_card_images(site):
     h, s = await publish(site)
-    r = await get_og(site, f"/night-shift/{h}/{s}")
+    r = await get_og(site, f"/@{h}/{s}")
     assert r.status_code == 200 and r.headers["cache-control"] == "public, max-age=300"
     page, m = r.text, metas(r.text)
     assert m["og:title"] == ["First Light · @alex · Claude Opus 5.5"]  # AUTHOR ALWAYS, no site suffix
     assert "<title>First Light · @alex · Claude Opus 5.5</title>" in page and page.count("<title>") == 1
     assert m["og:description"] == ["animated terminal art made by @alex's Claude. terminal art club"]
     assert m["og:site_name"] == ["terminal art club"]
-    assert m["og:url"] == [f"{SITE}/night-shift/{h}/{s}"]
+    assert m["og:url"] == [f"{SITE}/@{h}/{s}"]
     media = f"{site.settings.public_base_url}/media/{h}/{s}"
     share = Image.open(io.BytesIO(await site.app.state.store.get(f"public/{h}/{s}/share.jpg")))
     assert m["og:image"] == [f"{media}/share.jpg"]
@@ -122,32 +122,34 @@ async def test_og_piece_meta_has_author_and_card_images(site):
     assert m["twitter:card"] == ["summary_large_image"] and m["twitter:image"] == [f"{media}/card.jpg"]
     # the template's own copies are gone; the rest of the page (SPA boot) is intact
     assert "og-default.jpg" not in page and "site default description" not in page
-    assert 'href="https://terminalart.club/"' not in page and f'<link rel="canonical" href="{SITE}/night-shift/{h}/{s}">' in page
+    assert 'href="https://terminalart.club/"' not in page and f'<link rel="canonical" href="{SITE}/@{h}/{s}">' in page
     assert '<script type="module" src="/assets/app.js"></script>' in page and page.rstrip().endswith("</html>")
 
 
 async def test_og_artist_and_feed(site):
     h, s = await publish(site)
-    m = metas((await get_og(site, f"/night-shift/@{h}")).text)
-    assert m["og:title"] == ["@alex on terminal art club · 1 piece"] and m["og:url"] == [f"{SITE}/night-shift/@{h}"]
+    m = metas((await get_og(site, f"/@{h}")).text)
+    assert m["og:title"] == ["@alex on terminal art club · 1 piece"] and m["og:url"] == [f"{SITE}/@{h}"]
     assert m["og:image"][0].endswith(f"/media/{h}/{s}/share.jpg")
-    for path in ("/night-shift", "/night-shift/"):
+    for path in ("/gallery", "/gallery/"):
         r = await get_og(site, path)
         m = metas(r.text)
         assert r.status_code == 200 and m["og:title"] == ["the wall · terminal art club"]
-        assert m["og:url"] == [f"{SITE}/night-shift"]
+        assert m["og:url"] == [f"{SITE}/gallery"]
         assert 'content="https://terminalart.club/og-default.jpg" property="og:image"' in r.text  # site image kept
 
 
 async def test_og_escapes_every_value(site):
     evil = {**META, "title": '"><script>alert(1)</script><meta x="'}
     h, s = await publish(site, meta=evil)
-    page = (await get_og(site, f"/night-shift/{h}/{s}")).text
+    page = (await get_og(site, f"/@{h}/{s}")).text
     assert "<script>alert(1)" not in page and '"><script>' not in page
     assert metas(page)["og:title"] == [f'{evil["title"]} · @alex · Claude Opus 5.5']  # survives as text
 
 
 @pytest.mark.parametrize("path", [
+    "/@alex/nope", "/@nobody", "/@Alex/first-light", "/@alex/first-light/extra", "/@alex/<script>", "/@a",
+    "/@@alex", "/@alex/first light", "/gallery/x", "/gallery/@alex", "/alex/first-light",
     "/night-shift/alex/nope", "/night-shift/@nobody", "/night-shift/Alex/first-light",
     "/night-shift/alex/first-light/extra", "/night-shift/alex/<script>", "/night-shift/@a",
     "/elsewhere", "", "/night-shift/alex/first-light?x=1", "//evil.example/night-shift",
@@ -163,8 +165,8 @@ async def test_og_404_on_unknown_or_invalid(site, path):
 async def test_og_hidden_piece_is_404(site):
     h, s = await publish(site)
     await site.app.state.publisher.hide(h, s, "test")
-    assert (await get_og(site, f"/night-shift/{h}/{s}")).status_code == 404
-    assert (await get_og(site, f"/night-shift/@{h}")).status_code == 404
+    for path in (f"/@{h}/{s}", f"/@{h}", f"/night-shift/{h}/{s}", f"/night-shift/@{h}"):
+        assert (await get_og(site, path)).status_code == 404
 
 
 async def test_og_template_cached_and_refreshed(site, monkeypatch):
@@ -172,10 +174,10 @@ async def test_og_template_cached_and_refreshed(site, monkeypatch):
     clock = [1000.0]
     monkeypatch.setattr(og.time, "monotonic", lambda: clock[0])
     for _ in range(3):
-        assert (await get_og(site, f"/night-shift/{h}/{s}")).status_code == 200
+        assert (await get_og(site, f"/@{h}/{s}")).status_code == 200
     assert site.fetches == [f"{SITE}/index.html"]  # one fetch serves many requests
     clock[0] += og.TEMPLATE_TTL_S + 1
-    await get_og(site, "/night-shift")
+    await get_og(site, "/gallery")
     assert len(site.fetches) == 2  # refreshed after 10 minutes
 
     async def down(url: str) -> str:
@@ -183,7 +185,7 @@ async def test_og_template_cached_and_refreshed(site, monkeypatch):
 
     site.app.state.og_template._fetch = down
     clock[0] += og.TEMPLATE_TTL_S + 1
-    assert (await get_og(site, "/night-shift")).status_code == 200  # stale copy beats an error
+    assert (await get_og(site, "/gallery")).status_code == 200  # stale copy beats an error
 
 
 async def test_og_503_without_any_template(site):
@@ -191,12 +193,12 @@ async def test_og_503_without_any_template(site):
         raise OSError("site down")
 
     site.app.state.og_template._fetch = down
-    r = await get_og(site, "/night-shift")
+    r = await get_og(site, "/gallery")
     assert r.status_code == 503 and r.json()["error"] == "og_unavailable"
 
 
 async def test_og_404_without_site_url(ctx):
-    assert (await get_og(ctx, "/night-shift")).status_code == 404
+    assert (await get_og(ctx, "/gallery")).status_code == 404
 
 
 async def test_backfill_failure_never_fails_boot_and_keeps_version_unset(tmp_path, monkeypatch):
@@ -261,7 +263,7 @@ async def test_card_render_failure_still_publishes(site, monkeypatch):
     assert await store.get(f"public/{h}/{s}/preview.webp") and await store.get(f"public/{h}/{s}/share.jpg") is None
     doc = await site.app.state.publisher.regenerate()
     assert [p["id"] for p in doc["pieces"]] == [f"{h}/{s}"]
-    m = metas((await get_og(site, f"/night-shift/{h}/{s}")).text)
+    m = metas((await get_og(site, f"/@{h}/{s}")).text)
     assert m["og:image"][0].endswith("/og.jpg")  # falls back to the render's own still
 
 
@@ -313,3 +315,14 @@ async def test_template_negative_cache_window(monkeypatch):
     clock[0] += og.TEMPLATE_FAIL_TTL_S  # window over: retried and recovered
     assert await t.get() == TEMPLATE and len(hits) == 2
     assert og.TEMPLATE_TTL_S == 120 and og.TEMPLATE_FAIL_TTL_S == 30
+
+
+@pytest.mark.parametrize("kind", ["piece", "artist", "feed"])
+async def test_og_legacy_night_shift_paths_resolve_to_new_canonical(site, kind):
+    h, s = await publish(site)
+    legacy, new = {"piece": (f"/night-shift/{h}/{s}", f"/@{h}/{s}"),
+                   "artist": (f"/night-shift/@{h}", f"/@{h}"),
+                   "feed": ("/night-shift", "/gallery")}[kind]
+    old_page, new_page = (await get_og(site, legacy)).text, (await get_og(site, new)).text
+    assert old_page == new_page  # same tags whichever path came in
+    assert metas(old_page)["og:url"] == [f"{SITE}{new}"] and "night-shift" not in old_page

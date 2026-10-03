@@ -77,7 +77,7 @@ class SubmissionAccepted(BaseModel):
     id: str
     status: Status
     url: str  # owner-only status URL (Bearer)
-    piece_url: str | None = None  # the public site page once published; None without TAC_SITE_URL
+    piece_url: str | None = None  # TAC_SITE_URL/@<handle>/<slug> once published; None without TAC_SITE_URL
 
 
 class SubmissionOut(BaseModel):

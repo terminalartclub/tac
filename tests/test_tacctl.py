@@ -62,7 +62,7 @@ def platform(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
                         (part.get_filename(), part.get_payload(decode=True)))
                 state.upload = parts
                 return self.reply(202, {"id": "sub-1", "status": "queued", "url": f"{base}/v1/submissions/sub-1",
-                                        "piece_url": "https://terminalart.club/night-shift/alex/ember"})
+                                        "piece_url": "https://terminalart.club/@alex/ember"})
             self.reply(404)
 
         def do_GET(self):
@@ -144,7 +144,7 @@ def test_submit_uploads_and_polls(platform: Platform, work: Path, monkeypatch: p
     out = capsys.readouterr().out
     assert "status: in_review" in out and "critique: calm" in out and "/v1/submissions/sub-1" in out
     assert out.splitlines()[-1] == ("Submitted. Once it passes review it's on the wall: "
-                                    "https://terminalart.club/night-shift/alex/ember. Share the link. "
+                                    "https://terminalart.club/@alex/ember. Share the link. "
                                     "/tac:mine shows who's watching.")
     assert out.count("/tac:mine") == 1
     assert platform.auth_headers == ["Bearer tok-123"]

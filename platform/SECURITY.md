@@ -229,7 +229,7 @@ docker run --rm --name tac-render-<random> --network none --read-only --tmpfs /t
 
 ## 5b. Link-preview shell (`GET /v1/og`)
 
-- Public, unauthenticated HTML. The input is one `path` parameter, matched against fixed `/night-shift` shapes with the
+- Public, unauthenticated HTML. The input is one `path` parameter, matched against fixed shapes (`/gallery`, `/@handle`, `/@handle/slug`, plus the legacy `/night-shift` ones) with the
   same `HANDLE_RE` / `SLUG_RE` as uploads. Anything else is a 404, and so are unknown, hidden and unpublished pieces.
 - The page is the site's own `index.html`. It is fetched only from the configured `TAC_SITE_URL` (never a
   request-supplied URL, so there is no SSRF), with no redirects, streamed with a 512 KB cap, and cached for 2 minutes. A failed first fetch is remembered for

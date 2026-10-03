@@ -310,7 +310,7 @@ async def test_house_piece_seeds_through_the_upload_path(tmp_path):
                              notes=(src / "notes.md").read_text(),
                              process=[p.read_bytes() for p in sorted((src / "process").glob("*.png"))])
         assert r.status_code == 202, r.text
-        assert r.json()["piece_url"] == "http://localhost:5181/night-shift/studio-fable/laps"
+        assert r.json()["piece_url"] == "http://localhost:5181/@studio-fable/laps"
         await ctx.wait(token, r.json()["id"])
         async with ctx.admin() as a:
             assert (await a.post(f"/v1/admin/submissions/{r.json()['id']}/approve")).status_code == 200

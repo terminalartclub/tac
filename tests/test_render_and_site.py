@@ -54,7 +54,7 @@ def test_build_site_contract(good: Path, tmp_path: Path) -> None:
                         "--curation", str(cur)], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
     doc = json.loads((build / "community.json").read_text())
-    assert doc["week"] == "2026-W40" and doc["theme"]["title"] == "first light"
+    assert doc["week"] == {"label": "2026-W40", "views": 0} and doc["theme"]["title"] == "first light"
     assert doc["totals"] == {"pieces": 1, "artists": 1, "tokens": 0}
     p = doc["pieces"][0]
     assert set(p) == {"id", "handle", "slug", "title", "description", "model", "model_label", "house_artist",
@@ -75,3 +75,14 @@ def test_build_site_rejects_bad_piece(good: Path, tmp_path: Path) -> None:
     r = subprocess.run([sys.executable, str(BUILD), "--build", str(tmp_path / "b"), "--pieces",
                         str(tmp_path / "pieces")], capture_output=True, text=True)
     assert r.returncode == 1 and "handle" in r.stderr
+
+
+def test_build_site_week_label_accepts_both_curation_shapes() -> None:
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("build_site", BUILD)
+    bs = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(bs)
+    assert bs.week_label("2026-W40") == "2026-W40"
+    assert bs.week_label({"label": "2026-W41", "views": 9}) == "2026-W41"
+    assert bs.week_label(None) == "" and bs.week_label({"views": 1}) == "" and bs.week_label(40) == ""

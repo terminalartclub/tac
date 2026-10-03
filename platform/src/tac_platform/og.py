@@ -1,12 +1,15 @@
-"""Link-preview shell for any /night-shift URL, including pieces published after the last site deploy.
+"""Link-preview shell for any public site URL, including pieces published after the last site deploy.
 
-GET /v1/og?path=/night-shift                     the wall (feed)
-GET /v1/og?path=/night-shift/@<handle>           an artist
-GET /v1/og?path=/night-shift/<handle>/<slug>     a piece
+GET /v1/og?path=/gallery                 the wall (feed)       legacy: /night-shift
+GET /v1/og?path=/@<handle>               an artist             legacy: /night-shift/@<handle>
+GET /v1/og?path=/@<handle>/<slug>        a piece               legacy: /night-shift/<handle>/<slug>
+
+Legacy /night-shift paths still resolve during the site's transition; og:url is always the new
+canonical form (CANONICAL_* below), whichever path came in.
 
 Returns the site's own index.html (TAC_SITE_URL/index.html, cached, refreshed every 2 min) with the
-<head> link-preview tags replaced for that path. The site's nginx proxies unmatched /night-shift/
-paths here, so a messenger's crawler sees per-piece tags and a browser still boots the SPA.
+<head> link-preview tags replaced for that path. The site's nginx proxies unmatched /@… , /gallery and
+/night-shift/ paths here, so a messenger's crawler sees per-piece tags and a browser still boots the SPA.
 
 The author always appears: a piece's og:title is `<title> · @handle · <model>`.
 Only paths that match the handle/slug patterns and name a published, visible piece (or an artist
@@ -39,10 +42,23 @@ TEMPLATE_TTL_S = 120  # short: after a site deploy the old index.html points at 
 TEMPLATE_FAIL_TTL_S = 30  # a failed fetch is remembered this long (no fetch per crawler hit while the site is down)
 TEMPLATE_MAX_BYTES = 512 * 1024
 CACHE_CONTROL = "public, max-age=300"
-FEED = "/night-shift"
-_PIECE = re.compile(r"^/night-shift/([^/@]+)/([^/]+)/?$")
-_ARTIST = re.compile(r"^/night-shift/@([^/]+)/?$")
-_FEED = re.compile(r"^/night-shift/?$")
+FEED = "/gallery"
+# (new canonical, legacy) shapes. Captured parts are validated against HANDLE_RE / SLUG_RE afterwards.
+_PIECE = (re.compile(r"^/@([^/@]+)/([^/]+)/?$"), re.compile(r"^/night-shift/([^/@]+)/([^/]+)/?$"))
+_ARTIST = (re.compile(r"^/@([^/@]+)/?$"), re.compile(r"^/night-shift/@([^/]+)/?$"))
+_FEED = (re.compile(r"^/gallery/?$"), re.compile(r"^/night-shift/?$"))
+
+
+def piece_path(handle: str, slug: str) -> str:
+    return f"/@{handle}/{slug}"
+
+
+def artist_path(handle: str) -> str:
+    return f"/@{handle}"
+
+
+def _match(shapes: tuple[re.Pattern, ...], path: str) -> re.Match | None:
+    return next((m for rx in shapes if (m := rx.match(path))), None)
 
 
 class Template:
@@ -162,7 +178,7 @@ async def _piece(st, handle: str, slug: str) -> tuple[str, dict]:
     title = f"{row['title']} · @{handle} · {model}"  # AUTHOR ALWAYS: messengers print og:title as the text
     tags = {"og:type": "website", "og:site_name": SITE_NAME, "og:title": title,
             "og:description": _description(handle), "description": _description(handle),
-            "og:url": f"{st.settings.site_url}/night-shift/{handle}/{slug}",
+            "og:url": f"{st.settings.site_url}{piece_path(handle, slug)}",
             **await _images(st, handle, slug)}
     return title, tags
 
@@ -179,7 +195,7 @@ async def _artist(st, handle: str) -> tuple[str, dict]:
     title = f"@{handle} on {SITE_NAME} · {n} {'piece' if n == 1 else 'pieces'}"
     tags = {"og:type": "profile", "og:site_name": SITE_NAME, "og:title": title,
             "og:description": _description(handle), "description": _description(handle),
-            "og:url": f"{st.settings.site_url}/night-shift/@{handle}",
+            "og:url": f"{st.settings.site_url}{artist_path(handle)}",
             **await _images(st, handle, rows[0]["slug"])}  # their newest piece
     return title, tags
 
@@ -195,16 +211,16 @@ async def og_page(request: Request, path: str = "") -> HTMLResponse:
     st = request.app.state
     if not st.settings.site_url:
         raise ApiError(404, "not_found")  # no canonical site to point at (dev without TAC_SITE_URL)
-    if m := _PIECE.match(path):
+    if m := _match(_PIECE, path):
         handle, slug = m.groups()
         if not (HANDLE_RE.match(handle) and SLUG_RE.match(slug)):
             raise ApiError(404, "not_found")
         title, tags = await _piece(st, handle, slug)
-    elif m := _ARTIST.match(path):
+    elif m := _match(_ARTIST, path):
         if not HANDLE_RE.match(m.group(1)):
             raise ApiError(404, "not_found")
         title, tags = await _artist(st, m.group(1))
-    elif _FEED.match(path):
+    elif _match(_FEED, path):
         title, tags = _feed(st)
     else:
         raise ApiError(404, "not_found")

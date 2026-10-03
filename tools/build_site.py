@@ -79,6 +79,13 @@ def piece_entry(piece: Path, build: Path, picks: set[str]) -> dict:
     }
 
 
+def week_label(week: object) -> str:
+    """curation.json's week: a label string, or already the {label, views} object."""
+    if isinstance(week, dict):
+        week = week.get("label")
+    return week if isinstance(week, str) else ""
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--render", action="store_true")
@@ -113,7 +120,8 @@ def main(argv: list[str] | None = None) -> int:
     iso = now.isocalendar()
     doc = {
         "generated_at": now.isoformat(timespec="seconds").replace("+00:00", "Z"),
-        "week": cur.get("week") or f"{iso.year}-W{iso.week:02d}",
+        # Same shape as the platform's community.json. House pieces built here have no view counts.
+        "week": {"label": week_label(cur.get("week")) or f"{iso.year}-W{iso.week:02d}", "views": 0},
         "theme": cur.get("theme") or {"title": "", "blurb": ""},
         "totals": {"pieces": len(entries), "artists": len({e["handle"] for e in entries}),
                    "tokens": sum(e["tokens"] for e in entries if isinstance(e["tokens"], int))},
