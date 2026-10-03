@@ -140,6 +140,9 @@ pre { background:var(--bg-elevated); border:1px solid var(--border-light); borde
 section > h2 { margin-top:32px; } .count { color:var(--text-dim); font-weight:400; }
 table.audit { width:100%; border-collapse:collapse; font-size:12px; }
 table.audit td { padding:3px 6px; border-top:1px solid var(--border-light); vertical-align:top; }
+table.audit th { padding:3px 6px; text-align:left; color:var(--text-dim); font-weight:400; }
+.chip.warn { border-color:var(--accent-amber); color:var(--accent-amber); }
+.nav { margin:0 0 8px; font-size:13px; }
 """
 FONTS = "https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&display=swap"
 WORDMARK = (

@@ -624,6 +624,15 @@ def test_submit_terms_not_accepted_tells_user_to_login(platform: Platform, work:
     assert capsys.readouterr().out.splitlines()[-1] == "accept the updated terms: run /tac:login"
 
 
+def test_submit_suspended_prints_the_server_message_safely(platform: Platform, work: Path,
+                                                           monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    tacctl.write_private(tacctl.cred_path(), {"access_token": "tok-123", "handle": "alex"})
+    monkeypatch.setattr(tacctl, "http", lambda *a, **k: (403, {
+        "error": "suspended", "detail": "This account is suspended\x1b[2J\u202e by a moderator."}))
+    assert tacctl.main(["submit", "ember", "--model", "claude-opus-5-5", "--confirm-rights"]) == 1
+    assert capsys.readouterr().err.splitlines()[-1] == "error: This account is suspended[2J by a moderator."  # ESC and RLO stripped
+
+
 # ── token estimate: only the sessions that built the piece ────────────────
 
 

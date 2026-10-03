@@ -763,6 +763,8 @@ def cmd_submit(a: argparse.Namespace) -> int:
     if status == 403 and isinstance(resp, dict) and resp.get("error") == "terms_not_accepted":
         print(TERMS_LINE)
         return 1
+    if status == 403 and isinstance(resp, dict) and resp.get("error") == "suspended":
+        return die(str(resp.get("detail") or "this account is suspended"))  # die() prints through safe()
     if status not in (200, 201, 202) or not isinstance(resp, dict) or "id" not in resp:
         return die(f"upload failed: HTTP {status} {resp}")
     print(f"uploaded: submission {safe(resp['id'])} ({safe(resp.get('status'))})")

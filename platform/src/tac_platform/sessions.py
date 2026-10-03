@@ -49,12 +49,16 @@ def clear_session_cookie(request: Request, response: Response) -> None:
     response.delete_cookie(cookie_name(request), path="/", httponly=True, samesite="lax", secure=cookie_secure(request))
 
 
-async def create_session(request: Request, user_id: int, handle: str) -> str:
-    """New session id. Rotation: any session presented with this request is revoked first."""
+async def create_session(request: Request, user_id: int, handle: str) -> str | None:
+    """New session id, or None when the user is suspended (checked in the same transaction as the INSERT,
+    so a concurrent suspend can't leave a live session). Rotation: any session presented with this request
+    is revoked first."""
     db = request.app.state.db
     old = request.cookies.get(cookie_name(request))
     sid = secrets.token_urlsafe(32)
     async with db.tx() as tx:
+        if await tx.fetchone("SELECT 1 FROM users WHERE id = ? AND suspended_at IS NOT NULL", (user_id,)):
+            return None
         if old:
             await tx.execute("DELETE FROM web_sessions WHERE session_sha256 = ?", (sha256_hex(old),))
         await tx.execute(
@@ -70,7 +74,7 @@ async def session_row(request: Request):
     if not sid:
         return None
     return await request.app.state.db.fetchone(
-        "SELECT s.session_sha256, u.id, u.handle, u.trusted FROM web_sessions s JOIN users u ON u.id = s.user_id"
+        "SELECT s.session_sha256, u.id, u.handle, u.trusted, u.suspended_at FROM web_sessions s JOIN users u ON u.id = s.user_id"
         " WHERE s.session_sha256 = ? AND s.expires_at > ?",
         (sha256_hex(sid), time.time()),
     )

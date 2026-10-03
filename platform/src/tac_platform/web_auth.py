@@ -18,7 +18,15 @@ from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
 from . import terms
-from .auth import RESERVED_HANDLES, TERMS_ERROR, github_identity, relative_to, user_for_github
+from .auth import (
+    RESERVED_HANDLES,
+    SUSPENDED_MSG,
+    TERMS_ERROR,
+    github_identity,
+    is_suspended,
+    relative_to,
+    user_for_github,
+)
 from .db import now_iso
 from .models import HANDLE_RE
 from .sessions import (
@@ -114,9 +122,11 @@ async def web_login_submit(request: Request, handle: str = Form(""), return_: st
         return HTMLResponse(_login_form(request, return_, handle, "Handles are 2-24 of a-z, 0-9 and dash."), 400)
     # dev only (prod refuses TAC_AUTH=dev): an existing handle signs in as that user, a new one is created
     async with st.db.tx() as tx:
-        row = await tx.fetchone("SELECT id, terms_version FROM users WHERE handle = ?", (handle,))
+        row = await tx.fetchone("SELECT id, terms_version, suspended_at FROM users WHERE handle = ?", (handle,))
         behind = not terms.is_current(row, st.settings)  # also true for a new handle
-        if behind and not terms.ticked(agree):
+        if row is not None and row["suspended_at"]:
+            error = SUSPENDED_MSG
+        elif behind and not terms.ticked(agree):
             error = TERMS_ERROR
         else:
             error = ""
@@ -127,8 +137,10 @@ async def web_login_submit(request: Request, handle: str = Form(""), return_: st
             if behind:
                 await terms.record(tx, row["id"], handle, st.settings.terms_version)
     if error:
-        return HTMLResponse(_login_form(request, return_, handle, error), 400)
+        return HTMLResponse(_login_form(request, return_, handle, error), 403 if error == SUSPENDED_MSG else 400)
     sid = await create_session(request, row["id"], handle)
+    if sid is None:
+        return HTMLResponse(_login_form(request, return_, handle, SUSPENDED_MSG), 403)
     resp = _redirect(request, return_)
     set_session_cookie(request, resp, sid)
     return resp
@@ -158,6 +170,8 @@ async def web_github_callback(request: Request, code: str = "", state: str = "")
             f"<h1>sign in</h1><p class=err>Handle '{html.escape(ident[1])}' is unavailable.</p>",
             home=site_home(request),
         ), 409)
+    if await is_suspended(st.db, row["id"]):  # before the terms step: nothing to accept
+        return _suspended_page(request)
     full = await st.db.fetchone("SELECT terms_version FROM users WHERE id = ?", (row["id"],))
     if not terms.is_current(full, st.settings):
         token, nonce = terms.make_pending(st.secret, "web", row["id"], safe_return(ret))
@@ -175,8 +189,15 @@ def _terms_page(request: Request, token: str, handle: str, error: str = "", stat
     return HTMLResponse(page("terminal art club · sign in", body, home=site_home(request)), status)
 
 
+def _suspended_page(request: Request) -> HTMLResponse:
+    return HTMLResponse(page("terminal art club · sign in", f"<h1>sign in</h1><p class=err>{html.escape(SUSPENDED_MSG)}</p>",
+                             home=site_home(request)), 403)
+
+
 async def _sign_in(request: Request, user_id: int, handle: str, ret: str) -> Response:
     sid = await create_session(request, user_id, handle)
+    if sid is None:
+        return _suspended_page(request)
     resp = _redirect(request, ret)
     set_session_cookie(request, resp, sid)
     resp.delete_cookie("tac_web_nonce", path="/v1/auth/web/")

@@ -8,10 +8,13 @@ from urllib.parse import quote
 
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
-from pydantic import BaseModel
+from typing import Annotated
+
+from pydantic import BaseModel, StringConstraints
 
 from .models import HIGH_TOKENS, RejectIn
 from . import automod_budget
+from .db import now_iso
 from .views import views_summary
 from .web import ApiError, page
 
@@ -20,6 +23,17 @@ router = APIRouter()
 COOKIE = "tac_admin"
 MEDIA_RE = re.compile(r"^(render/(preview\.webp|og\.jpg|process/\d{2}\.webp)|process/\d{2}\.png)$")
 MEDIA_TYPES = {".webp": "image/webp", ".jpg": "image/jpeg", ".png": "image/png"}
+IG_REMINDER = "also remove from Instagram"
+IG_CHIP = f"<span class='chip warn'>{IG_REMINDER}</span>"
+# The takedown log (/admin/takedowns): every action that takes something off the site or puts it back.
+TAKEDOWN_ACTIONS = ("hide", "unhide", "delete", "suspend", "unsuspend")
+TAKEDOWN_LOG_ROWS = 100
+
+
+class ReasonIn(BaseModel):
+    """A required moderator reason; it lands verbatim in the audit row (the takedown log)."""
+
+    reason: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
 
 
 def _token_ok(request: Request, token: str | None) -> bool:
@@ -82,7 +96,7 @@ async def _queue(request: Request) -> dict:
     cols = (
         "s.id, s.slug, s.title, s.status, s.hidden, s.meta_json, s.reasons_json, s.critique, s.flags_json,"
         " s.stats_json, s.process_n, s.created_at, u.handle, u.trusted, u.house_artist, u.display_name, u.link,"
-        " u.instagram, u.instagram_confirmed"
+        " u.instagram, u.instagram_confirmed, s.ig_posted_at, u.suspended_at, u.suspended_reason"
     )
     review = await db.fetchall(
         f"SELECT {cols} FROM submissions s JOIN users u ON u.id = s.user_id"
@@ -101,6 +115,10 @@ async def _queue(request: Request) -> dict:
         reports = await db.fetchall(
             "SELECT reason, created_at FROM reports WHERE submission_id = ? ORDER BY id", (r["id"],)
         )
+        hid = await db.fetchone(
+            "SELECT actor, detail FROM audit_log WHERE submission_id = ? AND action = 'hide' ORDER BY id DESC LIMIT 1",
+            (r["id"],),
+        ) if r["hidden"] else None
         return {
             "id": r["id"],
             "handle": r["handle"],
@@ -123,6 +141,10 @@ async def _queue(request: Request) -> dict:
             "process_n": r["process_n"],
             "created_at": r["created_at"],
             "reports": [dict(x) for x in reports],
+            "ig_posted_at": r["ig_posted_at"],
+            "suspended": r["suspended_at"] is not None,
+            "suspended_reason": r["suspended_reason"] or "",
+            "hidden_by": f"{hid['actor']}: {hid['detail'] or ''}" if hid else "",
         }
 
     views = await views_summary(db, [r["id"] for r in (*review, *hidden, *published)])
@@ -131,9 +153,24 @@ async def _queue(request: Request) -> dict:
         "hidden": [await item(r) for r in hidden],
         "published": [await item(r) for r in published],
     }
+    suspended = await db.fetchall(
+        "SELECT handle, suspended_at, suspended_reason FROM users WHERE suspended_at IS NOT NULL ORDER BY suspended_at DESC"
+    )
+    # Taken down (hidden or deleted) but still on our Instagram: the platform can't delete IG posts.
+    ig_cleanup = await db.fetchall(
+        "SELECT u.handle, s.slug, s.title, s.status, s.hidden, s.ig_posted_at FROM submissions s"
+        " JOIN users u ON u.id = s.user_id WHERE s.ig_posted_at IS NOT NULL"
+        " AND (s.status = 'rejected' OR (s.status = 'published' AND s.hidden = 1)) ORDER BY s.updated_at DESC"
+    )
     for items in out.values():
         for it in items:
             it["views_7d"] = views[it["id"]]["views_7d"]  # private; never in community.json
+    out["suspended_users"] = [dict(r) for r in suspended]
+    out["instagram_cleanup"] = [
+        {"id": f"{r['handle']}/{r['slug']}", "handle": r["handle"], "slug": r["slug"], "title": r["title"],
+         "state": "deleted" if r["status"] == "rejected" else "hidden", "ig_posted_at": r["ig_posted_at"]}
+        for r in ig_cleanup
+    ]
     return out
 
 
@@ -147,6 +184,11 @@ async def admin_queue(request: Request) -> dict:
 async def approve(sub_id: str, request: Request) -> dict:
     require_admin(request)
     if not await request.app.state.publisher.publish(sub_id, "admin"):
+        if await request.app.state.db.fetchone(
+            "SELECT 1 FROM submissions s JOIN users u ON u.id = s.user_id WHERE s.id = ? AND u.suspended_at IS NOT NULL",
+            (sub_id,),
+        ):
+            raise ApiError(409, "user_suspended", detail="unsuspend the artist first")
         raise ApiError(409, "not_in_review")
     return {"id": sub_id, "status": "published"}
 
@@ -160,10 +202,34 @@ async def reject(sub_id: str, request: Request, body: RejectIn | None = None) ->
     return {"id": sub_id, "status": "rejected"}
 
 
+async def _ig_reminder(request: Request, handle: str, slug: str) -> str | None:
+    row = await request.app.state.db.fetchone(
+        "SELECT s.ig_posted_at FROM submissions s JOIN users u ON u.id = s.user_id WHERE u.handle = ? AND s.slug = ?",
+        (handle, slug),
+    )
+    return IG_REMINDER if row is not None and row["ig_posted_at"] else None
+
+
+async def _user_suspended(request: Request, handle: str) -> bool:
+    row = await request.app.state.db.fetchone("SELECT suspended_at FROM users WHERE handle = ?", (handle,))
+    return row is not None and row["suspended_at"] is not None
+
+
+@router.post("/v1/admin/pieces/{handle}/{slug}/hide")
+async def hide(handle: str, slug: str, body: ReasonIn, request: Request) -> dict:
+    """Takedown step one: off the wall, gallery, community.json, og/share and media now. Undo = unhide."""
+    require_admin(request)
+    if not await request.app.state.publisher.hide(handle, slug, "admin", detail=body.reason):
+        raise ApiError(409, "not_visible", detail="only a published piece that isn't hidden can be hidden")
+    return {"id": f"{handle}/{slug}", "hidden": True, "reminder": await _ig_reminder(request, handle, slug)}
+
+
 @router.post("/v1/admin/pieces/{handle}/{slug}/unhide")
 async def unhide(handle: str, slug: str, request: Request) -> dict:
     require_admin(request)
     if not await request.app.state.publisher.unhide(handle, slug, "admin"):
+        if await _user_suspended(request, handle):
+            raise ApiError(409, "user_suspended", detail="unsuspend the artist first")
         raise ApiError(409, "not_hidden")
     return {"id": f"{handle}/{slug}", "hidden": False}
 
@@ -174,7 +240,106 @@ async def delete(handle: str, slug: str, request: Request, body: RejectIn | None
     reason = (body or RejectIn(reason="removed")).reason
     if not await request.app.state.publisher.delete(handle, slug, "admin", reason):
         raise ApiError(409, "not_published")
-    return {"id": f"{handle}/{slug}", "status": "rejected"}
+    return {"id": f"{handle}/{slug}", "status": "rejected", "reminder": await _ig_reminder(request, handle, slug)}
+
+
+class IgPostedIn(BaseModel):
+    posted: bool
+
+
+@router.post("/v1/admin/pieces/{handle}/{slug}/instagram-posted")
+async def instagram_posted(handle: str, slug: str, body: IgPostedIn, request: Request) -> dict:
+    """Record that we posted this piece on Instagram (or, after removing it there, clear that). Any status:
+    a deleted piece's mark is cleared once the IG post is gone."""
+    require_admin(request)
+    async with request.app.state.db.tx() as tx:
+        row = await tx.fetchone(
+            "SELECT s.id FROM submissions s JOIN users u ON u.id = s.user_id WHERE u.handle = ? AND s.slug = ?",
+            (handle, slug),
+        )
+        if row is None:
+            raise ApiError(404, "not_found")
+        at = now_iso() if body.posted else None
+        await tx.execute("UPDATE submissions SET ig_posted_at = ? WHERE id = ?", (at, row["id"]))
+        await tx.audit("admin", "ig_posted" if body.posted else "ig_removed", row["id"], target=f"{handle}/{slug}")
+    return {"id": f"{handle}/{slug}", "ig_posted_at": at}
+
+
+@router.post("/v1/admin/users/{handle}/suspend")
+async def suspend(handle: str, body: ReasonIn, request: Request) -> dict:
+    """Repeat infringer: no sign-in, no submissions, every token and session revoked, every published piece
+    hidden. The revocation is one transaction under the DB write lock, so no request authenticated by a
+    revoked credential can start after it commits, and every sign-in path re-checks suspended_at inside its
+    own transaction. Pieces are hidden after the commit; publish/unhide refuse a suspended owner meanwhile."""
+    require_admin(request)
+    st = request.app.state
+    async with st.db.tx() as tx:
+        user = await tx.fetchone("SELECT id, suspended_at FROM users WHERE handle = ?", (handle,))
+        if user is None:
+            raise ApiError(404, "not_found")
+        if user["suspended_at"]:
+            raise ApiError(409, "already_suspended")
+        await tx.execute("UPDATE users SET suspended_at = ?, suspended_reason = ? WHERE id = ?",
+                         (now_iso(), body.reason, user["id"]))
+        tokens = await tx.execute("DELETE FROM access_tokens WHERE user_id = ?", (user["id"],))
+        sessions = await tx.execute("DELETE FROM web_sessions WHERE user_id = ?", (user["id"],))
+        await tx.execute("DELETE FROM device_codes WHERE user_id = ?", (user["id"],))  # approved, not yet polled
+        await tx.audit("admin", "suspend", target=handle, detail=body.reason)
+    pieces = await st.db.fetchall(
+        "SELECT slug, ig_posted_at FROM submissions WHERE user_id = ? AND status = 'published' AND hidden = 0",
+        (user["id"],),
+    )
+    hidden, on_ig = [], []
+    for p in pieces:
+        if await st.publisher.hide(handle, p["slug"], "admin", detail="account suspended"):
+            hidden.append(f"{handle}/{p['slug']}")
+            if p["ig_posted_at"]:
+                on_ig.append(f"{handle}/{p['slug']}")
+    return {"handle": handle, "suspended": True, "revoked_tokens": tokens, "revoked_sessions": sessions,
+            "hidden": hidden, "reminder": f"{IG_REMINDER}: {', '.join(on_ig)}" if on_ig else None}
+
+
+@router.post("/v1/admin/users/{handle}/unsuspend")
+async def unsuspend(handle: str, body: ReasonIn, request: Request) -> dict:
+    """Sign-in works again. Hidden pieces stay hidden: the moderator unhides them one by one."""
+    require_admin(request)
+    async with request.app.state.db.tx() as tx:
+        if not await tx.fetchone("SELECT 1 FROM users WHERE handle = ?", (handle,)):
+            raise ApiError(404, "not_found")
+        if not await tx.execute(
+            "UPDATE users SET suspended_at = NULL, suspended_reason = NULL WHERE handle = ? AND suspended_at IS NOT NULL",
+            (handle,),
+        ):
+            raise ApiError(409, "not_suspended")
+        await tx.audit("admin", "unsuspend", target=handle, detail=body.reason)
+    return {"handle": handle, "suspended": False}
+
+
+async def _takedowns(request: Request) -> list[dict]:
+    marks = ",".join("?" * len(TAKEDOWN_ACTIONS))
+    rows = await request.app.state.db.fetchall(
+        "SELECT a.at, a.actor, a.action, a.target, a.detail, a.submission_id, u.handle, s.slug, s.status, s.hidden,"
+        " s.ig_posted_at FROM audit_log a LEFT JOIN submissions s ON s.id = a.submission_id"
+        f" LEFT JOIN users u ON u.id = s.user_id WHERE a.action IN ({marks}) ORDER BY a.id DESC LIMIT ?",
+        (*TAKEDOWN_ACTIONS, TAKEDOWN_LOG_ROWS),
+    )
+    out = []
+    for r in rows:
+        down = r["status"] == "rejected" or (r["status"] == "published" and r["hidden"])
+        out.append({
+            "at": r["at"], "actor": r["actor"], "action": r["action"],
+            "target": r["target"] or (f"{r['handle']}/{r['slug']}" if r["handle"] else r["submission_id"] or ""),
+            "reason": r["detail"] or "",
+            # still on our Instagram while it's off the site
+            "reminder": IG_REMINDER if r["ig_posted_at"] and down and r["action"] in ("hide", "delete") else None,
+        })
+    return out
+
+
+@router.get("/v1/admin/takedowns")
+async def admin_takedowns(request: Request) -> dict:
+    require_admin(request)
+    return {"actions": await _takedowns(request)}
 
 
 class TrustIn(BaseModel):
@@ -232,13 +397,17 @@ async def house(handle: str, body: HouseIn, request: Request) -> dict:
 e = html.escape
 
 # Buttons carry their action as data- attributes (html-escaped text, never code): data-act = the POST
-# path, data-body = a JSON object, data-reason = the id of a reason input. One delegated listener reads
+# path, data-body = a JSON object, data-reason = the id of a reason input, data-prompt = the question of a
+# required-reason prompt() (cancel or blank = no request). One delegated listener reads
 # them, so no value is ever interpolated into JavaScript and safety doesn't rest on the input validators.
 JS = """
 async function act(url, body) {
   const r = await fetch(url, {method: 'POST', headers: {'content-type': 'application/json', 'x-tac-admin-csrf': '1'},
                               body: JSON.stringify(body || {})});
   if (!r.ok) { alert(url + ' -> ' + r.status + ' ' + await r.text()); return; }
+  let j = {};
+  try { j = await r.json(); } catch (e) {}
+  if (j && typeof j.reminder === 'string') alert(j.reminder);  // e.g. "also remove from Instagram"
   location.reload();
 }
 function adminPath(raw) {
@@ -254,9 +423,17 @@ document.addEventListener('click', (ev) => {
   if (!path) return;  // never POST anywhere else, whatever ended up in the attribute
   const body = b.dataset.body ? JSON.parse(b.dataset.body) : {};
   if (b.dataset.reason) body.reason = document.getElementById(b.dataset.reason).value || 'rejected by moderator';
+  if (b.dataset.prompt) {  // required reason: cancel or blank sends nothing
+    const r = prompt(b.dataset.prompt);
+    if (r === null || !r.trim()) return;
+    body.reason = r.trim();
+  }
   act(path, body);
 });
 """
+
+
+NAV = "<p class=nav><a href='/admin'>review queue</a> · <a href='/admin/takedowns'>takedown log</a></p>"
 
 
 def _seg(v: str) -> str:
@@ -264,14 +441,32 @@ def _seg(v: str) -> str:
     return quote(str(v), safe="")
 
 
-def _button(label: str, path: str, body: dict | None = None, reason_id: str | None = None, cls: str = "") -> str:
+def _button(label: str, path: str, body: dict | None = None, reason_id: str | None = None, cls: str = "",
+            prompt: str | None = None) -> str:
     attrs = f" class={cls}" if cls else ""
     attrs += f" data-act='{e(path, quote=True)}'"
     if body is not None:
         attrs += f" data-body='{e(json.dumps(body), quote=True)}'"
     if reason_id is not None:
         attrs += f" data-reason='{e(reason_id, quote=True)}'"
+    if prompt is not None:
+        attrs += f" data-prompt='{e(prompt, quote=True)}'"
     return f"<button type=button{attrs}>{e(label)}</button>"
+
+
+def _suspend_button(handle: str, suspended: bool) -> str:
+    path = f"/v1/admin/users/{_seg(handle)}"
+    if suspended:
+        return _button(f"Unsuspend {handle}", f"{path}/unsuspend",
+                       prompt=f"Unsuspend {handle}: reason (for the takedown log). Their pieces stay hidden.")
+    return _button(f"Suspend {handle}", f"{path}/suspend", cls="bad",
+                   prompt=f"Suspend {handle}: reason (for the takedown log). Revokes every sign-in and hides "
+                          "every published piece.")
+
+
+def _ig_posted_button(handle: str, slug: str, posted: bool, label: str | None = None) -> str:
+    path = f"/v1/admin/pieces/{_seg(handle)}/{_seg(slug)}/instagram-posted"
+    return _button(label or ("Clear IG mark" if posted else "Mark posted to IG"), path, {"posted": not posted})
 
 
 def _ig_button(it: dict) -> str:
@@ -309,6 +504,7 @@ async def _card(request: Request, it: dict, mode: str) -> str:
     h, s = e(it["handle"]), e(it["slug"])
     sub_path = f"/v1/admin/submissions/{_seg(sid)}"
     piece_path = f"/v1/admin/pieces/{_seg(it['handle'])}/{_seg(it['slug'])}"
+    suspend = _suspend_button(it["handle"], it["suspended"])
     if mode == "review":
         actions = (
             _button("Approve", f"{sub_path}/approve", cls="primary")
@@ -316,14 +512,30 @@ async def _card(request: Request, it: dict, mode: str) -> str:
             + _button("Reject", f"{sub_path}/reject", reason_id=rid, cls="bad")
             + _button(f"{'Untrust' if it['trusted'] else 'Trust'} {it['handle']}",
                       f"/v1/admin/users/{_seg(it['handle'])}/trust", {"trusted": not it["trusted"]})
-            + _house_button(it) + _ig_button(it)
+            + _house_button(it) + _ig_button(it) + suspend
         )
     else:
-        unhide = _button("Unhide", f"{piece_path}/unhide", cls="primary") if mode == "hidden" else ""
+        if mode == "hidden":
+            first = (_button("Unhide", f"{piece_path}/unhide", cls="primary") if not it["suspended"]
+                     else "<span class=muted>unsuspend to unhide</span>")
+        else:
+            first = _button("Hide now", f"{piece_path}/hide", cls="bad",
+                            prompt=f"Hide {it['handle']}/{it['slug']} now: reason (for the takedown log)")
         actions = (
-            f"{unhide}{_house_button(it)}{_ig_button(it)}<input type=text id='{e(rid)}' placeholder='delete reason'>"
+            f"{first}{_house_button(it)}{_ig_button(it)}"
+            + _ig_posted_button(it["handle"], it["slug"], bool(it["ig_posted_at"])) + suspend
+            + f"<input type=text id='{e(rid)}' placeholder='delete reason'>"
             + _button("Delete", f"{piece_path}/delete", reason_id=rid, cls="bad")
         )
+    state = ""
+    if it["suspended"]:
+        state += f"<p><span class=chip>suspended</span> <span class=muted>{e(it['suspended_reason'])}</span></p>"
+    if mode == "hidden":
+        state += f"<p class=muted>hidden by {e(it['hidden_by'])}</p>" if it["hidden_by"] else ""
+        if it["ig_posted_at"]:
+            state += f"<p><span class='chip warn'>posted to IG: {IG_REMINDER}</span></p>"
+    elif it["ig_posted_at"]:
+        state += f"<p class=muted>posted to IG {e(it['ig_posted_at'][:16])}</p>"
     return (
         "<div class=card><div class=item><div>"
         f"<img class=preview src='/admin/media/{e(sid)}/render/preview.webp' alt='preview'>"
@@ -335,7 +547,7 @@ async def _card(request: Request, it: dict, mode: str) -> str:
         f" · {e(it['created_at'][:16])}"
         f"{' · trusted' if it['trusted'] else ''}{' · house artist' if it['house_artist'] else ''}"
         f"{' <span class=chip>high_tokens</span>' if it['high_tokens'] else ''} · {it['views_7d']} views 7d · human: {e(it['meta'].get('human_role', 'none'))} · {e(it['meta'].get('size', 'full'))}</span></h2>"
-        f"<p>{e(it['meta'].get('description', ''))}</p>"
+        f"<p>{e(it['meta'].get('description', ''))}</p>{state}"
         f"<div>{flags}{reasons}</div>"
         + (f"<p><b>critique</b> {e(it['critique'])}</p>" if it["critique"] else "<p class=muted>no critique</p>")
         + (f"<p><b>reports</b></p><ul>{reports}</ul>" if reports else "")
@@ -362,18 +574,61 @@ async def admin_page(request: Request):
     status = "" if st.pipeline.automod.enabled else " (off: no ANTHROPIC_API_KEY)"
     over = " <span class=chip>budget reached: pieces go to human review</span>" if (
         st.pipeline.automod.enabled and spent >= st.settings.automod_budget_usd) else ""
-    parts = [f"<script>{JS}</script><h1>review</h1>",
+    parts = [f"<script>{JS}</script><h1>review</h1>{NAV}",
              f"<p class=muted id=automod-spend>automod: ${spent:.2f} of ${st.settings.automod_budget_usd:g} this month"
              f"{e(status)}{over}</p>"]
-    for key, title, mode in (("in_review", "In review", "review"), ("hidden", "Hidden by reports", "hidden"),
+    for key, title, mode in (("in_review", "In review", "review"), ("hidden", "Hidden", "hidden"),
                              ("published", "Published", "published")):
         parts.append(f"<section><h2>{title} <span class=count>{len(q[key])}</span></h2>")
         parts.extend([await _card(request, it, mode) for it in q[key]] or ["<p class=muted>empty</p>"])
         parts.append("</section>")
+    ig = "".join(
+        f"<tr><td>{e(c['id'])}</td><td>{e(c['title'])}</td><td>{e(c['state'])}</td>"
+        f"<td>{IG_CHIP}</td>"
+        f"<td>{_ig_posted_button(c['handle'], c['slug'], True, 'Removed from IG')}</td></tr>"
+        for c in q["instagram_cleanup"]
+    )
+    parts.append("<section><h2>Instagram cleanup <span class=count>" + str(len(q["instagram_cleanup"])) + "</span></h2>"
+                 + (f"<div class=card><table class=audit>{ig}</table></div>" if ig
+                    else "<p class=muted>nothing taken down is still on Instagram</p>") + "</section>")
+    sus = "".join(
+        f"<tr><td>{e(u['handle'])}</td><td>{e(u['suspended_at'])}</td><td>{e(u['suspended_reason'] or '')}</td>"
+        f"<td>{_suspend_button(u['handle'], True)}</td></tr>"
+        for u in q["suspended_users"]
+    )
+    parts.append("<section><h2>Suspended users <span class=count>" + str(len(q["suspended_users"])) + "</span></h2>"
+                 + (f"<div class=card><table class=audit>{sus}</table></div>" if sus else "<p class=muted>none</p>")
+                 + "</section>")
     rows = "".join(
         "<tr>" + "".join(f"<td>{e(str(a[c] or ''))}</td>" for c in
-                         ("at", "actor", "action", "submission_id", "from_status", "to_status", "detail")) + "</tr>"
+                         ("at", "actor", "action", "submission_id", "target", "from_status", "to_status", "detail"))
+        + "</tr>"
         for a in audit
     )
     parts.append(f"<section><h2>Audit log</h2><div class=card><table class=audit>{rows}</table></div></section>")
     return page("terminal art club · admin", "".join(parts), wide=True)
+
+
+@router.get("/admin/takedowns", response_class=HTMLResponse)
+async def takedowns_page(request: Request):
+    """Read-only takedown log: the last 100 hides, unhides, deletes, suspends and unsuspends, with reasons."""
+    try:
+        require_admin(request)
+    except ApiError:
+        return HTMLResponse(
+            page("terminal art club · takedowns",
+                 "<h1>takedowns</h1><p class=muted>Sign in with <code>/admin/login?token=…</code>.</p>"), 401
+        )
+    rows = "".join(
+        f"<tr><td>{e(r['at'])}</td><td>{e(r['action'])}</td><td>{e(r['target'])}</td><td>{e(r['reason'])}</td>"
+        f"<td>{e(r['actor'])}</td>"
+        f"<td>{IG_CHIP if r['reminder'] else ''}</td></tr>"
+        for r in await _takedowns(request)
+    )
+    head = "<tr><th>time (UTC)</th><th>action</th><th>target</th><th>reason</th><th>by</th><th></th></tr>"
+    body = (
+        f"<h1>takedowns <span class=sub>last {TAKEDOWN_LOG_ROWS} moderation actions, newest first</span></h1>{NAV}"
+        + (f"<div class=card><table class=audit id=takedowns>{head}{rows}</table></div>" if rows
+           else "<p class=muted>no moderation actions yet</p>")
+    )
+    return page("terminal art club · takedowns", body, wide=True)

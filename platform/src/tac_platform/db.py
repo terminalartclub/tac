@@ -27,6 +27,8 @@ CREATE TABLE IF NOT EXISTS users (
     instagram_confirmed INTEGER NOT NULL DEFAULT 0,  -- admin-confirmed; only then public / tagged
     terms_version     INTEGER,               -- the TERMS_VERSION last accepted at sign-in; NULL = never
     terms_accepted_at TEXT,
+    suspended_at     TEXT,                   -- admin suspension; NULL = active. No sign-in, no submissions
+    suspended_reason TEXT,
     created_at  TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS access_tokens (
@@ -67,6 +69,7 @@ CREATE TABLE IF NOT EXISTS submissions (
     created_at   TEXT NOT NULL,
     updated_at   TEXT NOT NULL,
     published_at TEXT,
+    ig_posted_at TEXT,  -- admin-set: we posted it on Instagram (a takedown must also remove it there)
     UNIQUE (user_id, slug)
 );
 CREATE INDEX IF NOT EXISTS submissions_status ON submissions(status, created_at);
@@ -97,7 +100,8 @@ CREATE TABLE IF NOT EXISTS audit_log (
     submission_id TEXT,
     from_status   TEXT,
     to_status     TEXT,
-    detail        TEXT
+    detail        TEXT,
+    target        TEXT   -- what a moderation action hit: "handle/slug" or "handle" (survives row deletes)
 );
 CREATE TABLE IF NOT EXISTS views (          -- per-viewer dedupe; purged after 30 days
     submission_id TEXT NOT NULL,
@@ -162,6 +166,13 @@ class Database:
             await self.conn.execute("ALTER TABLE users ADD COLUMN terms_accepted_at TEXT")
         if "instagram_confirmed" not in cols:
             await self.conn.execute("ALTER TABLE users ADD COLUMN instagram_confirmed INTEGER NOT NULL DEFAULT 0")
+        for col in ("suspended_at", "suspended_reason"):
+            if col not in cols:
+                await self.conn.execute(f"ALTER TABLE users ADD COLUMN {col} TEXT")
+        if "ig_posted_at" not in {r["name"] for r in await self.fetchall("PRAGMA table_info(submissions)")}:
+            await self.conn.execute("ALTER TABLE submissions ADD COLUMN ig_posted_at TEXT")
+        if "target" not in {r["name"] for r in await self.fetchall("PRAGMA table_info(audit_log)")}:
+            await self.conn.execute("ALTER TABLE audit_log ADD COLUMN target TEXT")
 
     async def close(self) -> None:
         if self._conn is not None:
@@ -220,9 +231,10 @@ class Tx:
         from_status: str | None = None,
         to_status: str | None = None,
         detail: str | None = None,
+        target: str | None = None,
     ) -> None:
         await self.execute(
-            "INSERT INTO audit_log (at, actor, action, submission_id, from_status, to_status, detail)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (now_iso(), actor, action, submission_id, from_status, to_status, detail),
+            "INSERT INTO audit_log (at, actor, action, submission_id, from_status, to_status, detail, target)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (now_iso(), actor, action, submission_id, from_status, to_status, detail, target),
         )

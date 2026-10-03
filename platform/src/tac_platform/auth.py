@@ -29,6 +29,19 @@ log = logging.getLogger("tac.auth")
 USER_CODE_ALPHABET = "BCDFGHJKLMNPQRSTVWXZ"  # RFC 8628 §6.1: no vowels, no look-alikes
 DEVICE_TTL_S = 600
 RESERVED_HANDLES = {"admin", "api", "media", "device", "v1", "tac", "terminal-art-club", "root", "system"}
+# Shown to a suspended user on every refused sign-in and API call. The moderator's reason stays private.
+SUSPENDED_MSG = "This account is suspended by a moderator: it can't sign in or submit pieces."
+# Appended to a write's WHERE so it applies only while the user (bound as the last parameter) is active.
+USER_ACTIVE = " AND NOT EXISTS (SELECT 1 FROM users WHERE id = ? AND suspended_at IS NOT NULL)"
+
+
+def suspended_error() -> ApiError:
+    return ApiError(403, "suspended", detail=SUSPENDED_MSG)
+
+
+async def is_suspended(db, user_id: int) -> bool:
+    row = await db.fetchone("SELECT suspended_at FROM users WHERE id = ?", (user_id,))
+    return row is not None and row["suspended_at"] is not None
 
 
 def new_user_code() -> str:
@@ -54,17 +67,21 @@ async def current_user(request: Request) -> dict:
         if row is None:
             raise ApiError(401, "missing_token")
         require_csrf(request, row["session_sha256"])
+        if row["suspended_at"]:  # suspend deletes every session; this is the belt to that braces
+            raise suspended_error()
         return {"id": row["id"], "handle": row["handle"], "trusted": row["trusted"], "via": "cookie"}
     if scheme.lower() != "bearer" or not token.strip():
         raise ApiError(401, "missing_token")
     row = await request.app.state.db.fetchone(
-        "SELECT u.id, u.handle, u.trusted FROM access_tokens t JOIN users u ON u.id = t.user_id"
+        "SELECT u.id, u.handle, u.trusted, u.suspended_at FROM access_tokens t JOIN users u ON u.id = t.user_id"
         " WHERE t.token_sha256 = ?",
         (sha256_hex(token.strip()),),
     )
     if row is None:
         raise ApiError(401, "invalid_token")
-    return {**dict(row), "via": "bearer"}
+    if row["suspended_at"]:  # suspend deletes every token; this is the belt to that braces
+        raise suspended_error()
+    return {"id": row["id"], "handle": row["handle"], "trusted": row["trusted"], "via": "bearer"}
 
 
 @router.post("/v1/auth/device", response_model=DeviceCodeOut)
@@ -118,6 +135,9 @@ async def poll_token(body: TokenIn, request: Request):
     # approved: consume exactly once (compare-and-swap), then mint the token
     token = secrets.token_urlsafe(32)
     async with db.tx() as tx:
+        # same transaction as the mint: a suspend can't land between this check and the INSERT
+        if await tx.fetchone("SELECT 1 FROM users WHERE id = ? AND suspended_at IS NOT NULL", (row["user_id"],)):
+            raise suspended_error()
         if not await tx.execute(
             "UPDATE device_codes SET status = 'consumed' WHERE device_code_sha256 = ? AND status = 'approved'",
             (key,),
@@ -177,8 +197,8 @@ async def _approve(request: Request, user_code: str, user_id: int, handle: str) 
     async with request.app.state.db.tx() as tx:
         n = await tx.execute(
             "UPDATE device_codes SET status = 'approved', user_id = ?"
-            " WHERE user_code = ? AND status = 'pending' AND expires_at > ?",
-            (user_id, user_code, time.time()),
+            " WHERE user_code = ? AND status = 'pending' AND expires_at > ?" + USER_ACTIVE,
+            (user_id, user_code, time.time(), user_id),
         )
         if n:
             await tx.audit(f"user:{handle}", "device_approved")
@@ -345,6 +365,8 @@ async def github_callback(request: Request, code: str = "", state: str = ""):
     if row is None:
         error = f"Handle '{login}' is unavailable (TODO: pick one)."
         return HTMLResponse(_device_form(request, error=error, github=True), 409)
+    if await is_suspended(st.db, row["id"]):  # before the terms step: nothing to accept
+        return HTMLResponse(_device_form(request, error=SUSPENDED_MSG, github=True), 403)
     if not terms.is_current(await _terms_row(st, row["id"]), st.settings):
         token, nonce = terms.make_pending(st.secret, "device", row["id"], user_code)
         resp = _device_terms_page(request, token, row["handle"])
@@ -372,6 +394,8 @@ def _device_terms_page(request: Request, token: str, handle: str, error: str = "
 
 
 async def _finish_device(request: Request, user_code: str, user_id: int, handle: str):
+    if await is_suspended(request.app.state.db, user_id):
+        return HTMLResponse(_device_form(request, error=SUSPENDED_MSG, github=True), 403)
     if not await _approve(request, user_code, user_id, handle):
         return HTMLResponse(_device_form(request, error="That code expired. Start again.", github=True), 400)
     resp = HTMLResponse(page(

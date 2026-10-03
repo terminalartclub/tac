@@ -20,6 +20,9 @@ log = logging.getLogger("tac.publish")
 PUBLIC_FILES = ("preview.webp", "og.jpg")
 STATS_KEYS = ("motion_median", "seam", "void")
 REGEN_EVERY_S = 3600  # view counts in community.json are at most this stale
+# CAS guard for every transition that puts a piece (back) on the wall: a suspended owner's pieces never go
+# public, whether by admin approve, trusted auto-publish or unhide.
+NOT_SUSPENDED = " AND NOT EXISTS (SELECT 1 FROM users WHERE users.id = submissions.user_id AND users.suspended_at IS NOT NULL)"
 
 
 def model_label(model_id: str) -> str:
@@ -206,12 +209,12 @@ class Publisher:
 
     async def _row(self, sub_id: str):
         return await self.db.fetchone(
-            "SELECT s.*, u.handle FROM submissions s JOIN users u ON u.id = s.user_id WHERE s.id = ?", (sub_id,)
+            "SELECT s.*, u.handle, u.suspended_at FROM submissions s JOIN users u ON u.id = s.user_id WHERE s.id = ?", (sub_id,)
         )
 
     async def _piece_row(self, handle: str, slug: str):
         return await self.db.fetchone(
-            "SELECT s.*, u.handle FROM submissions s JOIN users u ON u.id = s.user_id"
+            "SELECT s.*, u.handle, u.suspended_at FROM submissions s JOIN users u ON u.id = s.user_id"
             " WHERE u.handle = ? AND s.slug = ?",
             (handle, slug),
         )
@@ -220,13 +223,13 @@ class Publisher:
 
     async def _publish(self, sub_id: str, actor: str, from_status: str = "in_review") -> bool:
         row = await self._row(sub_id)
-        if row is None or row["status"] != from_status:
+        if row is None or row["status"] != from_status or row["suspended_at"]:
             return False
         await self._copy_public(sub_id, row["handle"], row["slug"])
         async with self.db.tx() as tx:
             ok = await tx.execute(
                 "UPDATE submissions SET status = 'published', published_at = ?, updated_at = ?"
-                " WHERE id = ? AND status = ?",
+                " WHERE id = ? AND status = ?" + NOT_SUSPENDED,
                 (now_iso(), now_iso(), sub_id, from_status),
             )
             if ok:
@@ -260,7 +263,8 @@ class Publisher:
                 (now_iso(), row["id"]),
             )
             if ok:
-                await tx.audit(actor, "hide", row["id"], "published", "published", detail or None)
+                await tx.audit(actor, "hide", row["id"], "published", "published", detail or None,
+                               target=f"{handle}/{slug}")
         if ok:
             await self.store.delete_prefix(f"public/{handle}/{slug}")
             await self.regenerate()
@@ -268,18 +272,19 @@ class Publisher:
 
     async def _unhide(self, handle: str, slug: str, actor: str) -> bool:
         row = await self._piece_row(handle, slug)
-        if row is None or row["status"] != "published" or not row["hidden"]:
+        if row is None or row["status"] != "published" or not row["hidden"] or row["suspended_at"]:
             return False
         await self._copy_public(row["id"], handle, slug)
         async with self.db.tx() as tx:
             ok = await tx.execute(
-                "UPDATE submissions SET hidden = 0, updated_at = ? WHERE id = ? AND status = 'published' AND hidden = 1",
+                "UPDATE submissions SET hidden = 0, updated_at = ? WHERE id = ? AND status = 'published' AND hidden = 1"
+                + NOT_SUSPENDED,
                 (now_iso(), row["id"]),
             )
             if ok:
                 await tx.execute("DELETE FROM reports WHERE submission_id = ?", (row["id"],))
-                await tx.audit(actor, "unhide", row["id"], "published", "published")
-        if not ok:  # lost a race (deleted meanwhile): don't leave media public
+                await tx.audit(actor, "unhide", row["id"], "published", "published", target=f"{handle}/{slug}")
+        if not ok:  # lost a race (deleted or owner suspended meanwhile): don't leave media public
             await self.store.delete_prefix(f"public/{handle}/{slug}")
             return False
         await self.regenerate()
@@ -298,7 +303,7 @@ class Publisher:
                 (json.dumps(reasons), now_iso(), row["id"]),
             )
             if ok:
-                await tx.audit(actor, "delete", row["id"], "published", "rejected", reason)
+                await tx.audit(actor, "delete", row["id"], "published", "rejected", reason, target=f"{handle}/{slug}")
         if ok:
             await self.store.delete_prefix(f"public/{handle}/{slug}")
             await self.regenerate()

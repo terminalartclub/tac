@@ -14,7 +14,7 @@ from fastapi.responses import JSONResponse, Response
 from pydantic import ValidationError
 from starlette.datastructures import UploadFile
 
-from .auth import current_user
+from .auth import USER_ACTIVE, current_user, is_suspended, suspended_error
 from .db import now_iso
 from . import terms
 from .models import SubmissionAccepted, SubmissionMeta, SubmissionOut
@@ -146,15 +146,17 @@ async def _accept(request: Request, user: dict, form, since: str, limit: int) ->
             inserted = await st.db.execute(
                 "INSERT INTO submissions (id, user_id, slug, title, meta_json, status, created_at, updated_at)"
                 " SELECT ?, ?, ?, ?, ?, 'queued', ?, ?"
-                " WHERE (SELECT COUNT(*) FROM submissions WHERE user_id = ? AND created_at > ?) < ?",
+                " WHERE (SELECT COUNT(*) FROM submissions WHERE user_id = ? AND created_at > ?) < ?" + USER_ACTIVE,
                 (sub_id, user["id"], slug, meta.title, meta.model_dump_json(), now, now,
-                 user["id"], since, limit),
+                 user["id"], since, limit, user["id"]),
             )
             break
         except sqlite3.IntegrityError:  # slug taken by this handle: try the next suffix
             continue
     if not inserted:
         await st.store.delete_prefix(prefix)
+        if await is_suspended(st.db, user["id"]):  # suspended after current_user passed
+            raise suspended_error()
         raise ApiError(429, "rate_limited", detail=f"{limit} submissions per 24 h")
     async with st.db.tx() as tx:
         await tx.audit(f"user:{user['handle']}", "submit", sub_id, None, "queued", slug)
