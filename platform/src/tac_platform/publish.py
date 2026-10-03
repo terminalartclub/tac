@@ -51,7 +51,9 @@ class NotSuspended(Exception):
 
 
 class Publisher:
-    def __init__(self, db: Database, store: MediaStore, secret: str = "") -> None:
+    def __init__(self, db: Database, store: MediaStore, secret: str) -> None:
+        if not secret:  # an empty salt would make every block hash a plain, guessable sha256
+            raise ValueError("Publisher needs the install secret (kv 'secret')")
         self.db = db
         self.store = store
         self.secret = secret  # install secret: salts the blocked-identity hashes

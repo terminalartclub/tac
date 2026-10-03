@@ -607,6 +607,15 @@ async def test_blocked_identities_hash_keyed_table_migrates_to_ids(tmp_path):
         await db.close()
 
 
+def test_publisher_refuses_an_empty_secret():
+    from tac_platform.publish import Publisher
+
+    with pytest.raises(TypeError):
+        Publisher(None, None)  # type: ignore[call-arg]  # no default to fall back on
+    with pytest.raises(ValueError):
+        Publisher(None, None, secret="")  # type: ignore[arg-type]
+
+
 # ---------------------------------------------------------------- Instagram
 
 
