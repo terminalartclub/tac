@@ -56,8 +56,8 @@ won't fit, Claude warns you and doesn't start unless you override with `--force`
 A SessionStart hook prints one line only when your weekly window resets within 24 h and is under 80% used:
 
 ```
-weekly window ~58% used · resets in 11h · fits ~2 full pieces → /tac:create
-weekly window ~79% used · resets in 1h · fits a sketch → /tac:create --sketch
+tac: room for a piece before your weekly reset (~58% used, resets in 11h, fits ~2 full pieces). Make something for the wall: /tac:create
+tac: room for a sketch before your weekly reset (~79% used, resets in 1h, fits a sketch). Make something for the wall: /tac:create --sketch
 ```
 
 It reads `~/.cache/tac/usage.json`, which only an **opt-in** statusline helper writes. The helper

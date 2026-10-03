@@ -18,9 +18,9 @@ def cache(pct: float, reset_in: float, age: float = 60) -> dict:
 
 
 @pytest.mark.parametrize("data,pct,expected", [
-    (cache(58, 11 * 3600 + 120), 15, "weekly window ~58% used · resets in 11h · fits ~2 full pieces → /tac:create"),
-    (cache(58, 11 * 3600 + 120), 40, "weekly window ~58% used · resets in 11h · fits ~1 full piece → /tac:create"),
-    (cache(70, 30 * 60), 50, "weekly window ~70% used · resets in 30m · fits a sketch → /tac:create --sketch"),
+    (cache(58, 11 * 3600 + 120), 15, "tac: room for a piece before your weekly reset (~58% used, resets in 11h, fits ~2 full pieces). Make something for the wall: /tac:create"),
+    (cache(58, 11 * 3600 + 120), 40, "tac: room for a piece before your weekly reset (~58% used, resets in 11h, fits ~1 full piece). Make something for the wall: /tac:create"),
+    (cache(70, 30 * 60), 50, "tac: room for a sketch before your weekly reset (~70% used, resets in 30m, fits a sketch). Make something for the wall: /tac:create --sketch"),
     (cache(70, 30 * 60), 90, None),          # not even a sketch fits
     (cache(80, 3600), 15, None),             # used ≥ 80%
     (cache(20, 25 * 3600), 15, None),        # reset > 24h away
@@ -63,7 +63,7 @@ def test_hook_prints_system_message(tmp_path: Path) -> None:
     now = time.time()
     out = run_hook(tmp_path, {"seven_day": {"used_percentage": 42.4, "resets_at": now + 5 * 3600 + 60},
                               "updated_at": now})
-    assert json.loads(out) == {"systemMessage": "weekly window ~42% used · resets in 5h · fits ~3 full pieces → /tac:create"}
+    assert json.loads(out) == {"systemMessage": "tac: room for a piece before your weekly reset (~42% used, resets in 5h, fits ~3 full pieces). Make something for the wall: /tac:create"}
 
 
 def test_statusline_helper_caches_and_passes_through(tmp_path: Path) -> None:

@@ -61,7 +61,8 @@ def platform(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
                     parts.setdefault(part.get_param("name", header="content-disposition"), []).append(
                         (part.get_filename(), part.get_payload(decode=True)))
                 state.upload = parts
-                return self.reply(202, {"id": "sub-1", "status": "queued", "url": f"{base}/v1/submissions/sub-1"})
+                return self.reply(202, {"id": "sub-1", "status": "queued", "url": f"{base}/v1/submissions/sub-1",
+                                        "piece_url": "https://terminalart.club/night-shift/alex/ember"})
             self.reply(404)
 
         def do_GET(self):
@@ -141,6 +142,9 @@ def test_submit_uploads_and_polls(platform: Platform, work: Path, capsys) -> Non
     assert tacctl.main(["submit", "ember", "--model", "claude-opus-5-5", "--tokens", "1234"]) == 0
     out = capsys.readouterr().out
     assert "status: in_review" in out and "critique: calm" in out and "/v1/submissions/sub-1" in out
+    assert out.splitlines()[-1] == ("Submitted. Once it passes review it's on the wall: "
+                                    "https://terminalart.club/night-shift/alex/ember. Share the link. "
+                                    "/tac:mine shows who's watching.")
     assert out.count("/tac:mine") == 1
     assert platform.auth_headers == ["Bearer tok-123"]
     up = platform.upload
@@ -252,14 +256,16 @@ def test_mine_table_and_sparkline(platform: Platform, capsys) -> None:
     tacctl.write_private(tacctl.cred_path(), {"access_token": "tok-123", "handle": "alex"})
     assert tacctl.main(["mine"]) == 0
     out = capsys.readouterr().out.splitlines()
-    assert out[0] == "@alex · your pieces (only you see these counts)"
-    assert out[1].split() == ["piece", "status", "views", "7d", "last", "28", "days"]
-    ember = out[2].split()
-    assert ember[:4] == ["ember", "published", "1234", "56"]
-    assert ember[4] == "▁" * 20 + "▂▃▅█▅▃▂▁" and len(ember[4]) == 28
-    assert out[3].split()[:4] == ["hush-2", "in_review", "0", "0"] and out[3].endswith("▁" * 28)
-    assert out[4].split()[:2] == ["glare", "rejected"]
-    body = out[5:]
+    assert out[0] == "@alex · your pieces"
+    assert out[1].startswith("  views: 1234 · 56 last 7 days  ember")  # views lead each line
+    ember = out[1].split()
+    assert ember[7:9] == ["ember", "published"]
+    assert ember[9] == "▁" * 20 + "▂▃▅█▅▃▂▁" and len(ember[9]) == 28
+    assert out[2].startswith("  views:    0 ·  0 last 7 days  hush-2") and out[2].endswith("▁" * 28)
+    assert out[2].split()[7:9] == ["hush-2", "in_review"]
+    glare = [ln for ln in out if "glare" in ln][0]
+    assert glare.split()[7:9] == ["glare", "rejected"]
+    body = out[out.index(glare) + 1:]
     assert body[-1] == "manage or unpublish at terminalart.club/me"
     crit = [ln for ln in body if ln.startswith("    ") and not ln.lstrip().startswith("✗")
             and not ln.startswith("      ")]
@@ -267,7 +273,7 @@ def test_mine_table_and_sparkline(platform: Platform, capsys) -> None:
     assert all(len(ln) <= 100 for ln in body)  # wrapped at the (fallback) terminal width
     assert "    ✗ seam JUMP (4.2x p90 step)" in body and "    ✗ void 12% (needs ≥30%)" in body
     assert "\x1b[" not in "\n".join(out)  # no ANSI when not a TTY
-    assert not any("✗" in ln for ln in out[2:5])  # published / in_review pieces show no reasons
+    assert not any("✗" in ln for ln in out[1:3])  # published / in_review pieces show no reasons
 
 
 def test_mine_expired_login(platform: Platform, capsys) -> None:

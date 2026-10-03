@@ -78,13 +78,14 @@ def message(data: dict, now: float, pct_per_piece: float = DEFAULT_PIECE_PCT) ->
         return None
     when = f"{int(left // 3600)}h" if left >= 3600 else f"{max(1, int(left // 60))}m"
     full, sketch = fit(used, pct_per_piece)
+    hint = f"~{used:.0f}% used, resets in {when}"
     if full >= 1:
-        what = f"fits ~{full} full piece{'s' if full > 1 else ''} → /tac:create"
+        what, hint, cmd = "a piece", f"{hint}, fits ~{full} full piece{'s' if full > 1 else ''}", "/tac:create"
     elif sketch:
-        what = "fits a sketch → /tac:create --sketch"
+        what, hint, cmd = "a sketch", f"{hint}, fits a sketch", "/tac:create --sketch"
     else:
         return None
-    return f"weekly window ~{used:.0f}% used · resets in {when} · {what}"
+    return f"tac: room for {what} before your weekly reset ({hint}). Make something for the wall: {cmd}"
 
 
 def sync_helper() -> str | None:

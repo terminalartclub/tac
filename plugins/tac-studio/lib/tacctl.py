@@ -627,10 +627,13 @@ def cmd_submit(a: argparse.Namespace) -> int:
     if status not in (200, 201, 202) or not isinstance(resp, dict) or "id" not in resp:
         return die(f"upload failed: HTTP {status} {resp}")
     print(f"uploaded: submission {safe(resp['id'])} ({safe(resp.get('status'))})")
-    record = {"id": resp["id"], "api": base, "url": resp.get("url"), "submitted": time.time()}
+    record = {"id": resp["id"], "api": base, "url": resp.get("url"), "piece_url": resp.get("piece_url"),
+              "submitted": time.time()}
     (work_root() / a.name / ".submission.json").write_text(json.dumps(record, indent=2))
+    share = resp.get("piece_url") or resp.get("url")  # the site page; older platforms only give the status URL
     if a.no_wait:
         print_status(resp)
+        print(submitted_line(share))
         return 0
     try:
         final = poll(base, resp["id"], creds["access_token"], a.wait)
@@ -638,8 +641,14 @@ def cmd_submit(a: argparse.Namespace) -> int:
         return die(f"status poll failed: {e}")
     final.setdefault("url", resp.get("url"))
     print_status(final)
-    print("track it with /tac:mine (status + views; only you see the counts)")
-    return 0 if final.get("status") != "rejected" else 1
+    if final.get("status") == "rejected":
+        return 1
+    print(submitted_line(share))
+    return 0
+
+
+def submitted_line(url: Any) -> str:
+    return f"Submitted. Once it passes review it's on the wall: {safe(url)}. Share the link. /tac:mine shows who's watching."
 
 
 def cmd_status(a: argparse.Namespace) -> int:
@@ -684,7 +693,7 @@ def cmd_mine(a: argparse.Namespace) -> int:
     if status != 200:
         return die(f"HTTP {status} {body}")
     pieces = body.get("pieces", []) if isinstance(body, dict) else body if isinstance(body, list) else []
-    print(f"@{safe(creds.get('handle'))} · your pieces (only you see these counts)")
+    print(f"@{safe(creds.get('handle'))} · your pieces")
     if not pieces:
         print("  none yet — /tac:create, then /tac:submit")
         return 0
@@ -700,10 +709,9 @@ def cmd_mine(a: argparse.Namespace) -> int:
         rows.append((safe(p.get("title") or p.get("slug") or p.get("id")), safe(p.get("status") or "?"),
                      safe(p.get("views_total") if p.get("views_total") is not None else "–"),
                      safe(p.get("views_7d") if p.get("views_7d") is not None else "–"), sparkline(series)))
-    hdr = ("piece", "status", "views", "7d", "last 28 days")
-    w = [max(len(hdr[i]), *(len(r[i]) for r in rows)) for i in range(4)]
-    fmt = f"  {{:<{w[0]}}}  {{:<{w[1]}}}  {{:>{w[2]}}}  {{:>{w[3]}}}  {{}}"
-    print(fmt.format(*hdr))
+    w = [max(len(r[i]) for r in rows) for i in range(4)]
+    # views lead each line: total · last 7 days, then piece, status, the 28-day sparkline
+    fmt = f"  views: {{2:>{w[2]}}} · {{3:>{w[3]}}} last 7 days  {{0:<{w[0]}}}  {{1:<{w[1]}}}  {{4}}"
     width = max(40, shutil.get_terminal_size((100, 24)).columns)
     dim = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
     for r, notes_ in zip(rows, extra):
