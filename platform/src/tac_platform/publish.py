@@ -50,23 +50,38 @@ def iso_week(dt: datetime | None = None) -> str:
     return f"{year}-W{week:02d}"
 
 
-async def _pseudonymise(tx, handle: str, pseud: str, first_id: int, keep_moderation: bool) -> None:
-    """Replace `handle` with `pseud` in this account's audit rows (id >= first_id): actor user:<handle>, target
-    <handle> or <handle>/<slug>, and the details that are just the handle (trust, house) or start with it
-    (instagram_confirm, which also names the Instagram handle: dropped). What happened and when stays."""
-    n = len(handle)
-    # block/unblock rows always describe a deleted, banned holder of the handle (never this live account): kept
+# Rows where the handle is the whole target (user-level actions) or the whole detail; the only places the
+# bare handle is written. Matching anything wider rewrites other people's rows (a slug, bio or reason "bio").
+USER_TARGET_ACTIONS = ("suspend", "unsuspend", "delete_account", "account_deleted", "block", "unblock")
+HANDLE_DETAIL_ACTIONS = ("trust", "untrust", "house", "unhouse")
+
+
+async def _pseudonymise(tx, secret: str, handle: str, pseud: str, first_id: int, pieces: list[tuple[str, str]],
+                        keep_moderation: bool) -> None:
+    """Replace the handle (and piece slugs) in THIS account's audit rows; what happened and when stays.
+
+    Ownership, not string match: actor user:<handle> and user-level rows from first_id on (after any previous
+    owner of the handle), and rows whose submission_id is one of this account's pieces (`pieces` = (id, slug)).
+    keep_moderation (admin deleting a suspended account): MODERATION_ACTIONS keep handle and slugs as evidence.
+    block/unblock rows always describe a deleted, banned holder of the handle: never rewritten."""
     keep = MODERATION_ACTIONS if keep_moderation else ("block", "unblock")
-    skip = (f" AND action NOT IN ({','.join('?' * len(keep))})", keep)
-    scope = f"id >= ?{skip[0]}"
-    await tx.execute(f"UPDATE audit_log SET actor = ? WHERE actor = ? AND {scope}",
-                     (pseud, f"user:{handle}", first_id, *skip[1]))
-    await tx.execute(f"UPDATE audit_log SET target = ? WHERE target = ? AND {scope}", (pseud, handle, first_id, *skip[1]))
-    await tx.execute(
-        f"UPDATE audit_log SET target = ? || substr(target, ?) WHERE substr(target, 1, ?) = ? AND {scope}",
-        (pseud, n + 1, n + 1, f"{handle}/", first_id, *skip[1]))
-    await tx.execute(f"UPDATE audit_log SET detail = ? WHERE (detail = ? OR substr(detail, 1, ?) = ?) AND {scope}",
-                     (pseud, handle, n + 2, f"{handle}: ", first_id, *skip[1]))
+    skip, kp = f" AND action NOT IN ({','.join('?' * len(keep))})", keep
+    ut, hd = ",".join("?" * len(USER_TARGET_ACTIONS)), ",".join("?" * len(HANDLE_DETAIL_ACTIONS))
+    await tx.execute(f"UPDATE audit_log SET actor = ? WHERE actor = ? AND id >= ?{skip}",
+                     (pseud, f"user:{handle}", first_id, *kp))
+    await tx.execute(f"UPDATE audit_log SET target = ? WHERE target = ? AND action IN ({ut}) AND id >= ?{skip}",
+                     (pseud, handle, *USER_TARGET_ACTIONS, first_id, *kp))
+    await tx.execute(f"UPDATE audit_log SET detail = ? WHERE detail = ? AND action IN ({hd}) AND id >= ?{skip}",
+                     (pseud, handle, *HANDLE_DETAIL_ACTIONS, first_id, *kp))
+    await tx.execute(  # "<handle>: <instagram handle>": both go
+        f"UPDATE audit_log SET detail = ? WHERE action = 'instagram_confirm' AND substr(detail, 1, ?) = ?"
+        f" AND id >= ?{skip}", (pseud, len(handle) + 2, f"{handle}: ", first_id, *kp))
+    for sid, slug in pieces:  # this account's pieces, by id: target "<handle>/<slug>", submit detail "<slug>"
+        alias = blocklist.slug_pseudonym(secret, pseud, slug)
+        await tx.execute(f"UPDATE audit_log SET target = ? WHERE submission_id = ? AND target = ?{skip}",
+                         (alias, sid, f"{handle}/{slug}", *kp))
+        await tx.execute(f"UPDATE audit_log SET detail = ? WHERE submission_id = ? AND action = 'submit'"
+                         f" AND detail = ?{skip}", (alias, sid, slug, *kp))
 
 
 class NotSuspended(Exception):
@@ -225,15 +240,18 @@ class Publisher:
                 # suspended at this moment (same transaction as the delete) decides the block
                 u = await tx.fetchone("SELECT github_id, suspended_at, created_at FROM users WHERE id = ?", (user_id,))
                 banned = actor is not None and u is not None and u["suspended_at"] is not None
-                # This account's rows start after the previous owner of the handle ended. An erased previous owner
-                # left no row naming the handle; a banned one kept its moderation rows, ending in delete_account.
-                prev = await tx.fetchone("SELECT MAX(id) AS id FROM audit_log WHERE action = 'delete_account'"
-                                         " AND target = ?", (handle,))
+                # This account's rows start after the previous owner of the handle ended: its delete_account (admin)
+                # or account_deleted (self) row still naming the handle. An erased owner's end row carries its
+                # pseudonym instead, and none of its rows name the handle any more, so it needs no boundary.
+                prev = await tx.fetchone("SELECT MAX(id) AS id FROM audit_log WHERE target = ?"
+                                         " AND action IN ('delete_account', 'account_deleted')", (handle,))
                 first_id = (prev["id"] or 0) + 1
                 own = await tx.fetchone("SELECT MIN(id) AS id FROM audit_log WHERE actor = ? AND id >= ?",
                                         (f"user:{handle}", first_id))
                 pseud = blocklist.account_pseudonym(self.secret, user_id, u["created_at"] if u else "", own["id"] or 0)
-                ids = [r[0] for r in await tx.conn.execute_fetchall("SELECT id FROM submissions WHERE user_id = ?", (user_id,))]
+                pieces = [(r[0], r[1]) for r in await tx.conn.execute_fetchall(
+                    "SELECT id, slug FROM submissions WHERE user_id = ?", (user_id,))]
+                ids = [p[0] for p in pieces]
                 on_ig = [f"{handle}/{r[0]}" for r in await tx.conn.execute_fetchall(
                     "SELECT slug FROM submissions WHERE user_id = ? AND ig_posted_at IS NOT NULL ORDER BY slug", (user_id,))]
                 marks = ",".join("?" * len(ids))
@@ -256,10 +274,11 @@ class Publisher:
                 if actor is None:
                     await tx.audit(f"user:{handle}", "account_deleted", detail=f"{len(ids)} submissions", target=handle)
                 else:  # the IG list goes in the row: the submissions it names are gone after this commit
-                    ig_logged = on_ig if banned else [pseud + i[len(handle):] for i in on_ig]
+                    ig_logged = on_ig if banned else [
+                        blocklist.slug_pseudonym(self.secret, pseud, i[len(handle) + 1:]) for i in on_ig]
                     await tx.audit(actor, "delete_account", target=handle, detail=reason,
                                    data={"ig": ig_logged} if on_ig else None)
-                await _pseudonymise(tx, handle, pseud, first_id, keep_moderation=banned)
+                await _pseudonymise(tx, self.secret, handle, pseud, first_id, pieces, keep_moderation=banned)
             await self.db.checkpoint_truncate()  # no pre-delete page images left in the WAL
             for sid in ids:
                 await self.store.delete_prefix(f"submissions/{sid}")

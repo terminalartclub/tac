@@ -10,14 +10,13 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 
 from conftest import handle_slug, make_ctx
-from tac_platform import auth, web_auth
+from tac_platform import auth, publish, web_auth
 from tac_platform.web import sha256_hex
 
 CSRF = {"x-tac-admin-csrf": "1", "sec-fetch-site": "same-origin"}
 
 
 async def _published(ctx, handle="alex", token=None, title="First Light"):
-    from conftest import META
 
     token = token or await ctx.login(handle)
     sub = (await ctx.submit(token, meta={**META, "title": title})).json()
@@ -116,7 +115,6 @@ async def test_suspend_revokes_everything_hides_everything_and_blocks_sign_in(ct
     cookies = await _web_session(ctx, "alex")
     other, _, oh, os_ = await _published(ctx, handle="sam")
     # a pending submission must not publish while suspended
-    from conftest import META
 
     pending = (await ctx.submit(token, meta={**META, "title": "Third"})).json()
     await ctx.wait(token, pending["id"])
@@ -725,6 +723,89 @@ async def test_erasure_leaves_an_earlier_owner_of_the_handle_alone(ctx):
     first_created = await db.fetchall("SELECT actor FROM audit_log WHERE action = 'user_created' ORDER BY id")
     assert first_created[0]["actor"].startswith("deleted:")  # alex #1's non-moderation rows: its own pseudonym
     assert first_created[1]["actor"] == second[0]["actor"] != first_created[0]["actor"]
+
+
+async def test_erasure_never_rewrites_other_accounts_rows_that_equal_the_handle(ctx):
+    """User "bio" erases their account. Other people's rows that merely CONTAIN "bio" as a value (a profile
+    field name, a piece slug, a moderator reason) are not theirs and must come through unchanged."""
+
+    db = ctx.app.state.db
+    alex = await ctx.login("alex")
+    async with ctx.client(authorization=f"Bearer {alex}") as c:
+        assert (await c.patch("/v1/me", json={"bio": "hi"})).status_code == 200  # detail "bio"
+    bob, bob_sub, bh, bs = await _published(ctx, handle="bob", title="Bio")  # slug "bio"
+    assert bs == "bio"
+    async with ctx.admin() as a:
+        await a.post(f"/v1/admin/pieces/{bh}/{bs}/hide", json={"reason": "bio: copied from bio's piece"})
+        await a.post("/v1/admin/users/bob/trust", json={"trusted": True})  # detail "bob": not "bio"
+    before = [tuple(r) for r in await db.fetchall("SELECT * FROM audit_log ORDER BY id")]
+    tok = await ctx.login("bio")
+    async with ctx.admin() as a:
+        await a.post("/v1/admin/users/bio/house", json={"house": True})  # detail "bio": bio's own row
+    async with ctx.client(authorization=f"Bearer {tok}") as c:
+        assert (await c.request("DELETE", "/v1/me", json={"confirm": "bio"})).status_code == 204
+    after = [tuple(r) for r in await db.fetchall("SELECT * FROM audit_log ORDER BY id")]
+    assert after[:len(before)] == before  # every row that existed before bio signed up: byte-for-byte
+    mine = [r for r in await db.fetchall("SELECT actor, action, detail FROM audit_log WHERE id > ?", (before[-1][0],))]
+    pseud = next(r["actor"] for r in mine if r["action"] == "account_deleted")
+    assert {r["actor"] for r in mine if r["actor"].startswith(("user:", "deleted:"))} == {pseud}
+    assert [r["detail"] for r in mine if r["action"] == "house"] == [pseud]
+
+
+async def test_a_legacy_self_deleted_owner_of_the_handle_is_a_boundary(ctx):
+    """alex #1 self-deleted before pseudonyms existed: its rows still say "alex" and end in account_deleted.
+    alex #2 later erases: only alex #2's rows change, and the two people never share a pseudonym."""
+    db = ctx.app.state.db
+    async with db.tx() as tx:
+        await tx.audit("user:alex", "user_created")
+        await tx.audit("user:alex", "web_login")
+        await tx.audit("user:alex", "account_deleted", detail="0 submissions", target="alex")
+    legacy = [tuple(r) for r in await db.fetchall("SELECT * FROM audit_log ORDER BY id")]
+    tok = await ctx.login("alex")
+    async with ctx.client(authorization=f"Bearer {tok}") as c:
+        assert (await c.request("DELETE", "/v1/me", json={"confirm": "alex"})).status_code == 204
+    rows = [tuple(r) for r in await db.fetchall("SELECT * FROM audit_log ORDER BY id")]
+    assert rows[:len(legacy)] == legacy  # alex #1 untouched (pre-launch: no legacy backfill)
+    later = await db.fetchall("SELECT DISTINCT actor FROM audit_log WHERE id > ? AND actor NOT IN ('system', 'admin')",
+                              (legacy[-1][0],))
+    assert len(later) == 1 and later[0]["actor"].startswith("deleted:")
+
+
+@pytest.mark.parametrize("path", ["self", "admin_active", "admin_suspended"])
+async def test_erased_pieces_leave_no_slug_behind(ctx, path):
+    token, sub_id, h, s = await _published(ctx, title="Unmistakable Lighthouse")
+    db = ctx.app.state.db
+    async with ctx.admin() as a:
+        await a.post(f"/v1/admin/pieces/{h}/{s}/instagram-posted", json={"posted": True})
+        await a.post(f"/v1/admin/pieces/{h}/{s}/hide", json={"reason": "DMCA-2026-009"})
+    assert await _rows_holding(db, s)  # precondition: the slug is in the log (submit, publish, hide, ig_posted)
+    if path == "self":
+        async with ctx.client(authorization=f"Bearer {token}") as c:
+            assert (await c.request("DELETE", "/v1/me", json={"confirm": h})).status_code == 204
+    else:
+        async with ctx.admin() as a:
+            if path == "admin_suspended":
+                await a.post(f"/v1/admin/users/{h}/suspend", json={"reason": "DMCA-2026-010"})
+            assert (await a.post(f"/v1/admin/users/{h}/delete", json={"reason": "ERASE-3"})).status_code == 200
+    submit = await db.fetchone("SELECT detail FROM audit_log WHERE action = 'submit'")
+    assert re.fullmatch(r"deleted:[0-9a-f]{12}/[0-9a-f]{12}", submit["detail"])  # aliased on every path
+    targets = {r["target"] for r in await db.fetchall(
+        "SELECT target FROM audit_log WHERE submission_id = ? AND target IS NOT NULL", (sub_id,))}
+    if path == "admin_suspended":  # moderation rows keep handle/slug as evidence; nothing else names them
+        assert targets == {f"{h}/{s}"}
+        named = {r["action"] for r in await db.fetchall(
+            "SELECT action FROM audit_log WHERE target LIKE ? OR detail LIKE ? OR data_json LIKE ?",
+            (f"%{s}%", f"%{s}%", f"%{s}%"))}
+        assert named <= set(publish.MODERATION_ACTIONS)
+    else:
+        assert len(targets) == 1 and next(iter(targets)) == submit["detail"]  # one alias per piece
+        for needle in (s, "lighthouse", "Lighthouse", h):
+            assert await _rows_holding(db, needle) == [], needle
+        assert _file_hits(db, {"slug": s.encode(), "handle": h.encode()}) == {db.path.name: [],
+                                                                            db.path.name + "-wal": []}
+        if path == "admin_active":
+            ig = json.loads((await db.fetchone("SELECT data_json FROM audit_log WHERE action = 'delete_account'"))[0])
+            assert ig == {"ig": [submit["detail"]]}
 
 
 async def test_erasure_covers_rows_before_a_stray_user_created_row(ctx):

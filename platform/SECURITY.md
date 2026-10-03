@@ -219,15 +219,21 @@ docker run --rm --name tac-render-<random> --network none --read-only --tmpfs /t
     out: a deletion is complete everywhere after 5 days.
   - Handles in the audit log after a delete (`Publisher._pseudonymise`, same transaction as the delete):
     - self-deletion, or an admin deleting an ACTIVE account, is an erasure request: every audit row of that
-      account (actor `user:<handle>`, target `<handle>[/<slug>]`, details that are the handle or start with it,
-      incl. the confirmed Instagram handle) gets `deleted:<12 hex>` = sha256(blocklist salt | account id,
-      created_at, first audit row id). What happened and when stays; who it was doesn't.
-    - an admin deleting a SUSPENDED account keeps the handle on the moderation rows (suspend, unsuspend, hide,
-      unhide, delete, delete_account, block, unblock, reject, ig_posted, ig_removed) and in
+      account gets `deleted:<12 hex>` = sha256(blocklist salt | account id, created_at, first audit row id),
+      and each of its piece slugs becomes `deleted:<…>/<12 hex>` (submit details, `<handle>/<slug>` targets,
+      the delete_account IG list). What happened and when stays; who it was, and which piece, doesn't.
+    - an admin deleting a SUSPENDED account keeps handle and slugs on the moderation rows (suspend, unsuspend,
+      hide, unhide, delete, delete_account, block, unblock, reject, ig_posted, ig_removed) and in
       `blocked_identities.ref`: the repeat-infringer evidence and the takedown log. Every other row is
       pseudonymised the same way.
-    - Only this account's rows are rewritten: they start after the previous owner's `delete_account` row, and
-      block/unblock rows (always about a deleted, banned holder) are never touched.
+    - Rows are chosen by ownership, never by matching the handle as a value: actor `user:<handle>`; the
+      user-level actions whose target is the handle (suspend, unsuspend, delete_account, account_deleted,
+      block, unblock); the details that are exactly the handle (trust, untrust, house, unhouse) or start with
+      `<handle>: ` (instagram_confirm, whose Instagram handle goes too); and rows whose submission_id is one of
+      the account's pieces. Another person's slug, profile field or reason equal to the handle is untouched.
+    - Only this account's rows: they start after the previous owner's end row still naming the handle
+      (`delete_account` or `account_deleted`); block/unblock rows (always about a deleted, banned holder) are
+      never rewritten. Prod launched after this rule, so no legacy self-deletion rows needed a backfill.
     - Caveats: the same handle string can reappear later if someone else claims it. Free-text moderator reasons
       are not scanned (the runbook says reference IDs only). Access-log lines on admin paths
       (`/v1/admin/users/<handle>/…`) carry the handle in stdout logs, which age out with Fly's log retention.

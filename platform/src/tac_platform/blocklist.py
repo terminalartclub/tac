@@ -28,6 +28,12 @@ def account_pseudonym(secret: str, user_id: int, created_at: str, first_audit_id
     return "deleted:" + sha256_hex(f"{_salt(secret)}|acct:{user_id}:{created_at}:{first_audit_id}")[:12]
 
 
+def slug_pseudonym(secret: str, account_pseud: str, slug: str) -> str:
+    """An erased account's piece slug in the log: `<account pseudonym>/<12 hex>`. Stable within the account
+    (one piece's rows still line up), and the slug (derived from the title) can't be read back or searched."""
+    return f"{account_pseud}/" + sha256_hex(f"{_salt(secret)}|slug:{slug}|{account_pseud}")[:12]
+
+
 async def is_blocked(tx, secret: str, github_id: int | None, handle: str) -> bool:
     """`tx` = a Tx or the Database: call it inside the transaction that creates the user."""
     return await tx.fetchone("SELECT 1 FROM blocked_identities WHERE github_id_hash = ?",
