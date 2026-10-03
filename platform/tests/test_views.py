@@ -227,3 +227,38 @@ async def test_events_cors_only_site_origins(ctx):
         assert ok.headers["access-control-allow-origin"] == "http://localhost:5181"
         evil = await c.post("/v1/events", json={"name": "install_copy"}, headers={"origin": "https://evil.example"})
         assert "access-control-allow-origin" not in evil.headers
+
+
+def test_ip_bucket_folds_ipv6_to_64_and_keeps_ipv4():
+    from tac_platform.web import ip_bucket
+
+    assert ip_bucket("203.0.113.7") == "203.0.113.7"
+    assert ip_bucket("2001:db8:1:2:aaaa::1") == ip_bucket("2001:db8:1:2:ffff:ffff:ffff:ffff") == "2001:db8:1:2::/64"
+    assert ip_bucket("2001:db8:1:3::1") == "2001:db8:1:3::/64"  # next /64 is a different client
+    assert ip_bucket("::ffff:203.0.113.7") == "203.0.113.7"
+    assert ip_bucket("fe80::1%en0") == "fe80::/64"
+    assert ip_bucket("unknown") == "unknown"
+
+
+async def test_views_count_one_viewer_per_ipv6_64(ctx):
+    token, _, h, s = await _published(ctx)
+    for ip in ("2001:db8:1:2::1", "2001:db8:1:2::2", "2001:db8:1:2:dead:beef:0:9"):  # rotation inside one /64
+        async with ctx.client(ip=ip) as c:
+            assert (await c.post(f"/v1/pieces/{h}/{s}/view")).status_code == 204
+    assert (await _mine(ctx, token))["pieces"][0]["views_total"] == 1
+    for ip in ("2001:db8:1:3::1", "198.51.100.1", "198.51.100.2"):  # another /64, two IPv4s: each counts
+        async with ctx.client(ip=ip) as c:
+            await c.post(f"/v1/pieces/{h}/{s}/view")
+    assert (await _mine(ctx, token))["pieces"][0]["views_total"] == 4
+
+
+async def test_events_rate_limit_shared_across_ipv6_64(ctx):
+    from tac_platform import events
+
+    codes = set()
+    for i in range(events.EVENTS_PER_HOUR + 5):
+        async with ctx.client(ip=f"2001:db8:9:9::{i + 1:x}") as c:
+            codes.add((await c.post("/v1/events", json={"name": "install_copy"})).status_code)
+    assert codes == {204}
+    n = (await ctx.app.state.db.fetchone("SELECT n FROM event_days WHERE name = 'install_copy'"))["n"]
+    assert n == events.EVENTS_PER_HOUR  # one /64 = one rate bucket, however many addresses

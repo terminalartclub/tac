@@ -21,7 +21,7 @@ from fastapi import APIRouter, Request, Response
 
 from .auth import current_user
 from .db import Database
-from .web import client_ip, sha256_hex, take_rate_token
+from .web import client_key, sha256_hex, take_rate_token
 
 log = logging.getLogger("tac.views")
 router = APIRouter()
@@ -46,7 +46,7 @@ async def record_view(handle: str, slug: str, request: Request) -> Response:
     st = request.app.state
     resp = Response(status_code=204)  # CORS for TAC_SITE_ORIGINS is added by app.LimitsMiddleware
     day = utc_today().isoformat()
-    ip_day_hash = sha256_hex(await day_salt(st.db, day) + "|" + client_ip(request, st.settings))[:32]
+    ip_day_hash = sha256_hex(await day_salt(st.db, day) + "|" + client_key(request, st.settings))[:32]  # IPv6: /64
     if not await take_rate_token(st.db, f"view:{ip_day_hash}", VIEWS_PER_HOUR, 3600):
         return resp
     row = await st.db.fetchone(

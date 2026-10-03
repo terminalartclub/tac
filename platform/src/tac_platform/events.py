@@ -14,7 +14,7 @@ import logging
 from fastapi import APIRouter, Request, Response
 
 from .views import day_salt, utc_today
-from .web import ApiError, client_ip, sha256_hex, take_rate_token
+from .web import ApiError, client_key, sha256_hex, take_rate_token
 
 log = logging.getLogger("tac.events")
 router = APIRouter()
@@ -35,7 +35,7 @@ async def record_event(request: Request) -> Response:
         raise ApiError(400, "unknown_event", allowed=sorted(EVENT_NAMES))
     resp = Response(status_code=204)
     day = utc_today().isoformat()
-    ip_day_hash = sha256_hex(await day_salt(st.db, day) + "|" + client_ip(request, st.settings))[:32]
+    ip_day_hash = sha256_hex(await day_salt(st.db, day) + "|" + client_key(request, st.settings))[:32]  # IPv6: /64
     if not await take_rate_token(st.db, f"event:{ip_day_hash}", EVENTS_PER_HOUR, 3600):
         return resp
     await st.db.execute(

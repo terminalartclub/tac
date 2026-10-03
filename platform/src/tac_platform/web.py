@@ -2,6 +2,7 @@
 
 import hashlib
 import html
+import ipaddress
 import random
 import time
 
@@ -35,10 +36,30 @@ def client_ip(request: Request, settings: Settings) -> str:
     return request.client.host if request.client else "unknown"
 
 
+def ip_bucket(ip: str) -> str:
+    """The unit one client is counted as. IPv4: the address. IPv6: its /64, because one subscriber
+    usually gets a whole /64 and can rotate through 2^64 addresses to inflate views or dodge limits.
+    An IPv4-mapped IPv6 address counts as its IPv4. Anything unparseable is used as-is."""
+    try:
+        addr = ipaddress.ip_address(ip.strip().split("%", 1)[0])
+    except ValueError:
+        return ip
+    if addr.version == 6:
+        if addr.ipv4_mapped:
+            return str(addr.ipv4_mapped)
+        return str(ipaddress.ip_network(f"{addr}/64", strict=False))
+    return str(addr)
+
+
+def client_key(request: Request, settings: Settings) -> str:
+    """client_ip folded to its counting bucket (ip_bucket); what every hash and rate key is built from."""
+    return ip_bucket(client_ip(request, settings))
+
+
 def ip_key(request: Request) -> str:
-    """Stable, non-reversible id for an IP (salted, so the DB holds no raw IPs)."""
+    """Stable, non-reversible id for a client (salted, so the DB holds no raw IPs). IPv6 = its /64."""
     state = request.app.state
-    return sha256_hex(state.secret + "|" + client_ip(request, state.settings))[:32]
+    return sha256_hex(state.secret + "|" + client_key(request, state.settings))[:32]
 
 
 async def take_rate_token(db: Database, key: str, limit: int, window_s: float) -> bool:

@@ -192,6 +192,9 @@ docker run --rm --name tac-render-<random> --network none --read-only --tmpfs /t
 | 30 device codes / h, 10 device-form posts / 10 min | salted IP hash | same |
 
 - Raw IPs are never stored: `sha256(secret | ip)`.
+- IPv6 clients are counted per /64 (`web.ip_bucket`) in every hash and rate key: views dedupe, events,
+  rate limits and report dedupe. One subscriber usually holds a whole /64, so rotating addresses inside it
+  can't inflate counts or dodge limits. IPv4 is unchanged.
 - The client IP is the socket peer. `Fly-Client-IP` / `X-Forwarded-For` are honoured only with `TAC_TRUST_PROXY=1`. Otherwise anyone could spoof them and dodge the limits.
 - Known gap: 3 IPs (one phone, one VPN, one home connection) are enough to hide any piece. That's acceptable because hiding only puts the piece in the admin queue, and unhide clears its reports. Revisit if it gets abused.
 
