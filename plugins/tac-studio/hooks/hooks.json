@@ -1,5 +1,5 @@
 {
-  "description": "Spare-cycles nudge: one line when your weekly window resets within 24h with capacity left",
+  "description": "Spare-cycles nudge on startup; on every session start, exposes the session id to tacctl (for per-piece token estimates)",
   "hooks": {
     "SessionStart": [
       {
@@ -8,6 +8,15 @@
           {
             "type": "command",
             "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/nudge.py\"",
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/session_env.py\"",
             "timeout": 5
           }
         ]

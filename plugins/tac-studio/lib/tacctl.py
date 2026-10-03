@@ -383,35 +383,93 @@ def pick_process(wd: Path, src: Path, n_iter: int) -> list[tuple[str, Path]]:
     return picks[:4]
 
 
-def tokens_from_transcripts(wd: Path) -> int | None:
-    """Estimate: input + cache-write + output tokens (cache reads excluded) of every Claude Code
-    transcript entry for this project since the work dir was started. An estimate, not billing."""
-    root = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude") / "projects"
-    slug = re.sub(r"[^A-Za-z0-9]", "-", str(Path.cwd().resolve()))
-    proj = root / slug
-    files = [p for p in wd.rglob("*") if p.is_file()]
-    if not proj.is_dir() or not files:
-        return None
-    since = min(p.stat().st_mtime for p in files) - 600
-    seen: dict[str, int] = {}
-    for f in proj.rglob("*.jsonl"):
-        if f.stat().st_mtime < since:
+SESSIONS_FILE = ".sessions"  # tac-work/<name>/.sessions: one JSON line per Claude session that worked on it
+SESSION_ID_RE = re.compile(r"^[A-Za-z0-9-]{1,64}$")
+WORK_END_SLACK_S = 300  # the turn that wrote the last file finishes a little after the write
+
+
+def record_session(name: str) -> None:
+    """Note the current Claude session (TAC_SESSION_ID, set by the plugin's SessionStart hook) as working on
+    <name>. First sighting per session wins; silently does nothing outside Claude Code or without the hook."""
+    sid = os.environ.get("TAC_SESSION_ID", "")
+    if not SESSION_ID_RE.match(sid):
+        return
+    path = work_root() / name / SESSIONS_FILE
+    known = {r["session"] for r in read_sessions(path.parent)}
+    if sid in known:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"session": sid, "at": time.time()}) + "\n")
+
+
+def read_sessions(wd: Path) -> list[dict[str, Any]]:
+    out = []
+    try:
+        lines = (wd / SESSIONS_FILE).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return out
+    for ln in lines:
+        try:
+            r = json.loads(ln)
+        except json.JSONDecodeError:
             continue
-        for line in f.open(encoding="utf-8", errors="replace"):
-            if '"usage"' not in line:
-                continue
-            try:
-                e = json.loads(line)
-                msg = e.get("message") or {}
-                u = msg.get("usage") or {}
-                ts = dt.datetime.fromisoformat(e["timestamp"].replace("Z", "+00:00")).timestamp()
-            except (json.JSONDecodeError, KeyError, ValueError, AttributeError):
-                continue
-            if ts < since:
-                continue
-            n = sum(int(u.get(k) or 0) for k in ("input_tokens", "cache_creation_input_tokens", "output_tokens"))
-            key = msg.get("id") or e.get("uuid") or str(len(seen))
-            seen[key] = max(seen.get(key, 0), n)  # streamed entries repeat a message id
+        if isinstance(r, dict) and SESSION_ID_RE.match(str(r.get("session", ""))) and isinstance(r.get("at"), (int, float)):
+            out.append(r)
+    return out
+
+
+def _work_end(wd: Path) -> float | None:
+    """When the piece was last worked on: newest mtime of its own files (not the submission build or meta)."""
+    skip = {SESSIONS_FILE, "meta.yaml", ".submission.json"}
+    times = [p.stat().st_mtime for p in wd.rglob("*")
+             if p.is_file() and p.name not in skip and "submission" not in p.relative_to(wd).parts]
+    return max(times) + WORK_END_SLACK_S if times else None
+
+
+def tokens_from_transcripts(wd: Path) -> int | None:
+    """Estimate: input + cache-write + output tokens (cache reads excluded) of the Claude Code sessions that
+    built this piece, as recorded in tac-work/<name>/.sessions. An estimate, not billing.
+
+    Per recorded session: from when this piece was started in it (from the session's beginning if it was
+    the session's first piece) until the next piece started in the same session, and never past the
+    piece's last file edit, so /tac:play, /tac:submit or /tac:mine turns after the work don't count.
+    Other sessions in the project (logins, other pieces) are never read. No recorded session -> None."""
+    sessions = read_sessions(wd)
+    end_cap = _work_end(wd)
+    if not sessions or end_cap is None:
+        return None
+    # every piece's starts, to split a session that built more than one piece
+    starts: dict[str, list[tuple[float, str]]] = {}
+    for other in (wd.parent.iterdir() if wd.parent.is_dir() else []):
+        if other.is_dir():
+            for r in read_sessions(other):
+                starts.setdefault(r["session"], []).append((r["at"], other.name))
+    root = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude") / "projects"
+    seen: dict[str, int] = {}
+    for r in sessions:
+        sid, at = r["session"], r["at"]
+        ordered = sorted(starts.get(sid, [(at, wd.name)]))
+        first = ordered[0][1] == wd.name
+        lo = float("-inf") if first else at
+        hi = min([t for t, n in ordered if t > at and n != wd.name] + [end_cap])
+        files = [*root.glob(f"*/{sid}.jsonl"), *root.glob(f"*/{sid}/**/*.jsonl")]  # main + subagent transcripts
+        for f in files:
+            for line in f.open(encoding="utf-8", errors="replace"):
+                if '"usage"' not in line:
+                    continue
+                try:
+                    e = json.loads(line)
+                    msg = e.get("message") or {}
+                    u = msg.get("usage") or {}
+                    ts = dt.datetime.fromisoformat(e["timestamp"].replace("Z", "+00:00")).timestamp()
+                except (json.JSONDecodeError, KeyError, ValueError, AttributeError, TypeError):
+                    continue
+                if not (lo <= ts < hi):
+                    continue
+                n = sum(int(u.get(k) or 0) for k in ("input_tokens", "cache_creation_input_tokens", "output_tokens"))
+                key = msg.get("id") or e.get("uuid") or f"{f}:{len(seen)}"
+                seen[key] = max(seen.get(key, 0), n)  # streamed entries repeat a message id
     return sum(seen.values()) or None
 
 
@@ -510,6 +568,7 @@ def cmd_fit(a: argparse.Namespace) -> int:
 def cmd_start(a: argparse.Namespace) -> int:
     wd = work_root() / a.name
     wd.mkdir(parents=True, exist_ok=True)
+    record_session(a.name)
     path = wd / "meta.yaml"
     m = metamod.loads_yaml(path.read_text()) if path.exists() else {}
     m["size"] = "sketch" if a.sketch else "full"
@@ -545,6 +604,7 @@ def cmd_direct(a: argparse.Namespace) -> int:
     line = {"seed": f"- seed: {value}", "pick": f"- pick: {value}",
             "note": f"- note (iter-{a.iter}): {value}" if a.iter else f"- note: {value}"}[a.kind]
     text = append_direction(a.name, line)
+    record_session(a.name)  # a resumed or later session steering this piece also built it
     print(f"{line}  → human_role {notesmod.human_role(text)}")
     return 0
 
@@ -906,7 +966,7 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--handle")
         p.add_argument("--tokens", type=int, help="your own token count for this piece")
         p.add_argument("--estimate-tokens", action="store_true",
-                       help="estimate tokens from this project's Claude Code transcripts")
+                       help="estimate tokens from the Claude Code sessions that built this piece")
         if name == "submit":
             p.add_argument("--dry-run", action="store_true", help="prepare + check only")
             p.add_argument("--confirm-rights", action="store_true",

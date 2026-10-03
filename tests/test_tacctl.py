@@ -622,3 +622,94 @@ def test_submit_terms_not_accepted_tells_user_to_login(platform: Platform, work:
         "error": "terms_not_accepted", "terms_url": "https://terminalart.club/terms", "terms_version": 2}))
     assert tacctl.main(["submit", "ember", "--model", "claude-opus-5-5", "--confirm-rights"]) == 1
     assert capsys.readouterr().out.splitlines()[-1] == "accept the updated terms: run /tac:login"
+
+
+# ── token estimate: only the sessions that built the piece ────────────────
+
+
+def _transcript(path: Path, entries: list[tuple[float, str, int, int, int]]) -> None:
+    """entries: (unix ts, message id, input, cache_write, output); plus a cache read that must not count."""
+    import datetime as _dt
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w") as fh:
+        for ts, mid, i, cw, o in entries:
+            stamp = _dt.datetime.fromtimestamp(ts, _dt.timezone.utc).isoformat().replace("+00:00", "Z")
+            fh.write(json.dumps({"type": "assistant", "timestamp": stamp, "message": {"id": mid, "usage": {
+                "input_tokens": i, "cache_creation_input_tokens": cw, "output_tokens": o,
+                "cache_read_input_tokens": 999_999}}}) + "\n")
+
+
+@pytest.fixture
+def two_pieces(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    import os as _os
+    import time as _time
+
+    cfg = tmp_path / "claude"
+    proj = cfg / "projects" / "-Users-x-art"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(cfg))
+    monkeypatch.setenv("TAC_WORK", str(tmp_path / "tac-work"))
+    t0 = _time.time() - 7200
+    for name, sid, start in (("ember", "sess-ember", t0), ("hush", "sess-hush", t0 + 3600)):
+        monkeypatch.setenv("TAC_SESSION_ID", sid)
+        monkeypatch.setattr(tacctl.time, "time", lambda start=start: start)
+        assert tacctl.main(["start", name]) == 0
+        wd = tmp_path / "tac-work" / name
+        (wd / f"{name}.py").write_text("# piece\n")
+        _os.utime(wd / f"{name}.py", (start + 1800, start + 1800))  # last edit 30 min after start
+        _os.utime(wd / "meta.yaml", (start, start))
+    monkeypatch.setattr(tacctl.time, "time", _time.time)
+    # each piece's own session, a subagent of ember's session, and two unrelated sessions in the same project
+    _transcript(proj / "sess-ember.jsonl", [(t0 - 60, "e0", 100, 0, 10),  # skill load before `start`: counts
+                                            (t0 + 600, "e1", 1000, 500, 100), (t0 + 600, "e1", 1000, 500, 120),
+                                            (t0 + 3000, "e9", 7, 7, 7)])  # after the last edit (+slack): play/submit
+    _transcript(proj / "sess-ember" / "subagents" / "agent-1.jsonl", [(t0 + 900, "s1", 2000, 0, 50)])
+    _transcript(proj / "sess-hush.jsonl", [(t0 + 3700, "h1", 3000, 1000, 300)])
+    _transcript(proj / "sess-login.jsonl", [(t0 + 100, "l1", 50_000, 0, 500)])  # /tac:login, /tac:mine
+    _transcript(proj / "sess-other.jsonl", [(t0 + 3800, "o1", 80_000, 0, 900)])  # some other piece's session
+    return tmp_path / "tac-work", t0
+
+
+def test_token_estimate_counts_only_each_pieces_own_sessions(two_pieces) -> None:
+    root, _ = two_pieces
+    assert tacctl.tokens_from_transcripts(root / "ember") == (100 + 10) + (1000 + 500 + 120) + (2000 + 50)
+    assert tacctl.tokens_from_transcripts(root / "hush") == 3000 + 1000 + 300
+    assert json.loads((root / "ember" / ".sessions").read_text())["session"] == "sess-ember"
+
+
+def test_one_session_building_two_pieces_is_split_at_the_second_start(tmp_path: Path,
+                                                                      monkeypatch: pytest.MonkeyPatch) -> None:
+    import os as _os
+    import time as _time
+
+    cfg = tmp_path / "claude"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(cfg))
+    monkeypatch.setenv("TAC_WORK", str(tmp_path / "tac-work"))
+    monkeypatch.setenv("TAC_SESSION_ID", "sess-both")
+    t0 = _time.time() - 7200
+    for name, start in (("ember", t0), ("hush", t0 + 1000)):
+        monkeypatch.setattr(tacctl.time, "time", lambda start=start: start)
+        tacctl.main(["start", name])
+        f = tmp_path / "tac-work" / name / f"{name}.py"
+        f.write_text("# piece\n")
+        _os.utime(f, (start + 900, start + 900))
+    monkeypatch.setattr(tacctl.time, "time", _time.time)
+    _transcript(cfg / "projects" / "p" / "sess-both.jsonl",
+                [(t0 + 100, "a", 1000, 0, 0), (t0 + 1100, "b", 20, 0, 0), (t0 + 1850, "c", 3, 0, 0)])
+    assert tacctl.tokens_from_transcripts(tmp_path / "tac-work" / "ember") == 1000
+    assert tacctl.tokens_from_transcripts(tmp_path / "tac-work" / "hush") == 20 + 3
+
+
+def test_no_recorded_session_means_unknown(platform: Platform, work: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("TAC_SESSION_ID", raising=False)
+    assert tacctl.tokens_from_transcripts(work) is None  # never a project-wide guess
+    _, m, _ = tacctl.prepare("ember", model="claude-opus-5-5", handle=None, tokens=None, estimate_tokens=True)
+    assert m["tokens"] is None and m["tokens_source"] == "unknown"
+
+
+@pytest.mark.parametrize("sid", ["", "a b", "x;rm -rf ~", "$(id)", "a" * 65])
+def test_record_session_ignores_invalid_ids(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sid: str) -> None:
+    monkeypatch.setenv("TAC_WORK", str(tmp_path / "tac-work"))
+    monkeypatch.setenv("TAC_SESSION_ID", sid)
+    tacctl.record_session("ember")
+    assert not (tmp_path / "tac-work" / "ember" / ".sessions").exists()

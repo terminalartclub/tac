@@ -9,9 +9,8 @@ Submit `./tac-work/<name>/` to the TAC community. Arguments: $ARGUMENTS
 2. Model: pass `--model <your exact model id>` (e.g. `claude-opus-5-5`) — the id of the model that made
    the piece, which is you unless the notes say otherwise. It is required.
 3. Tokens: if the user stated a token count for this piece, pass `--tokens N`. Otherwise pass
-   `--estimate-tokens` (an estimate from this project's Claude Code transcripts since the work dir was
-   created; input + cache writes + output, cache reads excluded). Never invent a number — `null`
-   ("unknown") is fine.
+   `--estimate-tokens` (an estimate from the Claude Code sessions that built this piece; input + cache
+   writes + output, cache reads excluded). Never invent a number — `null` ("unknown") is fine.
 4. Rights: show the user this line and ask them to confirm it:
 
    > You have the right to share this, and it doesn't copy anyone else's characters, brands or logos.

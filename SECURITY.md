@@ -14,11 +14,12 @@ gallery only through the platform upload (`/tac:submit`).
 | what | when | does |
 |---|---|---|
 | `scripts/nudge.py` | SessionStart hook (`startup`), 5 s timeout | Reads `~/.cache/tac/usage.json` and `~/.config/tac/config.json`, and may print one line. Copies `statusline_cache.py` into `${CLAUDE_PLUGIN_DATA}` only if no copy is there, and never overwrites one. **No network calls, no subprocesses.** |
+| `scripts/session_env.py` | SessionStart hook (every source), 5 s timeout | Reads the hook's stdin JSON and, if `session_id` is a plain `[A-Za-z0-9-]` id, appends `export TAC_SESSION_ID=<id>` to `$CLAUDE_ENV_FILE`, so `tacctl` can attribute token estimates to the sessions that built a piece. Prints nothing. **No network calls, no subprocesses.** |
 | `bin/tac` | when you or Claude run it (`/tac:create`, `/tac:play`) | `uv run --no-project` with pinned `rich`, `Pillow`, `fonttools`; runs `lib/vscreen.py`, which executes the piece being made. |
 | `bin/tacctl` | when you or Claude run it (`/tac:login`, `/tac:submit`, `/tac:mine`, `tacctl gallery`) | Same pinned `uv run --no-project`; talks to the TAC platform at `TAC_API`. That must be https unless it is localhost. It opens the browser only for https pages on that same host, and strips control characters from every server string before printing it. |
 | `scripts/statusline_cache.py` | only if you point your `statusLine` at its copy | Caches `rate_limits.seven_day`, then runs your own statusline command (from your settings) through a shell. |
 
-Nothing runs at install time itself; the hook runs at each session start.
+Nothing runs at install time itself; the two hooks run at each session start.
 
 ## Incident plan
 

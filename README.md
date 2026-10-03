@@ -88,9 +88,13 @@ A Max plan typically needs a much smaller value than Pro. Measure, don't guess.
 ### Token counts are honest
 
 `tokens` in the meta is an int or `null` ("unknown"). `/tac:submit` uses your number if you give one
-(`tokens_source: user`). Otherwise `--estimate-tokens` sums input + cache-write + output tokens from this
-project's Claude Code transcripts since the work dir was created (`transcript-estimate`; cache reads
-excluded). `/usage` has no machine-readable output, so nothing is read from it.
+(`tokens_source: user`). Otherwise `--estimate-tokens` sums input + cache-write + output tokens from the
+Claude Code sessions that built the piece (`transcript-estimate`; cache reads excluded). A SessionStart hook
+exports the session id as `TAC_SESSION_ID`, and `tacctl start` / `tacctl direct` record it in
+`tac-work/<name>/.sessions`. Only those sessions' transcripts count, including their subagents. A session's tokens
+count from the piece's start until the next piece starts in the same session, and never past the piece's last file
+edit (+5 min), so later `/tac:play`, `/tac:submit` and `/tac:mine` turns and other pieces' sessions are excluded.
+With no recorded session the estimate is `null`. `/usage` has no machine-readable output, so nothing is read from it.
 
 ## Repo layout
 

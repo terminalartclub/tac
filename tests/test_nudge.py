@@ -97,6 +97,27 @@ def test_hook_never_overwrites_existing_statusline_helper(tmp_path: Path) -> Non
     assert "\n" not in msg and "differs from this plugin's version" in msg and str(helper) in msg
 
 
-def test_hook_makes_no_network_calls() -> None:
-    src = (SCRIPTS / "nudge.py").read_text()
+@pytest.mark.parametrize("script", ["nudge.py", "session_env.py"])
+def test_hook_makes_no_network_calls(script: str) -> None:
+    src = (SCRIPTS / script).read_text()
     assert not any(m in src for m in ("urllib", "http", "socket", "requests", "subprocess"))
+
+
+@pytest.mark.parametrize("sid,written", [("d4eac668-7812-49a5-876a-0edb5cddbf89", True), ("x; rm -rf ~", False),
+                                         ("$(id)", False), (None, False)])
+def test_session_env_hook_exports_only_a_safe_id(tmp_path: Path, sid, written) -> None:
+    env_file = tmp_path / "env"
+    env_file.write_text("export OTHER=1\n")
+    payload = json.dumps({"session_id": sid, "hook_event_name": "SessionStart"} if sid is not None else {})
+    r = subprocess.run([sys.executable, str(SCRIPTS / "session_env.py")], input=payload, capture_output=True,
+                       text=True, env={"CLAUDE_ENV_FILE": str(env_file), "PATH": "/usr/bin:/bin"})
+    assert r.returncode == 0 and r.stdout == ""
+    lines = env_file.read_text().splitlines()
+    assert lines[0] == "export OTHER=1"  # appended, never overwritten
+    assert lines[1:] == ([f"export TAC_SESSION_ID={sid}"] if written else [])
+
+
+def test_session_env_hook_registered_for_every_session_start() -> None:
+    hooks = json.loads((ROOT / "plugins" / "tac-studio" / "hooks" / "hooks.json").read_text())["hooks"]["SessionStart"]
+    entry = next(h for h in hooks if "session_env.py" in h["hooks"][0]["command"])
+    assert "matcher" not in entry  # startup, resume, clear and compact all re-export the id
