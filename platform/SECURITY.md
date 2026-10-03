@@ -168,7 +168,7 @@ docker run --rm --name tac-render-<random> --network none --read-only --tmpfs /t
 - **CORS:** `Access-Control-Allow-Origin: <origin>` + `Allow-Credentials: true` is sent only when Origin is in `TAC_SITE_ORIGINS`, and only on `/v1/*` site paths. Never on `/v1/admin*` or `/v1/render-io/*`. `community.json` and `/media` stay `*` without credentials.
 - **Login rate limits:** dev form 10 per 10 min per IP (salted hash). GitHub redirect 20 per 10 min per IP.
 - **Profile fields** (`display_name` ≤ 40, `bio` ≤ 280, `link` https only, ≤ 200, no userinfo, no whitespace):
-  - C0/C1 control, zero-width, bidi mark/override/isolate, invisible-operator, BOM and tag characters (`me._CTRL`) are stripped from `display_name` and `bio`, except ZWJ (U+200D), which joins compound emoji. A `link` containing any of them, ZWJ included (`me._LINK_CTRL`), is refused (never rewritten). Unknown keys are refused.
+  - C0/C1 control, zero-width, bidi mark/override/isolate, invisible-operator, BOM and tag characters (`me._CTRL`) are stripped from `display_name` and `bio`, except ZWNJ/ZWJ (U+200C/U+200D), which shape Persian/Indic text and join compound emoji. A `link` containing any of them, ZWNJ/ZWJ included (`me._LINK_CTRL`), is refused (never rewritten). Unknown keys are refused.
   - `PATCH /v1/me` is limited to 30 accepted calls per user per hour (429 after), since each one by a published artist regenerates `community.json`.
   - They are stored as typed. The admin HTML escapes them (tested with `<script>`).
   - `community.json` carries them as JSON strings in `artist`. The site must render them as text, never as HTML, and give the link `rel="nofollow noopener ugc"`.

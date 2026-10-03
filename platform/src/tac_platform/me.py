@@ -17,11 +17,12 @@ PROFILE_UPDATES_PER_HOUR = 30  # each one by a published artist regenerates comm
 # C0/C1 controls, zero-width, bidi marks/overrides/isolates, invisible operators, BOM and tag chars
 # (spoofing); \t and \n are handled per field
 _INVISIBLE = (
-    "\\x00-\\x08\\x0b-\\x1f\\x7f-\\x9f\\u00ad\\u061c\\u180e\\u200b\\u200c\\u200e\\u200f\\u2028-\\u202e"
+    "\\x00-\\x08\\x0b-\\x1f\\x7f-\\x9f\\u00ad\\u061c\\u180e\\u200b\\u200e\\u200f\\u2028-\\u202e"
     "\\u2060-\\u2064\\u2066-\\u2069\\ufeff\\U000e0000-\\U000e007f"
 )
-_CTRL = re.compile(f"[{_INVISIBLE}]")  # display_name/bio: stripped. ZWJ (U+200D) kept: it joins emoji (👩‍💻)
-_LINK_CTRL = re.compile(f"[{_INVISIBLE}\\u200d]")  # link: refused, ZWJ included
+# display_name/bio: stripped. ZWNJ/ZWJ (U+200C/D) kept: they shape Persian/Indic text and join emoji (👩‍💻)
+_CTRL = re.compile(f"[{_INVISIBLE}]")
+_LINK_CTRL = re.compile(f"[{_INVISIBLE}\\u200c\\u200d]")  # link: refused, ZWNJ/ZWJ included
 
 
 def _clean(v: str, allow_newlines: bool) -> str:
