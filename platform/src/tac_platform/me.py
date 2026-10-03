@@ -9,9 +9,10 @@ from pydantic import BaseModel, ConfigDict, field_validator
 
 from .auth import current_user
 from .sessions import clear_session_cookie
-from .web import ApiError
+from .web import ApiError, take_rate_token
 
 router = APIRouter()
+PROFILE_UPDATES_PER_HOUR = 30  # each one by a published artist regenerates community.json
 
 # C0/C1 controls, zero-width, bidi marks/overrides/isolates, invisible operators, BOM and tag chars
 # (spoofing); \t and \n are handled per field
@@ -99,10 +100,12 @@ async def get_me(request: Request) -> dict:
 
 @router.patch("/v1/me")
 async def patch_me(body: ProfileIn, request: Request) -> dict:
+    st = request.app.state
     user = await current_user(request)
+    if not await take_rate_token(st.db, f"profile:{user['id']}", PROFILE_UPDATES_PER_HOUR, 3600):
+        raise ApiError(429, "rate_limited", detail=f"at most {PROFILE_UPDATES_PER_HOUR} profile updates per hour")
     changes = body.model_dump(exclude_unset=True)
     if changes:
-        st = request.app.state
         cols = ", ".join(f"{k} = ?" for k in changes)  # keys are the model's three field names only
         async with st.db.tx() as tx:
             await tx.execute(f"UPDATE users SET {cols} WHERE id = ?", (*[v or None for v in changes.values()], user["id"]))

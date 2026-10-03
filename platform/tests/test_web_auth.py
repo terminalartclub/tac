@@ -225,6 +225,29 @@ async def test_profile_strips_bidi_and_zero_width(ctx, ch):
         assert (await b.get("/v1/me")).json()["link"] == ""
 
 
+async def test_profile_update_rate_limited_per_user(ctx, monkeypatch):
+    alex = await ctx.login("alex")
+    await published(ctx, alex)
+    calls = 0
+    real = ctx.app.state.publisher.regenerate
+
+    async def counting():
+        nonlocal calls
+        calls += 1
+        await real()
+
+    monkeypatch.setattr(ctx.app.state.publisher, "regenerate", counting)
+    async with ctx.client(authorization=f"Bearer {alex}") as b:
+        codes = [(await b.patch("/v1/me", json={"bio": f"v{i}"})).status_code for i in range(31)]
+        assert codes[:30] == [200] * 30 and codes[30] == 429
+        assert (await b.patch("/v1/me", json={"bio": "x"})).json()["error"] == "rate_limited"
+        assert (await b.get("/v1/me")).json()["bio"] == "v29"  # the refused updates wrote nothing
+    assert calls == 30  # community.json regenerated at most 30 times
+    bea = await ctx.login("bea")  # per user, not global
+    async with ctx.client(authorization=f"Bearer {bea}") as b:
+        assert (await b.patch("/v1/me", json={"bio": "hi"})).status_code == 200
+
+
 async def test_artist_block_absent_without_profile(ctx):
     token = await ctx.login("alex")
     await published(ctx, token)

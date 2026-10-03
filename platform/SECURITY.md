@@ -169,6 +169,7 @@ docker run --rm --name tac-render-<random> --network none --read-only --tmpfs /t
 - **Login rate limits:** dev form 10 per 10 min per IP (salted hash). GitHub redirect 20 per 10 min per IP.
 - **Profile fields** (`display_name` ≤ 40, `bio` ≤ 280, `link` https only, ≤ 200, no userinfo, no whitespace):
   - C0/C1 control, zero-width, bidi mark/override/isolate, invisible-operator, BOM and tag characters (`me._CTRL`) are stripped from `display_name` and `bio`; a `link` containing any of them is refused (never rewritten). Unknown keys are refused.
+  - `PATCH /v1/me` is limited to 30 accepted calls per user per hour (429 after), since each one by a published artist regenerates `community.json`.
   - They are stored as typed. The admin HTML escapes them (tested with `<script>`).
   - `community.json` carries them as JSON strings in `artist`. The site must render them as text, never as HTML, and give the link `rel="nofollow noopener ugc"`.
 - **Unpublish:**
