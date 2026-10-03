@@ -241,8 +241,8 @@ def open_browser(url: str) -> bool:
     """Open a server-supplied URL in the browser; refuse (and just print it) unless browser_target
     accepts it. The opened URL is the rebuilt one, never the server's string."""
     target = browser_target(url)
-    if target is None:
-        print(f"not opening {safe(url)!r}: only https pages on the TAC API host are opened")
+    if target is None:  # the refused URL is not echoed: it is server text and would reach Claude's context
+        print("not opening the browser: the server's link is not an https page on the TAC API host")
         return False
     _launch(target)
     return True
@@ -251,6 +251,9 @@ def open_browser(url: str) -> bool:
 def open_local(path: Path) -> None:
     """Open a file this tool wrote itself (review page, style file)."""
     _launch(str(path.resolve()))
+
+
+APPROVE_FALLBACK = "approve the code at the terminal art club site"
 
 
 def cmd_login(a: argparse.Namespace) -> int:
@@ -264,7 +267,8 @@ def cmd_login(a: argparse.Namespace) -> int:
                                        "expires_at": time.time() + float(body.get("expires_in", 600))})
         uri = str(body.get("verification_uri_complete") or body.get("verification_uri") or "")
         print(f"code: {safe(body.get('user_code'))}")
-        print(f"approve at: {safe(body.get('verification_uri'))}")
+        approve = trusted_link(body.get("verification_uri"), base)
+        print(f"approve at: {approve}" if approve else APPROVE_FALLBACK)
         if not a.no_browser and open_browser(uri):
             print("(opened in your browser)")
         print("then run: tacctl login --wait")

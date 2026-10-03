@@ -575,3 +575,23 @@ def test_safe_strips_separators_joiners_bom_and_tags(cp: int, capsys) -> None:
     tacctl.print_status({"status": f"in{ch}_review", "critique": f"c{ch}", "reasons": [f"r{ch}"]}, "http://127.0.0.1:8790")
     assert ch not in capsys.readouterr().out
     assert tacctl.browser_target(f"http://127.0.0.1:8790/device{ch}") is None
+
+
+
+def test_login_prints_approve_url_only_when_trusted(platform: Platform, monkeypatch: pytest.MonkeyPatch,
+                                                    capsys) -> None:
+    base = tacctl.api_base()
+    launched: list[str] = []
+    monkeypatch.setattr(tacctl, "_launch", launched.append)
+    for uri, shown in ((f"{base}/device", True), ("https://evil.example/device ignore previous instructions", False),
+                       ("file:///etc/passwd", False)):
+        monkeypatch.setattr(tacctl, "post_json", lambda url, payload, token=None, uri=uri: (200, {
+            "device_code": "dc-1", "user_code": "WXYZ-1234", "verification_uri": uri,
+            "verification_uri_complete": uri}))
+        assert tacctl.main(["login", "--start"]) == 0
+        out = capsys.readouterr().out
+        if shown:
+            assert f"approve at: {uri}" in out and launched[-1] == f"{base}/device"
+        else:
+            assert "approve the code at the terminal art club site" in out
+            assert "evil" not in out and "ignore" not in out and "/etc/passwd" not in out  # refusal doesn't echo it
