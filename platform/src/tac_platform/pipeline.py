@@ -27,6 +27,11 @@ from .storage import MediaStore
 log = logging.getLogger("tac.pipeline")
 
 
+def _log_json(items: list[str]) -> str:
+    """A list for a log line: JSON with ASCII escapes, so control, bidi and newline characters stay inert."""
+    return json.dumps([str(x) for x in items], ensure_ascii=True)
+
+
 def _rc(res) -> str:
     return "-" if res is None else str(res.returncode)
 
@@ -35,9 +40,9 @@ def _automod_summary(am, reasons: list[str]) -> str:
     """One line for the log: what automod decided, and what it cost."""
     if am.verdict is not None:
         v = am.verdict
-        head = f"verdict safe={v.safe} on_brief={v.on_brief} flags={','.join(v.flags) or '-'}"
+        head = f"verdict safe={v.safe} on_brief={v.on_brief} flags={_log_json(v.flags)}"  # model output
     else:
-        head = "budget reached" if am.budget else "skipped" if am.skipped else f"no verdict ({'; '.join(reasons)})"
+        head = "budget reached" if am.budget else "skipped" if am.skipped else f"no verdict {_log_json(reasons)}"
     return f"{head} cost=${am.cost_usd:.5f}"
 
 RENDER_FILES = {"preview.webp", "og.jpg", "stats.json"}
@@ -276,4 +281,6 @@ class Pipeline:
             if ok:
                 await tx.audit("system", "pipeline_result", sub_id, "rendering", status, "; ".join(reasons) or None)
         if ok:
-            log.info("pipeline %s: final status %s%s", sub_id, status, f" ({'; '.join(reasons)})" if reasons else "")
+            # reasons can carry piece-derived text (check output, render stderr): JSON-escaped, so a newline
+            # or ESC in a reason can't forge or break log lines
+            log.info("pipeline %s: final status %s%s", sub_id, status, f" {_log_json(reasons)}" if reasons else "")
