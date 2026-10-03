@@ -132,7 +132,7 @@ def test_wait_without_start_fails(platform: Platform) -> None:
 
 
 def test_submit_requires_login(platform: Platform, work: Path, capsys) -> None:
-    assert tacctl.main(["submit", "ember", "--model", "claude-opus-5-5"]) == 1
+    assert tacctl.main(["submit", "ember", "--model", "claude-opus-5-5", "--confirm-rights"]) == 1
     assert "not logged in" in capsys.readouterr().err
     assert platform.upload == {}
 
@@ -140,7 +140,7 @@ def test_submit_requires_login(platform: Platform, work: Path, capsys) -> None:
 def test_submit_uploads_and_polls(platform: Platform, work: Path, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
     monkeypatch.setenv("TAC_SITE_URL", "https://terminalart.club")  # the fake API is on loopback
     tacctl.write_private(tacctl.cred_path(), {"api": "unused", "access_token": "tok-123", "handle": "alex"})
-    assert tacctl.main(["submit", "ember", "--model", "claude-opus-5-5", "--tokens", "1234"]) == 0
+    assert tacctl.main(["submit", "ember", "--model", "claude-opus-5-5", "--tokens", "1234", "--confirm-rights"]) == 0
     out = capsys.readouterr().out
     assert "status: in_review" in out and "critique: calm" in out and "/v1/submissions/sub-1" in out
     assert out.splitlines()[-1] == ("Submitted. Once it passes review it's on the wall: "
@@ -166,7 +166,7 @@ def test_submit_uploads_and_polls(platform: Platform, work: Path, monkeypatch: p
 def test_local_check_blocks_upload(platform: Platform, work: Path, capsys) -> None:
     tacctl.write_private(tacctl.cred_path(), {"access_token": "tok-123", "handle": "alex"})
     (work / "ember.py").write_text("import os\n" + (work / "ember.py").read_text())
-    assert tacctl.main(["submit", "ember", "--model", "claude-opus-5-5"]) == 1
+    assert tacctl.main(["submit", "ember", "--model", "claude-opus-5-5", "--confirm-rights"]) == 1
     assert "nothing was uploaded" in capsys.readouterr().out
     assert platform.upload == {}
 
@@ -500,7 +500,7 @@ def test_submit_falls_back_to_status_url_for_untrusted_piece_url(platform: Platf
         return status, body
 
     monkeypatch.setattr(tacctl, "http", http)
-    assert tacctl.main(["submit", "ember", "--model", "claude-opus-5-5", "--no-wait"]) == 0
+    assert tacctl.main(["submit", "ember", "--model", "claude-opus-5-5", "--no-wait", "--confirm-rights"]) == 0
     out = capsys.readouterr().out
     assert "evil.example" not in out and "ignore" not in out
     assert out.splitlines()[-1].startswith("Submitted. Once it passes review it's on the wall: http://127.0.0.1:")
@@ -561,7 +561,7 @@ def test_submit_prints_fixed_line_when_no_link_is_trusted(platform: Platform, wo
         return status, body
 
     monkeypatch.setattr(tacctl, "http", http)
-    assert tacctl.main(["submit", "ember", "--model", "claude-opus-5-5", "--no-wait"]) == 0
+    assert tacctl.main(["submit", "ember", "--model", "claude-opus-5-5", "--no-wait", "--confirm-rights"]) == 0
     out = capsys.readouterr().out
     assert out.splitlines()[-1] == "submitted — see /tac:mine for its status"
     assert "ignore" not in out and "evil.com" not in out
@@ -595,3 +595,30 @@ def test_login_prints_approve_url_only_when_trusted(platform: Platform, monkeypa
         else:
             assert "approve the code at the terminal art club site" in out
             assert "evil" not in out and "ignore" not in out and "/etc/passwd" not in out  # refusal doesn't echo it
+
+
+
+def test_submit_refuses_without_confirm_rights(platform: Platform, work: Path, capsys) -> None:
+    tacctl.write_private(tacctl.cred_path(), {"access_token": "tok-123", "handle": "alex"})
+    assert tacctl.main(["submit", "ember", "--model", "claude-opus-5-5"]) == 1
+    out = capsys.readouterr().out.splitlines()
+    assert out[0] == "You have the right to share this, and it doesn't copy anyone else's characters, brands or logos."
+    assert "--confirm-rights" in out[1]
+    assert platform.upload == {} and not (work / "submission").exists()  # refused before anything ran
+    assert tacctl.main(["submit", "ember", "--model", "claude-opus-5-5", "--dry-run"]) == 0  # local check only
+
+
+def test_submit_sends_rights_confirmed_only_with_the_flag(platform: Platform, work: Path, capsys) -> None:
+    tacctl.write_private(tacctl.cred_path(), {"access_token": "tok-123", "handle": "alex"})
+    assert tacctl.main(["submit", "ember", "--model", "claude-opus-5-5", "--confirm-rights", "--no-wait"]) == 0
+    assert json.loads(platform.upload["meta"][0][1])["rights_confirmed"] is True
+    assert "rights_confirmed" not in (work / "meta.yaml").read_text()  # never persisted as a default
+
+
+def test_submit_terms_not_accepted_tells_user_to_login(platform: Platform, work: Path,
+                                                       monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    tacctl.write_private(tacctl.cred_path(), {"access_token": "tok-123", "handle": "alex"})
+    monkeypatch.setattr(tacctl, "http", lambda *a, **k: (403, {
+        "error": "terms_not_accepted", "terms_url": "https://terminalart.club/terms", "terms_version": 2}))
+    assert tacctl.main(["submit", "ember", "--model", "claude-opus-5-5", "--confirm-rights"]) == 1
+    assert capsys.readouterr().out.splitlines()[-1] == "accept the updated terms: run /tac:login"

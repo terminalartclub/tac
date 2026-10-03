@@ -634,7 +634,15 @@ def poll(base: str, sid: str, token: str, wait_s: float) -> dict[str, Any]:
         time.sleep(3)
 
 
+RIGHTS_LINE = "You have the right to share this, and it doesn't copy anyone else's characters, brands or logos."
+TERMS_LINE = "accept the updated terms: run /tac:login"
+
+
 def cmd_submit(a: argparse.Namespace) -> int:
+    if not a.confirm_rights and not a.dry_run:  # the user, not Claude, confirms this line in the conversation
+        print(RIGHTS_LINE)
+        print("nothing was uploaded: ask the user to confirm the line above, then re-run with --confirm-rights")
+        return 1
     sub, m, reasons = prepare(a.name, model=a.model, handle=a.handle, tokens=a.tokens,
                               estimate_tokens=a.estimate_tokens)
     if reasons:
@@ -651,6 +659,7 @@ def cmd_submit(a: argparse.Namespace) -> int:
         return die("not logged in — run /tac:login first")
     base = session_base(creds)
     send = {k: v for k, v in m.items() if k != "handle"}  # the platform takes the handle from the token
+    send["rights_confirmed"] = True  # only reachable with --confirm-rights; never written to meta.yaml
     files = [("piece", sub / "piece.py", "text/x-python")]
     if (sub / "notes.md").exists():
         files.append(("notes", sub / "notes.md", "text/markdown"))
@@ -661,6 +670,9 @@ def cmd_submit(a: argparse.Namespace) -> int:
                                  "Accept": "application/json"})
     if status == 401:
         return die("the platform rejected your login (401) — run /tac:login again")
+    if status == 403 and isinstance(resp, dict) and resp.get("error") == "terms_not_accepted":
+        print(TERMS_LINE)
+        return 1
     if status not in (200, 201, 202) or not isinstance(resp, dict) or "id" not in resp:
         return die(f"upload failed: HTTP {status} {resp}")
     print(f"uploaded: submission {safe(resp['id'])} ({safe(resp.get('status'))})")
@@ -897,6 +909,9 @@ def main(argv: list[str] | None = None) -> int:
                        help="estimate tokens from this project's Claude Code transcripts")
         if name == "submit":
             p.add_argument("--dry-run", action="store_true", help="prepare + check only")
+            p.add_argument("--confirm-rights", action="store_true",
+                           help="the user confirmed: they have the right to share this, and it copies no one "
+                                "else's characters, brands or logos")
             p.add_argument("--no-wait", action="store_true")
             p.add_argument("--wait", type=float, default=300, help="seconds to poll status (default 300)")
     ft = sp.add_parser("fit", help="does a run fit the spare weekly window? exit 3 = no")

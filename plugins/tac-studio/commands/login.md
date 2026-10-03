@@ -6,7 +6,8 @@ This logs in to the TAC community platform only. It never reads or touches Anthr
 
 1. Run `"${CLAUDE_PLUGIN_ROOT}/bin/tacctl" login --start`. It prints a short code and opens the
    approval page in the browser. Immediately show the user the **code** and the **URL** exactly as
-   printed, and tell them to approve it in the browser.
+   printed, and tell them to approve it in the browser. First sign-in, or after the terms change, the page
+   asks them to agree to the Terms and the Content policy; only they tick that box.
 2. Then run `"${CLAUDE_PLUGIN_ROOT}/bin/tacctl" login --wait` (Bash timeout 600000 ms). It returns once
    the code is approved and saves the token to `~/.config/tac/credentials.json` (mode 600).
 3. Report the handle it prints. If it fails or expires, show the error and offer to start again.
