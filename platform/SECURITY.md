@@ -216,9 +216,10 @@ docker run --rm --name tac-render-<random> --network none --read-only --tmpfs /t
     `delete_account` truncates the WAL (`wal_checkpoint(TRUNCATE)`), and the first boot with this setting
     VACUUMs once to clear rows deleted before it. A reader in another connection (operator shell,
     `sqlite3 .backup`) can block the truncate: it is never waited for (busy_timeout 0 for the checkpoint, the
-    write and media locks free in milliseconds); a warning is logged and a background task retries every 30 s
-    until it succeeds. The VACUUM is a cleanup, never a boot blocker: a failure (disk full, I/O) is logged and
-    retried next boot, and its done-flag is set only after a truncate that wasn't blocked.
+    write and media locks free in milliseconds; the checkpoint runs on its own short-lived connection, so the
+    shared connection's 5 s busy timeout is never lowered); one warning when first blocked, then one per 10
+    retries and one on success, while a background task retries every 30 s until it succeeds. The VACUUM is
+    a cleanup, never a boot blocker: a failure (disk full, I/O) is logged and retried next boot, and its done-flag is set only after a truncate that wasn't blocked.
   - Fly's daily volume snapshots (5-day retention) keep pre-delete copies of the whole DB until they rotate
     out: a deletion is complete everywhere after 5 days.
   - Handles in the audit log after a delete (`Publisher._pseudonymise`, same transaction as the delete):
@@ -226,6 +227,9 @@ docker run --rm --name tac-render-<random> --network none --read-only --tmpfs /t
       account gets `deleted:<12 hex>` = sha256(blocklist salt | account id, created_at, first audit row id),
       and each of its piece slugs becomes `deleted:<…>/<12 hex>` (submit details, `<handle>/<slug>` targets,
       the delete_account IG list). What happened and when stays; who it was, and which piece, doesn't.
+      Pseudonymous, not anonymous: the salt derives from the kv secret in the same SQLite file and slugs have
+      low entropy (lowercased title words), so anyone with a DB dump can dictionary-attack the slug aliases,
+      and the account pseudonym by brute force over ids and timestamps. A leaked DB file defeats them.
     - an admin deleting a SUSPENDED account keeps handle and slugs on the moderation rows (suspend, unsuspend,
       hide, unhide, delete, delete_account, block, unblock, reject, ig_posted, ig_removed) and in
       `blocked_identities.ref`: the repeat-infringer evidence and the takedown log. Every other row is

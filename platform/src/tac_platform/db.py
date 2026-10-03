@@ -7,6 +7,7 @@ replacing this module with an asyncpg-backed one exposing the same five methods.
 import asyncio
 import json
 import logging
+import sqlite3
 from collections.abc import Awaitable, Callable
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -18,6 +19,7 @@ import aiosqlite
 
 log = logging.getLogger("tac.db")
 BUSY_TIMEOUT_MS = 5000
+RETRY_LOG_EVERY = 10  # a blocked-truncate retry logs only every Nth attempt
 TRUNCATE_RETRY_S = 30.0  # a WAL truncate blocked by a reader in another connection is retried this often
 
 SCHEMA = """
@@ -156,6 +158,7 @@ class Database:
         self._conn: aiosqlite.Connection | None = None
         self._write_lock = asyncio.Lock()
         self.truncate_retry_s = TRUNCATE_RETRY_S
+        self.truncate_retries = 0
         self._truncate_task: asyncio.Task | None = None
         self._after_truncate: list[Callable[[], Awaitable[None]]] = []
 
@@ -228,27 +231,30 @@ class Database:
     async def _mark_vacuumed(self) -> None:
         await self.execute("INSERT OR IGNORE INTO kv (key, value) VALUES ('secure_delete_vacuumed', '1')")
 
+    def _checkpoint_truncate_sync(self) -> tuple[int, int, int]:
+        """The TRUNCATE checkpoint on its own short-lived connection with busy_timeout 0: it never waits for a
+        reader, and the shared connection's busy_timeout is never touched (concurrent reads keep 5 s)."""
+        con = sqlite3.connect(self.path, timeout=0, isolation_level=None)
+        try:
+            con.execute("PRAGMA busy_timeout=0")
+            return tuple(con.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone())
+        finally:
+            con.close()  # never the last connection (self.conn stays open), so the WAL is not deleted here
+
     async def checkpoint_truncate(self) -> bool:
         """Copy the WAL into the main file and truncate it to zero bytes: old WAL frames hold pre-delete page
         images until the file is truncated (a normal checkpoint only rewinds it). True when done; False when a
         reader in another connection (an operator shell, `sqlite3 .backup`) holds an older snapshot. Never
-        waits for that reader: busy_timeout is 0 for the checkpoint, so the write lock is held for
+        waits for that reader, so the write lock (held so no write lands mid-checkpoint) is held for
         milliseconds, not the 5 s busy timeout."""
         async with self._write_lock:
-            await self.conn.execute("PRAGMA busy_timeout=0")
-            try:
-                row = await self.fetchone("PRAGMA wal_checkpoint(TRUNCATE)")
-            finally:
-                await self.conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
-        busy, wal_frames, checkpointed = tuple(row)
-        if busy:
-            log.warning("WAL truncate blocked by another reader (%s frames, %s checkpointed); retrying",
-                        wal_frames, checkpointed)
+            busy, _, _ = await asyncio.to_thread(self._checkpoint_truncate_sync)
         return not busy
 
     async def truncate_or_retry(self, then: Callable[[], Awaitable[None]] | None = None) -> bool:
         """checkpoint_truncate now, or (blocked) in the background every truncate_retry_s until it succeeds.
-        `then` runs after the truncate that succeeds. Returns whether it succeeded right away."""
+        `then` runs after the truncate that succeeds. Returns whether it succeeded right away.
+        Logging: one warning when first blocked, one every RETRY_LOG_EVERY failed retries, one on success."""
         if await self.checkpoint_truncate():
             if then is not None:
                 await then()
@@ -256,15 +262,21 @@ class Database:
         if then is not None:
             self._after_truncate.append(then)
         if self._truncate_task is None or self._truncate_task.done():
+            log.warning("WAL truncate blocked by another reader; retrying every %gs", self.truncate_retry_s)
+            self.truncate_retries = 0
             self._truncate_task = asyncio.create_task(self._truncate_retry(), name="tac-wal-truncate")
         return False
 
     async def _truncate_retry(self) -> None:
         while True:
             await asyncio.sleep(self.truncate_retry_s)
+            self.truncate_retries += 1
             try:
                 if not await self.checkpoint_truncate():
+                    if self.truncate_retries % RETRY_LOG_EVERY == 0:
+                        log.warning("WAL truncate still blocked after %d retries", self.truncate_retries)
                     continue
+                log.info("WAL truncate done after %d retries", self.truncate_retries)
                 while self._after_truncate:
                     await self._after_truncate.pop(0)()
                 return

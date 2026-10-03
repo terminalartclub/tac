@@ -164,3 +164,58 @@ async def test_checkpoint_truncate_reports_success_without_readers(tmp_path):
         assert await db.checkpoint_truncate() is True
     finally:
         await db.close()
+
+
+async def test_concurrent_reads_never_see_a_zero_busy_timeout(tmp_path):
+    """The checkpoint must not lower the SHARED connection's busy_timeout, even for a moment: every read
+    interleaved with checkpoints sees the normal 5 s."""
+    db = Database(tmp_path / "x.sqlite3")
+    await db.open()
+    seen = []
+    try:
+        async def reads():
+            for _ in range(200):
+                seen.append((await db.fetchone("PRAGMA busy_timeout"))[0])
+                await asyncio.sleep(0)
+
+        async def checkpoints():
+            for _ in range(200):
+                await db.execute("INSERT INTO kv (key, value) VALUES ('k', 'v') ON CONFLICT(key) DO UPDATE SET value = 'v'")
+                assert await db.checkpoint_truncate()
+                await asyncio.sleep(0)
+
+        await asyncio.gather(reads(), checkpoints())
+    finally:
+        await db.close()
+    assert len(seen) == 200 and set(seen) == {5000}
+
+
+async def test_blocked_retry_logs_first_every_tenth_and_success(tmp_path, caplog):
+    path = tmp_path / "x.sqlite3"
+    db = Database(path)
+    await db.open()
+    db.truncate_retry_s = 0.005
+    try:
+        await db.execute("CREATE TABLE t (x TEXT)")
+        reader = _reader(path)
+        await db.execute("INSERT INTO t VALUES ('x')")
+        with caplog.at_level(logging.INFO, logger="tac.db"):
+            assert await db.truncate_or_retry() is False
+            assert await db.truncate_or_retry() is False  # a second caller while the task runs: no new line
+
+            async def retried_25():
+                return db.truncate_retries >= 25
+
+            await _until(retried_25)
+            reader.rollback()
+            reader.close()
+            await _until(lambda: _done(db))
+        lines = [r.getMessage() for r in caplog.records if r.name == "tac.db"]
+        assert lines[0].startswith("WAL truncate blocked by another reader")
+        still = [m for m in lines if m.startswith("WAL truncate still blocked after")]
+        assert still[:2] == ["WAL truncate still blocked after 10 retries", "WAL truncate still blocked after 20 retries"]
+        assert len(still) == (db.truncate_retries - 1) // 10  # failed retries = all but the last
+        assert lines[-1] == f"WAL truncate done after {db.truncate_retries} retries"
+        assert len(lines) == 1 + len(still) + 1  # nothing per attempt
+    finally:
+        await db.close()
