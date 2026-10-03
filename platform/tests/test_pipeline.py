@@ -376,3 +376,30 @@ async def test_trusted_high_tokens_held_for_review(tmp_path, tokens, expect):
         else:
             st = await ctx.wait(token, sub["id"], until=("published",))
         assert st["status"] == expect
+
+
+async def test_pipeline_logs_every_transition(tmp_path, caplog):
+    caplog.set_level("INFO", logger="tac.pipeline")
+    async with make_ctx(tmp_path, automod_client=fake_claude(UNSAFE)) as ctx:
+        token = await ctx.login("alex")
+        sub = (await ctx.submit(token)).json()
+        await ctx.wait(token, sub["id"])
+    lines = [r.getMessage() for r in caplog.records if r.name == "tac.pipeline" and sub["id"] in r.getMessage()]
+    steps = [ln.split(": ", 1)[1].split(" ")[0] for ln in lines]
+    assert steps == ["claimed", "render", "render", "automod", "final"], lines
+    assert lines[1].endswith("render start (backend=local)")
+    assert " render finish in " in lines[2] and "check_exit=0 render_exit=0 timed_out=False" in lines[2]
+    assert "automod verdict safe=False on_brief=True flags=malicious_code cost=$0.0000" in lines[3]
+    assert lines[4].endswith("final status rejected (automod: malicious_code)")
+
+
+async def test_pipeline_logs_trusted_auto_publish(tmp_path, caplog):
+    caplog.set_level("INFO", logger="tac.pipeline")
+    async with make_ctx(tmp_path, automod_client=fake_claude(SAFE)) as ctx:
+        token = await ctx.login("alex")
+        await ctx.app.state.db.execute("UPDATE users SET trusted = 1 WHERE handle = 'alex'")
+        sub = (await ctx.submit(token)).json()
+        await ctx.wait(token, sub["id"], until=("published",))
+    msgs = [r.getMessage() for r in caplog.records if r.name == "tac.pipeline"]
+    assert f"pipeline {sub['id']}: final status in_review" in msgs
+    assert f"pipeline {sub['id']}: auto-published (trusted, clean automod)" in msgs

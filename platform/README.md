@@ -221,6 +221,22 @@ submission rendered ─▶ this month's automod_spend >= budget ? ─ yes ─▶
   can pass the cap by at most `TAC_RENDER_CONCURRENCY − 1` calls, each at most the worst case above (~$0.03).
   With the default concurrency of 1 there is no overshoot.
 
+## Pipeline log
+
+Every job writes INFO lines on the `tac.pipeline` logger, one per transition, keyed by submission id:
+
+```
+pipeline <id>: claimed (queued -> rendering)
+pipeline <id>: render start (backend=docker)
+pipeline <id>: render finish in 41.3s (check_exit=0 render_exit=0 timed_out=False backend_error=False)
+pipeline <id>: automod verdict safe=True on_brief=True flags=- cost=$0.01012
+pipeline <id>: final status in_review
+pipeline <id>: auto-published (trusted, clean automod)        # only for trusted handles
+```
+
+Automod's own line (`tac.automod`: `automod call: model=… in=… out=… cost=$…`) sits between render finish and the
+decision. `audit_log` keeps the durable record.
+
 ## Limits
 
 - `piece.py` ≤ 200 KB, UTF-8.

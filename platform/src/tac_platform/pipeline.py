@@ -13,6 +13,7 @@ import logging
 import re
 import shutil
 import tempfile
+import time
 from pathlib import Path
 
 from .automod import Automod
@@ -24,6 +25,20 @@ from .renderer import Renderer, make_renderer
 from .storage import MediaStore
 
 log = logging.getLogger("tac.pipeline")
+
+
+def _rc(res) -> str:
+    return "-" if res is None else str(res.returncode)
+
+
+def _automod_summary(am, reasons: list[str]) -> str:
+    """One line for the log: what automod decided, and what it cost."""
+    if am.verdict is not None:
+        v = am.verdict
+        head = f"verdict safe={v.safe} on_brief={v.on_brief} flags={','.join(v.flags) or '-'}"
+    else:
+        head = "budget reached" if am.budget else "skipped" if am.skipped else f"no verdict ({'; '.join(reasons)})"
+    return f"{head} cost=${am.cost_usd:.5f}"
 
 RENDER_FILES = {"preview.webp", "og.jpg", "stats.json"}
 PROCESS_RE = re.compile(r"^process/[A-Za-z0-9_-]{1,40}\.webp$")
@@ -126,7 +141,8 @@ class Pipeline:
             if row is None:
                 return None
             await tx.audit("system", "claim", row["id"], "queued", "rendering")
-            return row["id"]
+        log.info("pipeline %s: claimed (queued -> rendering)", row["id"])
+        return row["id"]
 
     # ------------------------------------------------------------ one job
 
@@ -159,7 +175,12 @@ class Pipeline:
             await asyncio.to_thread(d.mkdir)
         await self._materialize(sub_id, piece_dir)
         # 1+2. static check then render, both inside the render backend (they touch untrusted source)
+        log.info("pipeline %s: render start (backend=%s)", sub_id, self.settings.renderer)
+        started = time.monotonic()
         job = await self.renderer.run_job(piece_dir, out_dir, work)
+        log.info("pipeline %s: render finish in %.1fs (check_exit=%s render_exit=%s timed_out=%s backend_error=%s)",
+                 sub_id, time.monotonic() - started, _rc(job.check), _rc(job.render), job.timed_out,
+                 job.backend_error is not None)
         if job.timed_out:
             raise Rejected([f"render timed out after {self.settings.render_timeout_s:.0f} s"])
         if job.backend_error:
@@ -216,6 +237,7 @@ class Pipeline:
             elif not v.on_brief:
                 reasons = ["automod: off brief"]
 
+        log.info("pipeline %s: automod %s", sub_id, _automod_summary(am, reasons))
         async with self.db.tx() as tx:
             await tx.execute(
                 "UPDATE submissions SET stats_json = ?, process_n = ?, critique = ?, flags_json = ?, automod_json = ?,"
@@ -233,7 +255,8 @@ class Pipeline:
         tokens = json.loads(row["meta_json"]).get("tokens")
         high_tokens = isinstance(tokens, int) and tokens > HIGH_TOKENS  # feeds the public counter: a human checks it
         if clean and row["trusted"] and not high_tokens:
-            await self.publisher.publish(sub_id, "system:trusted", from_status="in_review")
+            if await self.publisher.publish(sub_id, "system:trusted", from_status="in_review"):
+                log.info("pipeline %s: auto-published (trusted, clean automod)", sub_id)
 
     async def _store_render(self, sub_id: str, out_dir: Path) -> tuple[dict, int]:
         stats, main, process = await asyncio.to_thread(_collect_render, out_dir)
@@ -252,3 +275,5 @@ class Pipeline:
             )
             if ok:
                 await tx.audit("system", "pipeline_result", sub_id, "rendering", status, "; ".join(reasons) or None)
+        if ok:
+            log.info("pipeline %s: final status %s%s", sub_id, status, f" ({'; '.join(reasons)})" if reasons else "")
