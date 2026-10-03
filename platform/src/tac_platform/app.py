@@ -160,7 +160,7 @@ def create_app(settings: Settings | None = None, automod: Automod | None = None)
             await pipeline.stop()
             await db.close()
 
-    app = FastAPI(title="spare cycles", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="terminal art club", version="0.1.0", lifespan=lifespan)
     app.add_middleware(LimitsMiddleware)
 
     @app.exception_handler(ApiError)

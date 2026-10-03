@@ -197,7 +197,6 @@ async def test_device_forms_post_relative_github(tmp_path, monkeypatch):
         assert _resolve(path, _action(r.text), prefix="") == "/device/github", path
 
 
-def test_web_login_form_posts_relative():
-    from tac_platform.web_auth import _login_form
-
-    assert not ABSOLUTE_ACTION.search(_login_form("/me"))
+async def test_web_login_form_posts_relative(ctx):
+    async with ctx.client() as c:
+        assert not ABSOLUTE_ACTION.search((await c.get("/v1/auth/web/login", params={"return": "/me"})).text)

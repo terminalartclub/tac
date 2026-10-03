@@ -20,7 +20,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from .db import now_iso
 from .models import HANDLE_RE, DeviceCodeOut, TokenIn, TokenOut
 from .sessions import cookie_secure, require_csrf, session_row
-from .web import ApiError, ip_key, page, sha256_hex, take_rate_token
+from .web import ApiError, ip_key, page, sha256_hex, site_home, take_rate_token
 
 router = APIRouter()
 log = logging.getLogger("tac.auth")
@@ -152,13 +152,14 @@ def _device_form(request: Request, code: str = "", handle: str = "", error: str 
     action = html.escape(relative_to(request, "/device/github" if github else "/device"))
     button = "continue with GitHub" if github else "connect"
     return page(
-        "spare cycles · connect",
-        "<h1>spare cycles</h1><p class=muted>Connect your terminal to the Terminal Art Club gallery.</p>"
+        "terminal art club · connect",
+        "<h1>connect</h1><p class=muted>Connect your terminal to the terminal art club gallery.</p>"
         f"<div class=card><form method=post action='{action}'>{err}"
         "<label for=user_code>code shown in your terminal</label>"
         f"<input id=user_code name=user_code type=text required value='{html.escape(code)}' autocomplete=off"
         " placeholder='XXXX-XXXX'>"
         f"{handle_field}<p><button class=primary type=submit>{button}</button></p></form></div>",
+        home=site_home(request),
     )
 
 
@@ -215,9 +216,10 @@ async def device_submit(request: Request, user_code: str = Form(""), handle: str
     if error:
         return HTMLResponse(_device_form(request, code, handle, error), status)
     return page(
-        "spare cycles · connected",
+        "terminal art club · connected",
         f"<h1>connected</h1><div class=card><p class=ok>You are <b>{html.escape(handle)}</b>.</p>"
         "<p class=muted>Go back to your terminal; it picks this up within a few seconds.</p></div>",
+        home=site_home(request),
     )
 
 
@@ -337,4 +339,9 @@ async def github_callback(request: Request, code: str = "", state: str = ""):
         return HTMLResponse(_device_form(request, error=error, github=True), 409)
     if not await _approve(request, user_code, row["id"], row["handle"]):
         return HTMLResponse(_device_form(request, error="That code expired. Start again.", github=True), 400)
-    return page("spare cycles · connected", f"<h1>connected as {html.escape(row['handle'])}</h1>")
+    return page(
+        "terminal art club · connected",
+        f"<h1>connected as {html.escape(row['handle'])}</h1>"
+        "<div class=card><p class=muted>Go back to your terminal; it picks this up within a few seconds.</p></div>",
+        home=site_home(request),
+    )

@@ -47,7 +47,7 @@ def require_admin(request: Request) -> None:
 @router.get("/admin/login")
 async def admin_login(request: Request, token: str = ""):
     if not _token_ok(request, token):
-        return HTMLResponse(page("admin", "<h1>admin</h1><p class=err>Bad or missing token.</p>"), 401)
+        return HTMLResponse(page("terminal art club · admin", "<h1>admin</h1><p class=err>Bad or missing token.</p>"), 401)
     resp = RedirectResponse("/admin", status_code=303)
     secure = request.app.state.settings.public_base_url.startswith("https://")
     resp.set_cookie(COOKIE, token, httponly=True, samesite="strict", secure=secure, max_age=12 * 3600)
@@ -207,22 +207,6 @@ async function act(url, body) {
 function withReason(url, id) { act(url, {reason: document.getElementById(id).value || 'rejected by moderator'}); }
 """
 
-ADMIN_CSS = """
-.item { display:grid; grid-template-columns: minmax(0,320px) minmax(0,1fr); gap:20px; }
-@media (max-width: 760px) { .item { grid-template-columns: 1fr; } }
-.item img.preview { width:100%; border-radius:7px; background:#08080f; image-rendering:pixelated; }
-.procs { display:flex; gap:6px; flex-wrap:wrap; margin-top:8px; } .procs img { width:72px; border-radius:4px; }
-.kv { display:grid; grid-template-columns: max-content 1fr; gap:2px 12px; font-size:13px; }
-.kv dt { color:var(--muted); } .kv dd { margin:0; font-family:"Roboto Mono", monospace; overflow-wrap:anywhere; }
-.chip { display:inline-block; padding:1px 8px; border-radius:99px; border:1px solid var(--bad); color:var(--bad);
-  font-size:12px; margin:0 4px 4px 0; }
-.actions { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:12px; }
-.actions input { max-width:260px; }
-section > h2 { margin-top:32px; } .count { color:var(--muted); font-weight:400; }
-table.audit { width:100%; border-collapse:collapse; font-size:12px; } table.audit td { padding:3px 6px;
-  border-top:1px solid var(--line); font-family:"Roboto Mono", monospace; vertical-align:top; }
-"""
-
 
 def _house_button(it: dict) -> str:
     h, on = e(it["handle"]), it["house_artist"]
@@ -288,11 +272,12 @@ async def admin_page(request: Request):
         require_admin(request)
     except ApiError:
         return HTMLResponse(
-            page("admin", "<h1>admin</h1><p class=muted>Sign in with <code>/admin/login?token=…</code>.</p>"), 401
+            page("terminal art club · admin",
+                 "<h1>admin</h1><p class=muted>Sign in with <code>/admin/login?token=…</code>.</p>"), 401
         )
     q = await _queue(request)
     audit = await request.app.state.db.fetchall("SELECT * FROM audit_log ORDER BY id DESC LIMIT 40")
-    parts = [f"<style>{ADMIN_CSS}</style><script>{JS}</script><h1>spare cycles · review</h1>"]
+    parts = [f"<script>{JS}</script><h1>review</h1>"]
     for key, title, mode in (("in_review", "In review", "review"), ("hidden", "Hidden by reports", "hidden"),
                              ("published", "Published", "published")):
         parts.append(f"<section><h2>{title} <span class=count>{len(q[key])}</span></h2>")
@@ -304,4 +289,4 @@ async def admin_page(request: Request):
         for a in audit
     )
     parts.append(f"<section><h2>Audit log</h2><div class=card><table class=audit>{rows}</table></div></section>")
-    return page("spare cycles · admin", "".join(parts))
+    return page("terminal art club · admin", "".join(parts), wide=True)
