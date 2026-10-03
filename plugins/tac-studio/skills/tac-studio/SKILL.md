@@ -116,14 +116,14 @@ concept question below, and only in an interactive session.
 
 ## The loop
 
-Work in `./tac-work/<name>/` (relative to the current directory; create it). For each iteration K:
+Work in `./tac-work/<name>/` (relative to the project directory; create it). Never `cd`. For each iteration K:
 
 1. Write `tac-work/<name>/iter-K.py`.
 2. Render: `"${CLAUDE_PLUGIN_ROOT}/bin/tac" sheet tac-work/<name>/iter-K.py --out tac-work/<name>/iter-K/`
    prints the loop length plus motion, seam and void stats, and writes `sheet.png` (5 frames across the loop),
    `seam.png` (last frame | first frame) and full-res `frame-*.png`.
 3. **Read `sheet.png` and `seam.png`, and at least one full-res frame.** Actually look at them.
-4. Critique in `tac-work/<name>/notes.md` (append) under `### iter-K`, with bullets
+4. Critique in `tac-work/<name>/notes.md` (append with the Edit tool, not a shell heredoc or `>>`) under `### iter-K`, with bullets
    `- stats:`, `- works:`, `- biggest problem:` and `- next:`. Be as harsh as a gallery curator.
    (The submission tool quotes these bullets as captions on the process frames.)
 5. Fix the biggest problem. Repeat.
@@ -154,7 +154,7 @@ Answer each in notes.md under `## self-review`, with evidence from the frames:
 ## Deliverables
 
 In `tac-work/<name>/`:
-- `<name>.py`: the final piece (a copy of the best iteration)
+- `<name>.py`: the final piece (the best iteration, written with the Write tool, not `cp`)
 - `notes.md`: concept, iteration log, self-review, and a `## catalog description` section with one
   or two sentences in catalog voice (present tense, concrete, quiet)
 - optional: `tac gif …/<name>.py --out …/preview.gif` and `tac mp4 …/<name>.py --out …/reel.mp4` (the mp4 needs ffmpeg)
@@ -168,3 +168,4 @@ When done, tell the user: `/tac:play <name>` to watch it, and `/tac:submit <name
 - Never screencapture or open windows. `tac play` is for the human only, in their own terminal.
 - Never edit files outside `./tac-work/` without asking.
 - Never kill processes by pattern.
+- One command per Bash call: no `;`, `&&`, pipes or `echo $?` (the exit status is reported anyway).

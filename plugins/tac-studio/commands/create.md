@@ -27,7 +27,8 @@ Arguments from the user (may be empty): $ARGUMENTS
    don't ask.
 7. At every iteration, show one line (sheet path + stats). Take any notes the user gives into the next
    iteration and log them. Never interrogate.
-8. Work only in `./tac-work/<name>/`. A full piece takes at least 3 real iterations (usually 4–8). A sketch
+8. Work only in `./tac-work/<name>/`, and never `cd`. Write and append files with the Write and Edit tools (not `cp`,
+   heredocs or `>>`), and run one command per Bash call. A full piece takes at least 3 real iterations (usually 4–8). A sketch
    takes 1–3, looking at the sheets each time.
 9. Finish with `<name>.py`, plus `notes.md` (iteration log, self-review, `## catalog description`).
 10. End by telling the user the name, the one-line description and the next steps:

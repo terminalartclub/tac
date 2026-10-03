@@ -51,6 +51,39 @@ love, things to avoid. `/tac:style` (`tacctl style`) creates it from a short com
 Before a run starts, `tacctl fit` checks the spare weekly window (when the usage cache exists). If the run
 won't fit, Claude warns you and doesn't start unless you override with `--force`.
 
+### Headless runs: a project allowlist
+
+`claude -p "/tac:create …"` can't answer permission prompts, so allow what a run needs in the project's
+`.claude/settings.json`. The skill never `cd`s, writes files with the Write and Edit tools (never `cp`, heredocs
+or `>>`), and runs one command per Bash call, so these rules cover a whole run:
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "Edit(/tac-work/**)",
+      "Read(/tac-work/**)",
+      "Bash(\"<PLUGIN_ROOT>/bin/tac\" sheet *)",
+      "Bash(\"<PLUGIN_ROOT>/bin/tac\" frame *)",
+      "Bash(\"<PLUGIN_ROOT>/bin/tacctl\" fit *)",
+      "Bash(\"<PLUGIN_ROOT>/bin/tacctl\" start *)",
+      "Bash(\"<PLUGIN_ROOT>/bin/tacctl\" style *)",
+      "Bash(\"<PLUGIN_ROOT>/bin/tacctl\" direct *)",
+      "Bash(\"<PLUGIN_ROOT>/bin/tacctl\" gallery)"
+    ]
+  }
+}
+```
+
+- `<PLUGIN_ROOT>` is the installed plugin's absolute path, e.g.
+  `/Users/you/.claude/plugins/cache/terminalartclub/tac/0.1.0` (`ls ~/.claude/plugins/cache/terminalartclub/tac/`).
+  It contains the version, so update the rules after a plugin update.
+- Bash rules match the command text as written, including the quotes the skill puts around the binary.
+- File rules are `Edit(...)`, not `Write(...)`: Claude Code checks writes against `Edit` rules and never consults a
+  `Write(path)` rule. The leading `/` anchors the path at the project root, so it holds whatever the shell's cwd is;
+  `./tac-work/**` would follow the cwd.
+- Leave `/tac:submit` and `/tac:login` out of headless runs: submitting needs a person to confirm the rights line.
+
 ### Optional: the spare-capacity nudge
 
 A SessionStart hook prints one line only when your weekly window resets within 24 h and is under 80% used:
