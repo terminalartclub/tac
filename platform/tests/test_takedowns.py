@@ -611,6 +611,78 @@ async def test_blocked_identities_hash_keyed_table_migrates_to_ids(tmp_path):
         await db.close()
 
 
+RAW_GH_ID = 918273645012  # distinctive: can't collide with a timestamp, count or row id
+
+
+async def _rows_holding(db, needle: str) -> list[str]:
+    """Every table.column whose value contains `needle`, across the whole DB."""
+    hits = []
+    for t in await db.fetchall("SELECT name FROM sqlite_master WHERE type = 'table'"):
+        for row in await db.fetchall(f"SELECT * FROM {t['name']}"):
+            hits += [f"{t['name']}.{k}" for k in row.keys() if needle in str(row[k])]
+    return hits
+
+
+@pytest.mark.parametrize("path", ["self", "admin_suspended", "admin_active"])
+async def test_no_raw_github_id_survives_account_deletion(tmp_path, monkeypatch, path):
+    async def fake_identity(st, code):
+        return RAW_GH_ID, "alexgh"
+
+    monkeypatch.setattr(web_auth, "github_identity", fake_identity)
+    async with make_ctx(tmp_path, worker_enabled=False, auth_mode="github", github_client_id="cid") as ctx:
+        db = ctx.app.state.db
+        async with ctx.client() as c:
+            r = await c.get("/v1/auth/web/login")
+            state = parse_qs(urlsplit(r.headers["location"]).query)["state"][0]
+            step = await c.get("/v1/auth/web/github/callback", params={"code": "gh", "state": state})
+            tok = re.search(r"name=token value='([^']+)'", step.text).group(1)
+            assert (await c.post("/v1/auth/web/terms", data={"token": tok, "agree": "1"})).status_code == 303
+            csrf = (await c.get("/v1/auth/web/csrf")).json()["csrf"]
+            # a user_created row as written before this fix (prod rows predate it)
+            await db.execute("INSERT INTO audit_log (at, actor, action, detail) VALUES ('x', 'user:alexgh',"
+                             " 'user_created', ?)", (f"github:{RAW_GH_ID}",))
+            assert await _rows_holding(db, str(RAW_GH_ID)) == ["users.github_id", "audit_log.detail"]
+            if path == "self":
+                r = await c.request("DELETE", "/v1/me", json={"confirm": "alexgh"},
+                                    headers={"x-tac-csrf": csrf, "sec-fetch-site": "same-site"})
+                assert r.status_code == 204
+        if path != "self":
+            async with ctx.admin() as a:
+                if path == "admin_suspended":
+                    await a.post("/v1/admin/users/alexgh/suspend", json={"reason": "DMCA-2026-007"})
+                assert (await a.post("/v1/admin/users/alexgh/delete", json={"reason": "ERASE-1"})).status_code == 200
+        assert await _rows_holding(db, str(RAW_GH_ID)) == []
+        assert (await db.fetchone("SELECT COUNT(*) AS n FROM users"))["n"] == 0
+        created = await db.fetchall("SELECT detail FROM audit_log WHERE action = 'user_created'")
+        assert [x["detail"] for x in created] == ["github", "github"]  # the handle stays in actor; the id doesn't
+        blocked = (await db.fetchone("SELECT COUNT(*) AS n FROM blocked_identities"))["n"]
+        assert blocked == (1 if path == "admin_suspended" else 0)
+
+
+async def test_raw_github_ids_in_old_audit_rows_are_scrubbed_once_on_open(tmp_path):
+    import aiosqlite
+
+    from tac_platform.db import Database
+
+    path = tmp_path / "old.sqlite3"
+    async with aiosqlite.connect(path) as c:  # a deleted user's row left behind by the old code
+        await c.execute("CREATE TABLE audit_log (id INTEGER PRIMARY KEY, at TEXT NOT NULL, actor TEXT NOT NULL,"
+                        " action TEXT NOT NULL, submission_id TEXT, from_status TEXT, to_status TEXT, detail TEXT)")
+        await c.executemany("INSERT INTO audit_log (at, actor, action, detail) VALUES ('x', ?, ?, ?)", [
+            ("user:gone", "user_created", f"github:{RAW_GH_ID}"), ("user:dev", "user_created", "web-dev"),
+            ("admin", "suspend", "github:not-an-id-but-a-reason")])  # only user_created rows are touched
+        await c.commit()
+    db = Database(path)
+    await db.open()
+    try:
+        rows = await db.fetchall("SELECT detail FROM audit_log ORDER BY id")
+        assert [r["detail"] for r in rows] == ["github", "web-dev", "github:not-an-id-but-a-reason"]
+        assert await _rows_holding(db, str(RAW_GH_ID)) == []
+        assert (await db.fetchone("SELECT value FROM kv WHERE key = 'audit_github_ids_scrubbed'"))["value"] == "1"
+    finally:
+        await db.close()
+
+
 def test_publisher_refuses_an_empty_secret():
     from tac_platform.publish import Publisher
 

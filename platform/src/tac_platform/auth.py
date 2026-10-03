@@ -323,7 +323,7 @@ async def user_for_github(st, gh_id: int, login: str):
         ):
             return None
         await tx.execute("INSERT INTO users (handle, github_id, created_at) VALUES (?, ?, ?)", (login, gh_id, now_iso()))
-        await tx.audit(f"user:{login}", "user_created", detail=f"github:{gh_id}")
+        await tx.audit(f"user:{login}", "user_created", detail="github")  # never the raw id: the log outlives the user
         return await tx.fetchone("SELECT id, handle FROM users WHERE github_id = ?", (gh_id,))
 
 

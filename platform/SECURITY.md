@@ -209,6 +209,9 @@ docker run --rm --name tac-render-<random> --network none --read-only --tmpfs /t
     actions also keep a short moderator reason, such as a complaint reference, so we can answer takedown
     claims and enforce the repeat-infringer rule. No content is kept.
   - A suspended account can't sign in to delete itself: email hello@terminalart.club and we delete it.
+  - No raw GitHub id outlives the account: it lives only in `users.github_id` (deleted with the row). The
+    `user_created` audit row says just `github`; older rows that carried `github:<id>` are scrubbed on delete
+    and, once, at startup. The GitHub login is kept only as the handle it became (already public).
 
 ### Takedowns and suspension
 

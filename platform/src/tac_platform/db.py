@@ -191,6 +191,15 @@ class Database:
                 "DROP TABLE blocked_identities_old;"
                 "COMMIT;"
             )
+        if await self.fetchone("SELECT 1 FROM kv WHERE key = 'audit_github_ids_scrubbed'") is None:
+            # once: user_created rows used to carry "github:<raw id>", which outlived account deletion. The live
+            # users row still has github_id; the log keeps only that the account came from GitHub.
+            await self.conn.executescript(
+                "BEGIN IMMEDIATE;"
+                "UPDATE audit_log SET detail = 'github' WHERE action = 'user_created' AND detail LIKE 'github:%';"
+                "INSERT INTO kv (key, value) VALUES ('audit_github_ids_scrubbed', '1');"
+                "COMMIT;"
+            )
         audit_cols = {r["name"] for r in await self.fetchall("PRAGMA table_info(audit_log)")}
         for col in ("target", "data_json"):
             if col not in audit_cols:

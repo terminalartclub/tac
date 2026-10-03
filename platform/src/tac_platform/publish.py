@@ -208,6 +208,8 @@ class Publisher:
                 for table in ("access_tokens", "web_sessions", "device_codes"):
                     await tx.execute(f"DELETE FROM {table} WHERE user_id = ?", (user_id,))
                 await tx.execute("DELETE FROM users WHERE id = ?", (user_id,))
+                if u is not None and u["github_id"] is not None:  # rows written before user_created dropped the id
+                    await tx.execute("UPDATE audit_log SET detail = 'github' WHERE detail = ?", (f"github:{u['github_id']}",))
                 if actor is not None and u is not None and u["suspended_at"] is not None:
                     blocked = await tx.fetchone(
                         "INSERT INTO blocked_identities (github_id_hash, created_at, ref) VALUES (?, ?, ?)"
