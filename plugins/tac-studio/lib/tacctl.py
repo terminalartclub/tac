@@ -13,7 +13,8 @@
     tacctl play <name>                 print the live `tac play` command, build + open the review page
     tacctl gallery                     community pieces as validated handle/slug lines (no free text)
 
-Env: TAC_API (default http://127.0.0.1:8790), TAC_WORK (default ./tac-work).
+Env: TAC_API (default http://127.0.0.1:8790), TAC_WORK (default ./tac-work), TAC_SITE_URL (optional:
+the gallery site's origin, for trusting piece links; default = the API host's last two labels).
 """
 
 from __future__ import annotations
@@ -654,7 +655,7 @@ def cmd_submit(a: argparse.Namespace) -> int:
     record = {"id": resp["id"], "api": base, "url": resp.get("url"), "piece_url": resp.get("piece_url"),
               "submitted": time.time()}
     (work_root() / a.name / ".submission.json").write_text(json.dumps(record, indent=2))
-    share = resp.get("piece_url") or resp.get("url")  # the site page; older platforms only give the status URL
+    share = share_url(resp, base)
     if a.no_wait:
         print_status(resp)
         print(submitted_line(share))
@@ -669,6 +670,42 @@ def cmd_submit(a: argparse.Namespace) -> int:
         return 1
     print(submitted_line(share))
     return 0
+
+
+def site_hosts(base: str) -> set[str]:
+    """Hosts a piece link may point at: the API host, plus the site host. That is TAC_SITE_URL's host
+    when set, else the API host's last two labels (api.terminalart.club -> terminalart.club). No public
+    suffix list: under a multi-label suffix such as co.uk, set TAC_SITE_URL."""
+    api_host = (urlsplit(base).hostname or "").lower()
+    hosts = {api_host}
+    site = os.environ.get("TAC_SITE_URL")
+    if site:
+        try:
+            hosts.add((urlsplit(site).hostname or "").lower())
+        except ValueError:
+            pass
+    elif not is_loopback(api_host) and api_host.count(".") >= 1:
+        try:
+            ipaddress.ip_address(api_host)
+        except ValueError:
+            hosts.add(".".join(api_host.split(".")[-2:]))
+    hosts.discard("")
+    return hosts
+
+
+def share_url(resp: dict[str, Any], base: str) -> Any:
+    """piece_url only if it is https, clean (no whitespace, control chars, backslash or userinfo) and on
+    the site or API host; it is printed into Claude's context. Otherwise the status URL."""
+    pu = resp.get("piece_url")
+    if isinstance(pu, str) and not _URL_JUNK.search(pu):
+        try:
+            u = urlsplit(pu)
+            if u.scheme == "https" and "@" not in u.netloc and (u.hostname or "").lower() in site_hosts(base) \
+                    and u.port in (None, 443):
+                return pu
+        except ValueError:
+            pass
+    return resp.get("url")
 
 
 def submitted_line(url: Any) -> str:
