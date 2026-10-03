@@ -61,7 +61,7 @@ def _login_form(request: Request, ret: str, handle: str = "", error: str = "") -
     # relative action: works direct and behind the site's /api proxy
     return page(
         "terminal art club · sign in",
-        "<h1>sign in <span class=sub>· local dev: pick an existing handle or a new one</span></h1>"
+        "<h1>sign in <span class=sub>local dev: pick an existing handle or a new one</span></h1>"
         f"<div class=card><form method=post action='login'>{err}"
         f"<input type=hidden name=return value='{html.escape(safe_return(ret))}'>"
         "<label for=handle>handle (a-z, 0-9, dash; 2-24)</label>"

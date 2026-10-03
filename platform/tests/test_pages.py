@@ -40,7 +40,7 @@ async def test_dev_pages_share_style(ctx):
     async with ctx.admin() as a:
         pages["admin"] = await a.get("/admin")
     h1 = re.search(r"<h1>(.*?)</h1>", pages["web login"].text).group(1)
-    assert re.sub(r"<[^>]+>", "", h1) == "sign in · local dev: pick an existing handle or a new one"
+    assert re.sub(r"<[^>]+>", "", h1) == "sign in local dev: pick an existing handle or a new one"
     assert "<main class=wide>" in pages["admin"].text and "<main>" in pages["web login"].text
     for name, r in pages.items():
         assert_styled(name, r)
