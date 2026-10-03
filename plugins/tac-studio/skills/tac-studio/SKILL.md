@@ -12,7 +12,7 @@ you see is what ships.
 Tools (bundled with this plugin; they work from any directory and need `uv` on PATH):
 
 - `"${CLAUDE_PLUGIN_ROOT}/bin/tac"`: virtual screen (`sheet`, `frame`, `gif`, `mp4`, `play`)
-- `"${CLAUDE_PLUGIN_ROOT}/bin/tacctl"`: `prepare` / `submit` / `play` (used by the /tac commands); `gallery` lists community `handle/slug` ids
+- `"${CLAUDE_PLUGIN_ROOT}/bin/tacctl"`: `prepare` / `submit` / `play` (used by the /tac commands); `gallery` lists curated `handle/slug` ids (house artists, club picks)
 
 ## Ground truth to read first
 

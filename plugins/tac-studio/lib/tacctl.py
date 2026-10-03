@@ -11,7 +11,7 @@
     tacctl style [--print] [--log N]   open/create ~/.config/tac/style.md; --print / --log for the skill
     tacctl direct <name> seed|pick|note "<text>" [--iter K]   log the human's steering in notes.md
     tacctl play <name>                 print the live `tac play` command, build + open the review page
-    tacctl gallery                     community pieces as validated handle/slug lines (no free text)
+    tacctl gallery                     curated pieces (house artists, club picks) as handle/slug lines
 
 Env: TAC_API (default http://127.0.0.1:8790), TAC_WORK (default ./tac-work), TAC_SITE_URL (optional:
 the gallery site's origin, for trusting piece links; default = the API host's last two labels).
@@ -807,17 +807,27 @@ def cmd_mine(a: argparse.Namespace) -> int:
     return 0
 
 
-# ── gallery: what the community already made, as ids only ───────────────
+# ── gallery: curated pieces only, as ids only ─────────────────────────────
+
+
+def curated(p: Any) -> bool:
+    """A house-artist piece or a club pick. Both flags are admin-set on the platform (users.house_artist via
+    the admin endpoint, submissions.pick with no public writer), never taken from submitted meta. Strict
+    `is True`: a truthy string or number from a malformed feed doesn't count."""
+    return isinstance(p, dict) and (p.get("house_artist") is True or p.get("pick") is True)
 
 
 def gallery_ids(doc: Any) -> tuple[list[str], int]:
-    """(valid "handle/slug" ids in feed order, count dropped). Titles, descriptions and bios are
-    community-written text; they never leave this function, so they never reach Claude's context."""
+    """(valid "handle/slug" ids of curated pieces in feed order, count of curated entries dropped as invalid).
+    Community pieces are skipped entirely: even a validated slug is a stranger's words, and it would land
+    in another user's Claude context. Titles, descriptions and bios never leave this function."""
     ids: list[str] = []
     dropped = 0
     pieces = doc.get("pieces") if isinstance(doc, dict) else None
     for p in pieces if isinstance(pieces, list) else []:
-        h, s = (p.get("handle"), p.get("slug")) if isinstance(p, dict) else (None, None)
+        if not curated(p):
+            continue
+        h, s = p.get("handle"), p.get("slug")
         if isinstance(h, str) and isinstance(s, str) and HANDLE_RE.match(h) and SLUG_RE.match(s):
             if f"{h}/{s}" not in ids:
                 ids.append(f"{h}/{s}")
@@ -902,7 +912,7 @@ def main(argv: list[str] | None = None) -> int:
     dr.add_argument("--iter", type=int)
     st = sp.add_parser("status")
     st.add_argument("id")
-    sp.add_parser("gallery", help="community pieces as handle/slug lines, nothing else")
+    sp.add_parser("gallery", help="curated pieces (house artists, club picks) as handle/slug lines, nothing else")
     pl = sp.add_parser("play")
     pl.add_argument("name")
     pl.add_argument("--no-page", action="store_true")
