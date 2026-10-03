@@ -83,3 +83,20 @@ def test_statusline_helper_without_rate_limits_writes_nothing(tmp_path: Path) ->
                        capture_output=True, text=True, env=env)
     assert r.returncode == 0 and r.stdout == ""
     assert not (tmp_path / "tac" / "usage.json").exists()
+
+
+def test_hook_never_overwrites_existing_statusline_helper(tmp_path: Path) -> None:
+    helper = tmp_path / "data" / "statusline_cache.py"
+    assert run_hook(tmp_path, None) == ""  # missing → copied, silently
+    assert helper.read_bytes() == (SCRIPTS / "statusline_cache.py").read_bytes()
+    assert run_hook(tmp_path, None) == ""  # identical → nothing to say
+    helper.write_text("# the user's reviewed (older) copy\n")
+    out = run_hook(tmp_path, None)
+    assert helper.read_text() == "# the user's reviewed (older) copy\n"  # left alone
+    msg = json.loads(out)["systemMessage"]
+    assert "\n" not in msg and "differs from this plugin's version" in msg and str(helper) in msg
+
+
+def test_hook_makes_no_network_calls() -> None:
+    src = (SCRIPTS / "nudge.py").read_text()
+    assert not any(m in src for m in ("urllib", "http", "socket", "requests", "subprocess"))

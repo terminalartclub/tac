@@ -3,15 +3,17 @@ saying what fits in the spare capacity (it expires at reset, so it's about fit, 
 
 Reads ~/.cache/tac/usage.json, written by the opt-in statusline helper (statusline_cache.py).
 Silent (no output) when the cache is missing/stale or the condition doesn't hold.
-Also keeps a copy of statusline_cache.py in ${CLAUDE_PLUGIN_DATA}, a path that survives
-plugin updates, so the user's statusline setting can point at it.
+Also puts a copy of statusline_cache.py in ${CLAUDE_PLUGIN_DATA}, a path that survives plugin
+updates, so the user's statusline setting can point at it. The user's statusLine runs that copy on
+every render, so it is written only when missing and never overwritten: a plugin update can't
+silently swap the code it runs. When the plugin's version differs, the hook says so in one line.
+No network calls.
 """
 
 from __future__ import annotations
 
 import json
 import os
-import shutil
 import sys
 import time
 from pathlib import Path
@@ -85,25 +87,32 @@ def message(data: dict, now: float, pct_per_piece: float = DEFAULT_PIECE_PCT) ->
     return f"weekly window ~{used:.0f}% used · resets in {when} · {what}"
 
 
-def sync_helper() -> None:
+def sync_helper() -> str | None:
+    """Copy the statusline helper into ${CLAUDE_PLUGIN_DATA} if it is missing. An existing copy is
+    left as is; returns a one-line notice when it differs from this plugin's version."""
     data_dir = os.environ.get("CLAUDE_PLUGIN_DATA")
     if not data_dir:
-        return
+        return None
     src = Path(__file__).with_name("statusline_cache.py")
     dst = Path(data_dir) / "statusline_cache.py"
     try:
-        if not dst.exists() or dst.read_bytes() != src.read_bytes():
+        if not dst.exists() and not dst.is_symlink():
             dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(src, dst)
+            with open(dst, "xb") as fh:  # exclusive create: never clobbers a copy made meanwhile
+                fh.write(src.read_bytes())
+            return None
+        if dst.read_bytes() != src.read_bytes():
+            return (f"tac: your statusline helper {dst} differs from this plugin's version; "
+                    f"to update, review and copy {src} over it")
     except OSError:
         pass
+    return None
 
 
 def main() -> int:
-    sync_helper()
-    msg = message(load_cache(), time.time(), piece_pct())
-    if msg:
-        print(json.dumps({"systemMessage": msg}))  # shown to the user, not added to Claude's context
+    lines = [m for m in (sync_helper(), message(load_cache(), time.time(), piece_pct())) if m]
+    if lines:
+        print(json.dumps({"systemMessage": "\n".join(lines)}))  # shown to the user, not added to Claude's context
     return 0
 
 

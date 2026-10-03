@@ -58,6 +58,10 @@ def main() -> int:
         argv = argv[1:]
     if not argv:
         return 0
+    # shell=True on purpose: argv is the user's own statusline command from their settings.json, which
+    # Claude Code itself runs through a shell, so it may hold pipes, `~`, `$VAR` or `&&`. Only that
+    # string is executed. The session JSON (raw) goes to its stdin as data, and nothing from the usage
+    # cache, the plugin's data dir or the TAC platform is ever put into the command.
     cmd = argv[0] if len(argv) == 1 else " ".join(argv)
     r = subprocess.run(cmd, shell=True, input=raw, stdout=subprocess.PIPE)
     sys.stdout.buffer.write(r.stdout)

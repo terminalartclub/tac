@@ -70,8 +70,9 @@ wraps your existing statusline rather than replacing it. In `~/.claude/settings.
 }
 ```
 
-The hook copies the helper to that path (`${CLAUDE_PLUGIN_DATA}`, which survives plugin updates) on
-each session start. With nothing after `--` the statusline prints nothing. `rate_limits` only exists for claude.ai
+The hook copies the helper to that path (`${CLAUDE_PLUGIN_DATA}`, which survives plugin updates) only
+if no copy is there. It never overwrites your copy: when a plugin update ships a different helper, the hook
+prints a one-line notice and you copy it over yourself after a look. With nothing after `--` the statusline prints nothing. `rate_limits` only exists for claude.ai
 Pro/Max, after the session's first response. Without the cache, the hook stays silent.
 
 **Calibrate `piece_pct`**: the share of your weekly window one full piece costs. The default is **15**
