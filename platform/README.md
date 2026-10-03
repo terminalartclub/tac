@@ -96,7 +96,7 @@ site JS: GET /api/v1/auth/web/csrf → X-TAC-CSRF on every PATCH/POST/DELETE mad
 
 - **Dev:** the site's vite dev server proxies `/api` → `http://127.0.0.1:8790` (the site builder adds the proxy). So the cookie is first-party on `localhost:5181`, and `TAC_SITE_URL` stays unset.
 - **Prod:** the cookie is host-only on the API host. `terminalart.club` → `api.terminalart.club` is same-site, so the site's credentialed fetches carry it without a `Domain`; a `Domain=.terminalart.club` cookie would reach (and could be overwritten from) every subdomain.
-- Dev login lets anyone sign in as any handle, existing or new; it is for local use only. `TAC_ENV=prod` refuses to start unless `TAC_AUTH=github`, and `TAC_AUTH=dev` refuses to start unless `TAC_PUBLIC_BASE_URL` (and `TAC_SITE_URL`, when set) is loopback (`127.0.0.1`, `localhost`, `::1`).
+- Dev login lets anyone sign in as any handle, existing or new; it is for local use only. `TAC_ENV=prod` refuses to start unless `TAC_AUTH=github`, and `TAC_AUTH=dev` refuses to start unless the bind `TAC_HOST`, `TAC_PUBLIC_BASE_URL` and `TAC_SITE_URL` (when set) are loopback (`127.0.0.1`, `localhost`, `::1`).
 - **GitHub OAuth app:** set the authorization callback URL to `TAC_PUBLIC_BASE_URL`. Both `/device/github/callback` and `/v1/auth/web/github/callback` are sub-paths of it, which GitHub accepts.
 
 ## Submission meta
@@ -149,7 +149,7 @@ site ──POST /v1/pieces/h/s/view──▶ day_salt(UTC day) ─▶ hash = sha
 | `TAC_RENDER_IMAGE` | `tac-render:local` | image for `docker`; build with `render-image/build.sh` |
 | `TAC_FLY_RENDER_APP` / `TAC_FLY_RENDER_IMAGE` / `TAC_FLY_RENDER_REGION` | `tac-render` / unset / unset | `fly-machine` backend: app, `registry.fly.io/tac-render:<tag>`, region |
 | `FLY_API_TOKEN` | unset | `fly-machine` only: deploy token scoped to the tac-render app (see DEPLOY.md) |
-| `TAC_AUTH` | `dev` | `dev` (handle form; loopback base URL only) or `github` (OAuth; see TODOs in `auth.py`); any other value refuses to start |
+| `TAC_AUTH` | `dev` | `dev` (handle form; loopback `TAC_HOST` and base URL only) or `github` (OAuth; see TODOs in `auth.py`); any other value refuses to start |
 | `TAC_GITHUB_CLIENT_ID` / `TAC_GITHUB_CLIENT_SECRET` | | github mode only |
 | `TAC_ADMIN_TOKEN` | unset | admin disabled (403) when unset |
 | `TAC_TOOLS_DIR` | `<repo>/tools` | where `check_piece.py` / `render_piece.py` live |

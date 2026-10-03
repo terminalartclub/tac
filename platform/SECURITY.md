@@ -126,7 +126,7 @@ docker run --rm --name tac-render-<random> --network none --read-only --tmpfs /t
 - Dev mode, web login: signs in as any handle, existing or new.
 - Dev mode is local-only, and `TAC_ENV=prod` refuses to start without `TAC_AUTH=github`, where the handle is the GitHub login.
   - `TAC_ENV` is normalized (strip + lowercase) and must be `dev` or `prod`; `production`, `staging` or an empty value refuse to start instead of falling back to dev.
-  - `TAC_AUTH=dev` refuses to start unless `TAC_PUBLIC_BASE_URL` and `TAC_SITE_URL` (when set) are loopback.
+  - `TAC_AUTH=dev` refuses to start unless the bind `TAC_HOST`, `TAC_PUBLIC_BASE_URL` and `TAC_SITE_URL` (when set) are loopback. `TAC_HOST=0.0.0.0`, `::` or a LAN address refuses, so a deploy that sets only the bind host can't serve dev login.
   - Prod refuses to start without `TAC_SITE_ORIGINS`, or with any non-`https://` origin.
 - Inherent to device flow: a phished user code can approve an attacker's device. The page shows nothing about the requesting device yet (TODO: show request time/IP region).
 - Admin:

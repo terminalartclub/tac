@@ -71,3 +71,21 @@ def test_prod_site_origins_explicit_and_https(tmp_path, monkeypatch):
     # dev default: the local site only
     monkeypatch.delenv("TAC_SITE_ORIGINS")
     assert Settings.from_env(data_dir=tmp_path, env="dev").site_origins == ("http://localhost:5181",)
+
+
+@pytest.mark.parametrize("host", ["0.0.0.0", "::", "[::]", "192.168.1.5", "10.0.0.7", "fd00::1", "", "example.com"])
+def test_dev_auth_refuses_non_loopback_bind(host, tmp_path, monkeypatch):
+    monkeypatch.setenv("TAC_HOST", host)  # e.g. a Fly deploy that set only TAC_HOST=0.0.0.0
+    for env in ("TAC_ENV", "TAC_AUTH", "TAC_PUBLIC_BASE_URL", "TAC_SITE_URL"):
+        monkeypatch.delenv(env, raising=False)
+    s = Settings.from_env(data_dir=tmp_path)
+    assert (s.env, s.auth_mode, s.host) == ("dev", "dev", host)
+    with pytest.raises(RuntimeError, match="loopback TAC_HOST"):
+        create_app(s)
+    create_app(Settings.from_env(data_dir=tmp_path, auth_mode="github"))  # the bind host only gates dev login
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1", "localhost", "LOCALHOST", "::1", "[::1]", "127.0.0.2"])
+def test_dev_auth_on_loopback_bind_starts(host, tmp_path, monkeypatch):
+    monkeypatch.setenv("TAC_HOST", host)
+    create_app(Settings.from_env(data_dir=tmp_path, auth_mode="dev"))

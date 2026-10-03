@@ -22,7 +22,12 @@ def _env(name: str, default: str) -> str:
 
 
 def _is_loopback(url: str) -> bool:
-    host = urlsplit(url).hostname
+    return _is_loopback_host(urlsplit(url).hostname or "")
+
+
+def _is_loopback_host(host: str) -> bool:
+    """localhost or a loopback IP. 0.0.0.0 / :: (all interfaces) and LAN addresses are not."""
+    host = host.strip().removeprefix("[").removesuffix("]").lower()
     if not host:
         return False
     if host == "localhost":
@@ -101,11 +106,13 @@ class Settings:
             if plain:
                 raise RuntimeError(f"TAC_ENV=prod refuses non-https TAC_SITE_ORIGINS: {', '.join(plain)}")
         if self.auth_mode == "dev" and not (
-            _is_loopback(self.public_base_url) and (not self.site_url or _is_loopback(self.site_url))
+            _is_loopback_host(self.host)
+            and _is_loopback(self.public_base_url)
+            and (not self.site_url or _is_loopback(self.site_url))
         ):
             raise RuntimeError(
-                "TAC_AUTH=dev lets anyone sign in as any handle: it runs only with a loopback "
-                "TAC_PUBLIC_BASE_URL and TAC_SITE_URL (127.0.0.1, localhost, ::1)"
+                "TAC_AUTH=dev lets anyone sign in as any handle: it runs only with a loopback TAC_HOST "
+                "(bind), TAC_PUBLIC_BASE_URL and TAC_SITE_URL (127.0.0.1, localhost, ::1)"
             )
 
     @property
