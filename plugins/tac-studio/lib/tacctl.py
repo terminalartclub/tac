@@ -11,6 +11,7 @@
     tacctl style [--print] [--log N]   open/create ~/.config/tac/style.md; --print / --log for the skill
     tacctl direct <name> seed|pick|note "<text>" [--iter K]   log the human's steering in notes.md
     tacctl play <name>                 print the live `tac play` command, build + open the review page
+    tacctl gallery                     community pieces as validated handle/slug lines (no free text)
 
 Env: TAC_API (default http://127.0.0.1:8790), TAC_WORK (default ./tac-work).
 """
@@ -46,6 +47,9 @@ import notes as notesmod  # noqa: E402
 
 DEFAULT_API = "http://127.0.0.1:8790"
 PROCESS_W = 540
+# Same patterns as platform/src/tac_platform/models.py (HANDLE_RE, SLUG_RE); tests pin them equal.
+HANDLE_RE = re.compile(r"^[a-z0-9-]{2,24}$")
+SLUG_RE = re.compile(r"^(?=.{1,48}$)[a-z0-9]+(?:-[a-z0-9]+)*$")
 TERMINAL = {"rejected", "in_review", "published"}
 
 
@@ -712,6 +716,39 @@ def cmd_mine(a: argparse.Namespace) -> int:
     return 0
 
 
+# ── gallery: what the community already made, as ids only ───────────────
+
+
+def gallery_ids(doc: Any) -> tuple[list[str], int]:
+    """(valid "handle/slug" ids in feed order, count dropped). Titles, descriptions and bios are
+    community-written text; they never leave this function, so they never reach Claude's context."""
+    ids: list[str] = []
+    dropped = 0
+    pieces = doc.get("pieces") if isinstance(doc, dict) else None
+    for p in pieces if isinstance(pieces, list) else []:
+        h, s = (p.get("handle"), p.get("slug")) if isinstance(p, dict) else (None, None)
+        if isinstance(h, str) and isinstance(s, str) and HANDLE_RE.match(h) and SLUG_RE.match(s):
+            if f"{h}/{s}" not in ids:
+                ids.append(f"{h}/{s}")
+        else:
+            dropped += 1
+    return ids, dropped
+
+
+def cmd_gallery(a: argparse.Namespace) -> int:
+    creds = load_creds()
+    base = session_base(creds) if creds else api_base()
+    status, body = http("GET", f"{base}/v1/community.json", headers={"Accept": "application/json"})
+    if status != 200:
+        return die(f"gallery unavailable: HTTP {status}")  # body not echoed: it is community-writable
+    ids, dropped = gallery_ids(body)
+    for i in ids:
+        print(i)
+    if dropped:
+        print(f"({dropped} entries with an invalid handle/slug skipped)", file=sys.stderr)
+    return 0
+
+
 # ── play / review ──────────────────────────────────────────────────────────
 
 
@@ -774,6 +811,7 @@ def main(argv: list[str] | None = None) -> int:
     dr.add_argument("--iter", type=int)
     st = sp.add_parser("status")
     st.add_argument("id")
+    sp.add_parser("gallery", help="community pieces as handle/slug lines, nothing else")
     pl = sp.add_parser("play")
     pl.add_argument("name")
     pl.add_argument("--no-page", action="store_true")
@@ -783,7 +821,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return {"login": cmd_login, "logout": cmd_logout, "whoami": cmd_whoami, "prepare": cmd_prepare,
                 "submit": cmd_submit, "status": cmd_status, "play": cmd_play, "direct": cmd_direct, "style": cmd_style, "mine": cmd_mine,
-                "fit": cmd_fit, "start": cmd_start}[a.cmd](a)
+                "fit": cmd_fit, "start": cmd_start, "gallery": cmd_gallery}[a.cmd](a)
     except ApiError as e:
         return die(str(e))
 

@@ -277,3 +277,15 @@ def test_prod_refuses_local_renderer(tmp_path):
     create_app(Settings.from_env(data_dir=tmp_path, env="dev"))  # dev still starts
     with pytest.raises(RuntimeError, match="TAC_AUTH=github"):  # dev login (claim any handle) never in prod
         create_app(Settings.from_env(data_dir=tmp_path, env="prod", auth_mode="dev", renderer="docker"))
+
+
+def test_slugify_output_matches_slug_re() -> None:
+    # tac-studio's `tacctl gallery` drops any slug outside SLUG_RE, so every slug we mint must fit it.
+    from tac_platform.models import SLUG_RE
+    from tac_platform.submissions import slugify
+
+    titles = ["ember", "Hush!", "  ", "Ünïcödé — café 4am", "a" * 200, "x--y__z", "日本語", "-lead-", "a " * 60]
+    for t in titles:
+        base = slugify(t)
+        assert SLUG_RE.match(base), (t, base)
+        assert SLUG_RE.match(f"{base}-49"), (t, base)  # the longest collision suffix

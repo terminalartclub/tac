@@ -6,6 +6,9 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 HANDLE_RE = re.compile(r"^[a-z0-9-]{2,24}$")
+# What submissions.slugify() emits: ≤40 chars of [a-z0-9] runs joined by "-", plus an optional "-N"
+# collision suffix. tac-studio's `tacctl gallery` mirrors both patterns (a test pins them equal).
+SLUG_RE = re.compile(r"^(?=.{1,48}$)[a-z0-9]+(?:-[a-z0-9]+)*$")
 Status = Literal["queued", "rendering", "rejected", "in_review", "published"]
 
 
