@@ -409,8 +409,10 @@ async def test_deleting_a_suspended_account_blocks_the_identity_until_unblocked(
         await a.post("/v1/admin/users/alex/suspend", json={"reason": "DMCA-2026-005"})
         assert (await a.post("/v1/admin/users/alex/delete", json={"reason": "ERASE-2026-002"})).status_code == 200
         page = (await a.get("/admin")).text
-        assert "Blocked identities <span class=count>1</span>" in page and "Unblock alex" in page
+        assert "Blocked identities <span class=count>1</span>" in page
     row = await ctx.app.state.db.fetchone("SELECT * FROM blocked_identities")
+    bid = row["id"]
+    assert f"data-act='/v1/admin/blocked/{bid}/unblock'" in page and f">Unblock alex #{bid}<" in page
     assert row["ref"] == "alex" and len(row["github_id_hash"]) == 64 and "alex" not in row["github_id_hash"]
     # the freed handle can't be taken back: web sign-up and device sign-up both refuse, with the fixed message
     async with ctx.client() as c:
@@ -420,10 +422,12 @@ async def test_deleting_a_suspended_account_blocks_the_identity_until_unblocked(
     assert r.status_code == 403 and "This account is suspended" in r.text
     assert (await ctx.app.state.db.fetchone("SELECT COUNT(*) AS n FROM users"))["n"] == 0
     async with ctx.admin() as a:
-        assert (await a.post("/v1/admin/blocked/nobody/unblock", json={"reason": "x"})).status_code == 404
-        assert (await a.post("/v1/admin/blocked/alex/unblock", json={})).status_code == 400  # reason required
-        r = await a.post("/v1/admin/blocked/alex/unblock", json={"reason": "APPEAL-2026-001"})
-        assert r.json() == {"ref": "alex", "unblocked": 1}
+        assert (await a.post("/v1/admin/blocked/999/unblock", json={"reason": "x"})).status_code == 404
+        assert (await a.post("/v1/admin/blocked/alex/unblock", json={"reason": "x"})).status_code == 400  # ids only
+        assert (await a.post(f"/v1/admin/blocked/{bid}/unblock", json={})).status_code == 400  # reason required
+        r = await a.post(f"/v1/admin/blocked/{bid}/unblock", json={"reason": "APPEAL-2026-001"})
+        assert r.json() == {"id": bid, "ref": "alex", "unblocked": 1}
+        assert (await a.post(f"/v1/admin/blocked/{bid}/unblock", json={"reason": "x"})).status_code == 404
         log = (await a.get("/v1/admin/takedowns")).json()["actions"]
     assert [(x["action"], x["target"]) for x in log[:3]] == [("unblock", "alex"), ("delete_account", "alex"),
                                                               ("block", "alex")]
@@ -481,9 +485,82 @@ async def test_github_identity_of_a_deleted_suspended_account_cant_re_register(t
             assert (await web(c)).status_code == 200
         gh.update(id=4242, login="alexgh-new")
         async with ctx.admin() as a:
-            assert (await a.post("/v1/admin/blocked/alexgh/unblock", json={"reason": "x"})).status_code == 200
+            bid = (await ctx.app.state.db.fetchone("SELECT id FROM blocked_identities WHERE ref = 'alexgh'"))["id"]
+            assert (await a.post(f"/v1/admin/blocked/{bid}/unblock", json={"reason": "x"})).status_code == 200
         async with ctx.client() as c:
             assert (await web(c)).status_code == 200  # unblocked: signs up again
+
+
+async def test_unblock_lifts_exactly_one_block_when_two_share_a_handle(tmp_path, monkeypatch):
+    """Two GitHub people held the handle "alex" in turn and were each deleted while suspended: unblocking one
+    must leave the other barred, and the audit row must say which block went."""
+    gh = {"id": 1001, "login": "alex"}
+
+    async def fake_identity(st, code):
+        return gh["id"], gh["login"]
+
+    monkeypatch.setattr(web_auth, "github_identity", fake_identity)
+    async with make_ctx(tmp_path, worker_enabled=False, auth_mode="github", github_client_id="cid") as ctx:
+        async def web(c):
+            r = await c.get("/v1/auth/web/login")
+            state = parse_qs(urlsplit(r.headers["location"]).query)["state"][0]
+            return await c.get("/v1/auth/web/github/callback", params={"code": "gh", "state": state})
+
+        for gid in (1001, 2002):
+            gh["id"] = gid
+            async with ctx.client() as c:
+                assert (await web(c)).status_code == 200
+            async with ctx.admin() as a:
+                await a.post("/v1/admin/users/alex/suspend", json={"reason": "x"})
+                assert (await a.post("/v1/admin/users/alex/delete", json={"reason": "x"})).status_code == 200
+        db = ctx.app.state.db
+        first, second = [r["id"] for r in await db.fetchall("SELECT id FROM blocked_identities WHERE ref = 'alex'"
+                                                            " ORDER BY id")]
+        async with ctx.admin() as a:
+            page = (await a.get("/admin")).text
+            assert f">Unblock alex #{first}<" in page and f">Unblock alex #{second}<" in page
+            r = await a.post(f"/v1/admin/blocked/{first}/unblock", json={"reason": "APPEAL-1001"})
+            assert r.json() == {"id": first, "ref": "alex", "unblocked": 1}
+        assert [r["id"] for r in await db.fetchall("SELECT id FROM blocked_identities")] == [second]
+        rows = await db.fetchall("SELECT target, detail, data_json FROM audit_log WHERE action = 'unblock'")
+        assert [(x["target"], x["detail"], json.loads(x["data_json"])) for x in rows] == [
+            ("alex", "APPEAL-1001", {"block_id": first})]
+        blocks = await db.fetchall("SELECT data_json FROM audit_log WHERE action = 'block' ORDER BY id")
+        assert [json.loads(x["data_json"])["block_id"] for x in blocks] == [first, second]
+        gh["id"] = 2002  # never appealed: still refused
+        async with ctx.client() as c:
+            r = await web(c)
+            assert r.status_code == 403 and "This account is suspended" in r.text
+        gh["id"] = 1001  # appealed: signs up again
+        async with ctx.client() as c:
+            assert (await web(c)).status_code == 200
+
+
+async def test_blocked_identities_hash_keyed_table_migrates_to_ids(tmp_path):
+    import aiosqlite
+
+    from tac_platform.db import Database
+
+    path = tmp_path / "blk.sqlite3"
+    async with aiosqlite.connect(path) as c:  # the first shape, keyed by the hash
+        await c.execute("CREATE TABLE blocked_identities (github_id_hash TEXT PRIMARY KEY, created_at TEXT NOT NULL,"
+                        " ref TEXT NOT NULL)")
+        await c.executemany("INSERT INTO blocked_identities VALUES (?, ?, ?)",
+                            [("h1", "2026-10-01", "alex"), ("h2", "2026-10-02", "alex")])
+        await c.commit()
+    db = Database(path)
+    await db.open()
+    try:
+        rows = await db.fetchall("SELECT id, github_id_hash, ref FROM blocked_identities ORDER BY id")
+        assert [tuple(r) for r in rows] == [(1, "h1", "alex"), (2, "h2", "alex")]
+    finally:
+        await db.close()
+    db = Database(path)  # second open: already migrated, untouched
+    await db.open()
+    try:
+        assert len(await db.fetchall("SELECT id FROM blocked_identities")) == 2
+    finally:
+        await db.close()
 
 
 # ---------------------------------------------------------------- Instagram

@@ -234,7 +234,8 @@ docker run --rm --name tac-render-<random> --network none --read-only --tmpfs /t
   transaction: `sha256(salt | "github:<id>")` (`"dev:<handle>"` in dev auth), salt =
   `sha256("tac-blocked-identities|" + kv 'secret')`, the per-install secret. GitHub and dev sign-up refuse a
   blocked identity with the suspended message, so a delete can't lift a ban. No raw id or login is kept; `ref` =
-  the deleted handle, for "Unblock" in /admin. Rotating the kv secret would void every block.
+  the deleted handle, shown in /admin. Unblock targets the row's own `id`, never `ref`: a handle can be
+  reused, so several blocks can share one `ref`. Rotating the kv secret would void every block.
 - Every hide, unhide, delete, suspend, unsuspend and admin account deletion writes an audit row with its reason and a `target`
   (`handle/slug` or `handle`) that survives row deletion. `/admin/takedowns` lists the last 100.
 - All new endpoints sit under `/v1/admin/` behind `require_admin` (header token, or cookie + CSRF header +

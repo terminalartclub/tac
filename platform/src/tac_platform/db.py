@@ -128,9 +128,10 @@ CREATE TABLE IF NOT EXISTS automod_spend (  -- automod cost ledger, one row per 
     usd   REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS blocked_identities (  -- see blocklist.py; written when an admin deletes a suspended account
-    github_id_hash TEXT PRIMARY KEY,               -- sha256(salt | identity), never the raw id
+    id             INTEGER PRIMARY KEY,            -- what unblock targets: ref is NOT unique (handles get reused)
+    github_id_hash TEXT NOT NULL UNIQUE,           -- sha256(salt | identity), never the raw id
     created_at     TEXT NOT NULL,
-    ref            TEXT NOT NULL                   -- the deleted handle: what the admin unblocks by
+    ref            TEXT NOT NULL                   -- the deleted handle, for the admin to recognise the row
 );
 CREATE TABLE IF NOT EXISTS kv (
     key   TEXT PRIMARY KEY,
@@ -178,6 +179,18 @@ class Database:
                 await self.conn.execute(f"ALTER TABLE users ADD COLUMN {col} TEXT")
         if "ig_posted_at" not in {r["name"] for r in await self.fetchall("PRAGMA table_info(submissions)")}:
             await self.conn.execute("ALTER TABLE submissions ADD COLUMN ig_posted_at TEXT")
+        if "id" not in {r["name"] for r in await self.fetchall("PRAGMA table_info(blocked_identities)")}:
+            # first shape keyed by the hash: rebuild with a surrogate id (can't ALTER in a PRIMARY KEY)
+            await self.conn.executescript(
+                "BEGIN IMMEDIATE;"
+                "ALTER TABLE blocked_identities RENAME TO blocked_identities_old;"
+                "CREATE TABLE blocked_identities (id INTEGER PRIMARY KEY, github_id_hash TEXT NOT NULL UNIQUE,"
+                " created_at TEXT NOT NULL, ref TEXT NOT NULL);"
+                "INSERT INTO blocked_identities (github_id_hash, created_at, ref)"
+                " SELECT github_id_hash, created_at, ref FROM blocked_identities_old ORDER BY created_at;"
+                "DROP TABLE blocked_identities_old;"
+                "COMMIT;"
+            )
         audit_cols = {r["name"] for r in await self.fetchall("PRAGMA table_info(audit_log)")}
         for col in ("target", "data_json"):
             if col not in audit_cols:

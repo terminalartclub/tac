@@ -199,10 +199,12 @@ class Publisher:
                     await tx.execute(f"DELETE FROM {table} WHERE user_id = ?", (user_id,))
                 await tx.execute("DELETE FROM users WHERE id = ?", (user_id,))
                 if actor is not None and u is not None and u["suspended_at"] is not None:
-                    await tx.execute(
-                        "INSERT OR IGNORE INTO blocked_identities (github_id_hash, created_at, ref) VALUES (?, ?, ?)",
+                    blocked = await tx.fetchone(
+                        "INSERT INTO blocked_identities (github_id_hash, created_at, ref) VALUES (?, ?, ?)"
+                        " ON CONFLICT(github_id_hash) DO UPDATE SET ref = excluded.ref RETURNING id",
                         (blocklist.identity_hash(self.secret, u["github_id"], handle), now_iso(), handle))
-                    await tx.audit(actor, "block", target=handle, detail="suspended account deleted")
+                    await tx.audit(actor, "block", target=handle, detail="suspended account deleted",
+                                   data={"block_id": blocked["id"]})
                 if actor is None:
                     await tx.audit(f"user:{handle}", "account_deleted", detail=f"{len(ids)} submissions", target=handle)
                 else:  # the IG list goes in the row: the submissions it names are gone after this commit
