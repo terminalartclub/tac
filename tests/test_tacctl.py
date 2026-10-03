@@ -713,3 +713,89 @@ def test_record_session_ignores_invalid_ids(tmp_path: Path, monkeypatch: pytest.
     monkeypatch.setenv("TAC_SESSION_ID", sid)
     tacctl.record_session("ember")
     assert not (tmp_path / "tac-work" / "ember" / ".sessions").exists()
+
+
+def _start_at(monkeypatch: pytest.MonkeyPatch, name: str, at: float, cmd: list[str] | None = None) -> None:
+    monkeypatch.setattr(tacctl.time, "time", lambda: at)
+    assert tacctl.main(cmd or ["start", name]) == 0
+
+
+def test_earlier_unrelated_work_in_the_session_does_not_count(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import os as _os
+    import time as _time
+
+    cfg = tmp_path / "claude"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(cfg))
+    monkeypatch.setenv("TAC_WORK", str(tmp_path / "tac-work"))
+    monkeypatch.setenv("TAC_SESSION_ID", "sess-busy")
+    t0 = _time.time() - 7200
+    _start_at(monkeypatch, "ember", t0)
+    f = tmp_path / "tac-work" / "ember" / "ember.py"
+    f.write_text("# piece\n")
+    _os.utime(f, (t0 + 100, t0 + 100))
+    monkeypatch.setattr(tacctl.time, "time", _time.time)
+    # an hour of unrelated work earlier in the same session, then the piece's own 30 tokens
+    _transcript(cfg / "projects" / "p" / "sess-busy.jsonl",
+                [(t0 - 3600, "old", 1_000_000, 0, 0), (t0 + 50, "mine", 20, 0, 10)])
+    assert tacctl.tokens_from_transcripts(tmp_path / "tac-work" / "ember") == 30  # was 1,000,030
+
+
+def test_return_to_a_piece_counts_its_later_work(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import os as _os
+    import time as _time
+
+    cfg = tmp_path / "claude"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(cfg))
+    monkeypatch.setenv("TAC_WORK", str(tmp_path / "tac-work"))
+    monkeypatch.setenv("TAC_SESSION_ID", "sess-abba")
+    t0 = _time.time() - 7200
+    _start_at(monkeypatch, "ember", t0)                                         # A
+    _start_at(monkeypatch, "hush", t0 + 1000)                                   # B
+    _start_at(monkeypatch, "ember", t0 + 2000, ["direct", "ember", "note", "warmer"])  # back to A
+    for name, mtime in (("ember", t0 + 2500), ("hush", t0 + 1500)):
+        f = tmp_path / "tac-work" / name / f"{name}.py"
+        f.write_text("# piece\n")
+        _os.utime(f, (mtime, mtime))
+    _os.utime(tmp_path / "tac-work" / "ember" / "notes.md", (t0 + 2010, t0 + 2010))
+    monkeypatch.setattr(tacctl.time, "time", _time.time)
+    lines = (tmp_path / "tac-work" / "ember" / ".sessions").read_text().splitlines()
+    assert [json.loads(x)["at"] for x in lines] == [t0, t0 + 2000]  # both sightings of A recorded
+    _transcript(cfg / "projects" / "p" / "sess-abba.jsonl",
+                [(t0 + 100, "a1", 100, 0, 0), (t0 + 1100, "b1", 20, 0, 0), (t0 + 2100, "a2", 3, 0, 0)])
+    assert tacctl.tokens_from_transcripts(tmp_path / "tac-work" / "ember") == 100 + 3
+    assert tacctl.tokens_from_transcripts(tmp_path / "tac-work" / "hush") == 20
+
+
+def test_over_cap_estimate_is_null_and_says_pass_tokens(platform: Platform, work: Path,
+                                                        monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    monkeypatch.setattr(tacctl, "tokens_from_transcripts", lambda wd: 2_000_001)
+    _, m, _ = tacctl.prepare("ember", model="claude-opus-5-5", handle=None, tokens=None, estimate_tokens=True)
+    assert m["tokens"] is None and m["tokens_source"] == "unknown"
+    assert "--tokens N" in capsys.readouterr().err
+    monkeypatch.setattr(tacctl, "tokens_from_transcripts", lambda wd: 2_000_000)
+    (work / "meta.yaml").unlink()
+    _, m, _ = tacctl.prepare("ember", model="claude-opus-5-5", handle=None, tokens=None, estimate_tokens=True)
+    assert m["tokens"] == 2_000_000 and m["tokens_source"] == "transcript-estimate"
+
+
+def test_session_windows_never_overlap_between_pieces(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import os as _os
+    import time as _time
+
+    cfg = tmp_path / "claude"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(cfg))
+    monkeypatch.setenv("TAC_WORK", str(tmp_path / "tac-work"))
+    monkeypatch.setenv("TAC_SESSION_ID", "sess-tight")
+    t0 = _time.time() - 7200
+    _start_at(monkeypatch, "ember", t0)
+    _start_at(monkeypatch, "hush", t0 + 200)  # less than the 10-min lookback after ember's start
+    for name, mtime in (("ember", t0 + 150), ("hush", t0 + 900)):
+        f = tmp_path / "tac-work" / name / f"{name}.py"
+        f.write_text("# piece\n")
+        _os.utime(f, (mtime, mtime))
+    monkeypatch.setattr(tacctl.time, "time", _time.time)
+    _transcript(cfg / "projects" / "p" / "sess-tight.jsonl",
+                [(t0 + 100, "e", 1000, 0, 0), (t0 + 300, "h", 7, 0, 0)])
+    ember = tacctl.tokens_from_transcripts(tmp_path / "tac-work" / "ember")
+    hush = tacctl.tokens_from_transcripts(tmp_path / "tac-work" / "hush")
+    assert (ember, hush) == (1000, 7)  # each token counted once, by the piece being worked on

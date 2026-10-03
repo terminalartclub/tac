@@ -386,18 +386,21 @@ def pick_process(wd: Path, src: Path, n_iter: int) -> list[tuple[str, Path]]:
 SESSIONS_FILE = ".sessions"  # tac-work/<name>/.sessions: one JSON line per Claude session that worked on it
 SESSION_ID_RE = re.compile(r"^[A-Za-z0-9-]{1,64}$")
 WORK_END_SLACK_S = 300  # the turn that wrote the last file finishes a little after the write
+WORK_START_SLACK_S = 600  # the turns that planned the piece before its first file or `tacctl start`
 
 
 def record_session(name: str) -> None:
     """Note the current Claude session (TAC_SESSION_ID, set by the plugin's SessionStart hook) as working on
-    <name>. First sighting per session wins; silently does nothing outside Claude Code or without the hook."""
+    <name>. A new line whenever this session's latest sighting (across all pieces) is another piece, so
+    A -> B -> back to A records A twice. Silently does nothing outside Claude Code or without the hook."""
     sid = os.environ.get("TAC_SESSION_ID", "")
-    if not SESSION_ID_RE.match(sid):
+    if not SESSION_ID_RE.fullmatch(sid):
         return
     path = work_root() / name / SESSIONS_FILE
-    known = {r["session"] for r in read_sessions(path.parent)}
-    if sid in known:
-        return
+    latest = max(((r["at"], other.name) for other in _piece_dirs(path.parent.parent)
+                  for r in read_sessions(other) if r["session"] == sid), default=None)
+    if latest is not None and latest[1] == name:
+        return  # still on this piece in this session
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps({"session": sid, "at": time.time()}) + "\n")
@@ -414,16 +417,26 @@ def read_sessions(wd: Path) -> list[dict[str, Any]]:
             r = json.loads(ln)
         except json.JSONDecodeError:
             continue
-        if isinstance(r, dict) and SESSION_ID_RE.match(str(r.get("session", ""))) and isinstance(r.get("at"), (int, float)):
+        if isinstance(r, dict) and SESSION_ID_RE.fullmatch(str(r.get("session", ""))) \
+                and isinstance(r.get("at"), (int, float)) and not isinstance(r.get("at"), bool):
             out.append(r)
     return out
 
 
-def _work_end(wd: Path) -> float | None:
-    """When the piece was last worked on: newest mtime of its own files (not the submission build or meta)."""
+def _piece_dirs(root: Path) -> list[Path]:
+    return [d for d in root.iterdir() if d.is_dir()] if root.is_dir() else []
+
+
+def _work_times(wd: Path) -> list[float]:
+    """mtimes of the piece's own files (not the submission build, meta or the session log)."""
     skip = {SESSIONS_FILE, "meta.yaml", ".submission.json"}
-    times = [p.stat().st_mtime for p in wd.rglob("*")
-             if p.is_file() and p.name not in skip and "submission" not in p.relative_to(wd).parts]
+    return [p.stat().st_mtime for p in wd.rglob("*")
+            if p.is_file() and p.name not in skip and "submission" not in p.relative_to(wd).parts]
+
+
+def _work_end(wd: Path) -> float | None:
+    """When the piece was last worked on: newest mtime of its own files, plus slack."""
+    times = _work_times(wd)
     return max(times) + WORK_END_SLACK_S if times else None
 
 
@@ -431,28 +444,41 @@ def tokens_from_transcripts(wd: Path) -> int | None:
     """Estimate: input + cache-write + output tokens (cache reads excluded) of the Claude Code sessions that
     built this piece, as recorded in tac-work/<name>/.sessions. An estimate, not billing.
 
-    Per recorded session: from when this piece was started in it (from the session's beginning if it was
-    the session's first piece) until the next piece started in the same session, and never past the
-    piece's last file edit, so /tac:play, /tac:submit or /tac:mine turns after the work don't count.
-    Other sessions in the project (logins, other pieces) are never read. No recorded session -> None."""
+    Per recorded session, one window per sighting of this piece: from that sighting (the first one reaches
+    back to 10 min before the piece's first file or start, whichever is earlier) until the session's next
+    sighting of another piece, and never past the piece's last file edit + 5 min. So earlier unrelated work
+    in the session, other pieces, and /tac:play, /tac:submit or /tac:mine turns after the work don't count;
+    returning to the piece later (A -> B -> A) does. Other sessions are never read. No session -> None."""
     sessions = read_sessions(wd)
-    end_cap = _work_end(wd)
-    if not sessions or end_cap is None:
+    times = _work_times(wd)
+    if not sessions or not times:
         return None
-    # every piece's starts, to split a session that built more than one piece
-    starts: dict[str, list[tuple[float, str]]] = {}
-    for other in (wd.parent.iterdir() if wd.parent.is_dir() else []):
-        if other.is_dir():
-            for r in read_sessions(other):
-                starts.setdefault(r["session"], []).append((r["at"], other.name))
+    end_cap = max(times) + WORK_END_SLACK_S
+    first_file = min(times)
+    # every piece's sightings per session: a session's timeline of which piece it was working on
+    timeline: dict[str, list[tuple[float, str]]] = {}
+    for other in _piece_dirs(wd.parent):
+        for r in read_sessions(other):
+            timeline.setdefault(r["session"], []).append((r["at"], other.name))
     root = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude") / "projects"
     seen: dict[str, int] = {}
-    for r in sessions:
-        sid, at = r["session"], r["at"]
-        ordered = sorted(starts.get(sid, [(at, wd.name)]))
-        first = ordered[0][1] == wd.name
-        lo = float("-inf") if first else at
-        hi = min([t for t, n in ordered if t > at and n != wd.name] + [end_cap])
+    for sid in dict.fromkeys(r["session"] for r in sessions):
+        ordered = sorted(timeline.get(sid, []))
+        windows: list[tuple[float, float]] = []
+        for k, (at, piece) in enumerate(ordered):
+            if piece != wd.name:
+                continue
+            prev = max(((t, n) for t, n in ordered[:k] if n != wd.name), default=None)
+            # the previous piece in this session owns time up to this sighting or its own last edit + slack
+            prev_end = float("-inf") if prev is None else min(at, _work_end(wd.parent / prev[1]) or prev[0])
+            # the first sighting reaches back to just before the piece's first file (planning turns), but
+            # never into the previous piece's window and never to the session's beginning
+            lo = at if windows else max(min(at, first_file) - WORK_START_SLACK_S, prev_end)
+            hi = min([t for t, n in ordered[k + 1:] if n != wd.name] + [end_cap])
+            if lo < hi:
+                windows.append((lo, hi))
+        if not windows:
+            continue
         files = [*root.glob(f"*/{sid}.jsonl"), *root.glob(f"*/{sid}/**/*.jsonl")]  # main + subagent transcripts
         for f in files:
             for line in f.open(encoding="utf-8", errors="replace"):
@@ -465,7 +491,7 @@ def tokens_from_transcripts(wd: Path) -> int | None:
                     ts = dt.datetime.fromisoformat(e["timestamp"].replace("Z", "+00:00")).timestamp()
                 except (json.JSONDecodeError, KeyError, ValueError, AttributeError, TypeError):
                     continue
-                if not (lo <= ts < hi):
+                if not any(lo <= ts < hi for lo, hi in windows):
                     continue
                 n = sum(int(u.get(k) or 0) for k in ("input_tokens", "cache_creation_input_tokens", "output_tokens"))
                 key = msg.get("id") or e.get("uuid") or f"{f}:{len(seen)}"
@@ -505,6 +531,10 @@ def prepare(name: str, *, model: str | None, handle: str | None, tokens: int | N
         m["tokens"], m["tokens_source"] = tokens, "user"
     elif "tokens" not in m:
         est = tokens_from_transcripts(wd) if estimate_tokens else None
+        if est is not None and est > check_piece.MAX_TOKENS:  # never submit an estimate past the platform's cap
+            print(f"warn: estimated {est:,} tokens is over the {check_piece.MAX_TOKENS:,} cap; recorded as unknown. "
+                  "If you know the real count, pass --tokens N.", file=sys.stderr)
+            est = None
         m["tokens"] = est
         m["tokens_source"] = "transcript-estimate" if est else "unknown"
     m.setdefault("iterations", n_iter or None)

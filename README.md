@@ -124,10 +124,13 @@ A Max plan typically needs a much smaller value than Pro. Measure, don't guess.
 (`tokens_source: user`). Otherwise `--estimate-tokens` sums input + cache-write + output tokens from the
 Claude Code sessions that built the piece (`transcript-estimate`; cache reads excluded). A SessionStart hook
 exports the session id as `TAC_SESSION_ID`, and `tacctl start` / `tacctl direct` record it in
-`tac-work/<name>/.sessions`. Only those sessions' transcripts count, including their subagents. A session's tokens
-count from the piece's start until the next piece starts in the same session, and never past the piece's last file
-edit (+5 min), so later `/tac:play`, `/tac:submit` and `/tac:mine` turns and other pieces' sessions are excluded.
-With no recorded session the estimate is `null`. `/usage` has no machine-readable output, so nothing is read from it.
+`tac-work/<name>/.sessions`, once more each time a session comes back to the piece after working on another. Only
+those sessions' transcripts count, including their subagents. Each sighting opens a window that runs until the
+session's next sighting of another piece, and never past the piece's last file edit (+5 min). The first window also
+reaches back 10 min before the piece's start or first file, whichever is earlier, so the planning turns count, but
+it never reaches into earlier unrelated work or another piece's window. Later `/tac:play`, `/tac:submit` and
+`/tac:mine` turns and other pieces' sessions are excluded. With no recorded session, or an estimate over the
+2,000,000-token cap, the estimate is `null`; pass `--tokens N` if you know the count. `/usage` has no machine-readable output, so nothing is read from it.
 
 ## Repo layout
 
