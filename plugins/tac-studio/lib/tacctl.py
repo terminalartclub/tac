@@ -4,7 +4,6 @@
     tacctl logout | whoami
     tacctl prepare <name> --model M    tac-work/<name>/ → tac-work/<name>/submission/ + local check
     tacctl submit <name> [--model M]   prepare, check, upload, poll status
-    tacctl submit <name> --pr          fallback: print the GitHub fork/PR commands (--open-pr runs them)
     tacctl status <id>
     tacctl mine                        your pieces: status, views, 7d, 28-day sparkline (private)
     tacctl fit [--sketch]              does a run fit the spare weekly window? (exit 3 = no)
@@ -13,8 +12,7 @@
     tacctl direct <name> seed|pick|note "<text>" [--iter K]   log the human's steering in notes.md
     tacctl play <name>                 print the live `tac play` command, build + open the review page
 
-Env: TAC_API (default http://127.0.0.1:8790), TAC_REPO (PR fallback, default
-terminalartclub/tac), TAC_WORK (default ./tac-work).
+Env: TAC_API (default http://127.0.0.1:8790), TAC_WORK (default ./tac-work).
 """
 
 from __future__ import annotations
@@ -45,7 +43,6 @@ import meta as metamod  # noqa: E402
 import notes as notesmod  # noqa: E402
 
 DEFAULT_API = "http://127.0.0.1:8790"
-DEFAULT_REPO = "terminalartclub/tac"
 PROCESS_W = 540
 TERMINAL = {"rejected", "in_review", "published"}
 
@@ -538,14 +535,12 @@ def cmd_submit(a: argparse.Namespace) -> int:
             print(f"  - {r}")
         return 1
     print(f"local check ok: {sub}")
-    if a.pr or a.open_pr:
-        return pr_fallback(sub, m, run=a.open_pr)
     if a.dry_run:
         print(metamod.dumps_yaml(m), end="")
         return 0
     creds = load_creds()
     if not creds:
-        return die("not logged in — run /tac:login first (or use --pr for the GitHub fallback)")
+        return die("not logged in — run /tac:login first")
     base = api_base() if os.environ.get("TAC_API") else creds.get("api", api_base())
     send = {k: v for k, v in m.items() if k != "handle"}  # the platform takes the handle from the token
     files = [("piece", sub / "piece.py", "text/x-python")]
@@ -586,38 +581,6 @@ def cmd_status(a: argparse.Namespace) -> int:
     if status != 200 or not isinstance(body, dict):
         return die(f"HTTP {status} {body}")
     print_status(body)
-    return 0
-
-
-def pr_fallback(sub: Path, m: dict[str, Any], run: bool) -> int:
-    handle = m.get("handle")
-    if not handle:
-        return die("the PR path needs a handle: pass --handle <github-ish-handle>")
-    slug = sub.parent.name
-    repo = os.environ.get("TAC_REPO", DEFAULT_REPO)
-    dest = f"pieces/{handle}/{slug}"
-    clone = work_root() / ".pr" / repo.split("/")[-1]
-    src = sub.resolve()
-    steps = [
-        f"gh repo fork {repo} --clone=false",
-        f"gh repo clone $(gh api user -q .login)/{repo.split('/')[-1]} {shlex.quote(str(clone))}",
-        f"git -C {shlex.quote(str(clone))} checkout -b piece/{handle}-{slug}",
-        f"mkdir -p {shlex.quote(str(clone / dest))} && cp -R {shlex.quote(str(src))}/. {shlex.quote(str(clone / dest))}/",
-        f"python3 {shlex.quote(str(clone / 'tools/check_piece.py'))} {shlex.quote(str(clone / dest))}",
-        f"git -C {shlex.quote(str(clone))} add {dest}",
-        f"git -C {shlex.quote(str(clone))} commit -m {shlex.quote(f'feat: add {handle}/{slug}')}",
-        f"git -C {shlex.quote(str(clone))} push -u origin HEAD",
-        f"cd {shlex.quote(str(clone))} && gh pr create --repo {repo} --title {shlex.quote(f'piece: {handle}/{slug}')} "
-        f"--body {shlex.quote(m.get('description') or slug)}",
-    ]
-    if not run:
-        print("GitHub fallback — run these yourself (or re-run with --open-pr):")
-        print("\n".join(steps))
-        return 0
-    for s in steps:
-        print(f"$ {s}", flush=True)
-        if subprocess.run(s, shell=True).returncode != 0:
-            return die(f"step failed: {s}")
     return 0
 
 
@@ -727,8 +690,6 @@ def main(argv: list[str] | None = None) -> int:
             p.add_argument("--dry-run", action="store_true", help="prepare + check only")
             p.add_argument("--no-wait", action="store_true")
             p.add_argument("--wait", type=float, default=300, help="seconds to poll status (default 300)")
-            p.add_argument("--pr", action="store_true", help="GitHub fallback: print fork/PR commands")
-            p.add_argument("--open-pr", action="store_true", help="GitHub fallback: run them")
     ft = sp.add_parser("fit", help="does a run fit the spare weekly window? exit 3 = no")
     ft.add_argument("--sketch", action="store_true")
     sa = sp.add_parser("start", help="create tac-work/<name>/ and record the run size")

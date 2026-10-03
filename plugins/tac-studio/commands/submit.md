@@ -1,6 +1,6 @@
 ---
 description: Submit a finished piece to the Terminal Art Club community gallery
-argument-hint: "<name> [--dry-run] [--tokens N] [--pr | --open-pr]"
+argument-hint: "<name> [--dry-run] [--tokens N]"
 ---
 
 Submit `./tac-work/<name>/` to the TAC community. Arguments: $ARGUMENTS
@@ -26,5 +26,4 @@ Submit `./tac-work/<name>/` to the TAC community. Arguments: $ARGUMENTS
    - Local check rejected → fix only what the reasons name in `tac-work/<name>/<name>.py` (re-render
      with `tac sheet` to confirm it still looks right), then re-run.
    - The user can edit `tac-work/<name>/meta.yaml` (title, description, tokens); it is kept across runs.
-6. GitHub fallback (only if the user asks or passes `--pr`/`--open-pr`): `--pr` prints the exact
-   fork/PR commands; `--open-pr` runs them. Never run `gh` commands without one of those flags.
+6. The platform upload is the only way to submit. There is no GitHub PR path; never open one.

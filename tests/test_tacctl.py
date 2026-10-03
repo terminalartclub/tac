@@ -191,10 +191,13 @@ def test_direction_section_parsing() -> None:
     assert notes.human_role("# x\n") == "none"
 
 
-def test_pr_fallback_prints_commands(platform: Platform, work: Path, capsys) -> None:
-    assert tacctl.main(["submit", "ember", "--model", "claude-opus-5-5", "--handle", "alex", "--pr"]) == 0
-    out = capsys.readouterr().out
-    assert "gh repo fork" in out and "pieces/alex/ember" in out and "gh pr create" in out
+@pytest.mark.parametrize("flag", ["--pr", "--open-pr"])
+def test_submit_has_no_github_pr_path(platform: Platform, work: Path, flag: str) -> None:
+    # The install repo takes no outside PRs: the only submit path is the platform API.
+    with pytest.raises(SystemExit) as e:
+        tacctl.main(["submit", "ember", "--model", "claude-opus-5-5", "--handle", "alex", flag])
+    assert e.value.code == 2  # argparse: unknown flag
+    assert not hasattr(tacctl, "pr_fallback") and not hasattr(tacctl, "DEFAULT_REPO")
     assert platform.upload == {}
 
 
