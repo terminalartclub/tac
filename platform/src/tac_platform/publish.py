@@ -279,12 +279,13 @@ class Publisher:
                     await tx.audit(actor, "delete_account", target=handle, detail=reason,
                                    data={"ig": ig_logged} if on_ig else None)
                 await _pseudonymise(tx, self.secret, handle, pseud, first_id, pieces, keep_moderation=banned)
-            await self.db.checkpoint_truncate()  # no pre-delete page images left in the WAL
             for sid in ids:
                 await self.store.delete_prefix(f"submissions/{sid}")
             await self.store.delete_prefix(f"public/{handle}")
             await self.regenerate()
-            return on_ig
+        # outside _media_lock: no pre-delete page images left in the WAL; blocked by a reader -> background retry
+        await self.db.truncate_or_retry()
+        return on_ig
 
     # ------------------------------------------------------------ media
 

@@ -6,6 +6,8 @@ replacing this module with an asyncpg-backed one exposing the same five methods.
 
 import asyncio
 import json
+import logging
+from collections.abc import Awaitable, Callable
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -13,6 +15,10 @@ from pathlib import Path
 from typing import Any
 
 import aiosqlite
+
+log = logging.getLogger("tac.db")
+BUSY_TIMEOUT_MS = 5000
+TRUNCATE_RETRY_S = 30.0  # a WAL truncate blocked by a reader in another connection is retried this often
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
@@ -149,6 +155,9 @@ class Database:
         self.path = path
         self._conn: aiosqlite.Connection | None = None
         self._write_lock = asyncio.Lock()
+        self.truncate_retry_s = TRUNCATE_RETRY_S
+        self._truncate_task: asyncio.Task | None = None
+        self._after_truncate: list[Callable[[], Awaitable[None]]] = []
 
     async def open(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -156,7 +165,7 @@ class Database:
         self._conn.row_factory = aiosqlite.Row
         await self._conn.execute("PRAGMA journal_mode=WAL")
         await self._conn.execute("PRAGMA foreign_keys=ON")
-        await self._conn.execute("PRAGMA busy_timeout=5000")
+        await self._conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
         # Deleted rows are overwritten with zeros, not left in free pages: an erased account must not be
         # recoverable from the file (see delete_account, which also truncates the WAL).
         await self._conn.execute("PRAGMA secure_delete=ON")
@@ -164,9 +173,15 @@ class Database:
         await self._migrate()
         if await self.fetchone("SELECT 1 FROM kv WHERE key = 'secure_delete_vacuumed'") is None:
             # once: free pages written before secure_delete still hold deleted rows; VACUUM rebuilds the file.
-            await self.conn.execute("VACUUM")
-            await self.execute("INSERT OR IGNORE INTO kv (key, value) VALUES ('secure_delete_vacuumed', '1')")
-            await self.checkpoint_truncate()
+            # A cleanup, never a reason not to start: any failure (disk full, I/O, a lock) is logged and the
+            # flag stays unset, so the next boot tries again. The flag is set only once the WAL is truncated
+            # too (the old pages live on in WAL frames until then), possibly later by the background retry.
+            try:
+                await self.conn.execute("VACUUM")
+            except Exception:  # noqa: BLE001
+                log.exception("one-time VACUUM failed; serving anyway, the next boot retries")
+            else:
+                await self.truncate_or_retry(then=self._mark_vacuumed)
 
     async def _migrate(self) -> None:
         """Additive column migrations for DBs created by earlier versions."""
@@ -210,13 +225,56 @@ class Database:
             if col not in audit_cols:
                 await self.conn.execute(f"ALTER TABLE audit_log ADD COLUMN {col} TEXT")
 
-    async def checkpoint_truncate(self) -> None:
+    async def _mark_vacuumed(self) -> None:
+        await self.execute("INSERT OR IGNORE INTO kv (key, value) VALUES ('secure_delete_vacuumed', '1')")
+
+    async def checkpoint_truncate(self) -> bool:
         """Copy the WAL into the main file and truncate it to zero bytes: old WAL frames hold pre-delete page
-        images until the file is truncated (a normal checkpoint only rewinds it)."""
+        images until the file is truncated (a normal checkpoint only rewinds it). True when done; False when a
+        reader in another connection (an operator shell, `sqlite3 .backup`) holds an older snapshot. Never
+        waits for that reader: busy_timeout is 0 for the checkpoint, so the write lock is held for
+        milliseconds, not the 5 s busy timeout."""
         async with self._write_lock:
-            await self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            await self.conn.execute("PRAGMA busy_timeout=0")
+            try:
+                row = await self.fetchone("PRAGMA wal_checkpoint(TRUNCATE)")
+            finally:
+                await self.conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
+        busy, wal_frames, checkpointed = tuple(row)
+        if busy:
+            log.warning("WAL truncate blocked by another reader (%s frames, %s checkpointed); retrying",
+                        wal_frames, checkpointed)
+        return not busy
+
+    async def truncate_or_retry(self, then: Callable[[], Awaitable[None]] | None = None) -> bool:
+        """checkpoint_truncate now, or (blocked) in the background every truncate_retry_s until it succeeds.
+        `then` runs after the truncate that succeeds. Returns whether it succeeded right away."""
+        if await self.checkpoint_truncate():
+            if then is not None:
+                await then()
+            return True
+        if then is not None:
+            self._after_truncate.append(then)
+        if self._truncate_task is None or self._truncate_task.done():
+            self._truncate_task = asyncio.create_task(self._truncate_retry(), name="tac-wal-truncate")
+        return False
+
+    async def _truncate_retry(self) -> None:
+        while True:
+            await asyncio.sleep(self.truncate_retry_s)
+            try:
+                if not await self.checkpoint_truncate():
+                    continue
+                while self._after_truncate:
+                    await self._after_truncate.pop(0)()
+                return
+            except Exception:  # noqa: BLE001
+                log.exception("background WAL truncate failed; retrying")
 
     async def close(self) -> None:
+        if self._truncate_task is not None and not self._truncate_task.done():
+            self._truncate_task.cancel()  # the next boot's VACUUM/truncate picks it up
+            await asyncio.gather(self._truncate_task, return_exceptions=True)
         if self._conn is not None:
             await self._conn.close()
             self._conn = None

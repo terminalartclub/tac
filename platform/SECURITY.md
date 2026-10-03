@@ -214,7 +214,11 @@ docker run --rm --name tac-render-<random> --network none --read-only --tmpfs /t
   - A suspended account can't sign in to delete itself: email hello@terminalart.club and we delete it.
   - Deleted rows are gone from the file, not only from queries: `PRAGMA secure_delete=ON` zeroes freed cells,
     `delete_account` truncates the WAL (`wal_checkpoint(TRUNCATE)`), and the first boot with this setting
-    VACUUMs once to clear rows deleted before it.
+    VACUUMs once to clear rows deleted before it. A reader in another connection (operator shell,
+    `sqlite3 .backup`) can block the truncate: it is never waited for (busy_timeout 0 for the checkpoint, the
+    write and media locks free in milliseconds); a warning is logged and a background task retries every 30 s
+    until it succeeds. The VACUUM is a cleanup, never a boot blocker: a failure (disk full, I/O) is logged and
+    retried next boot, and its done-flag is set only after a truncate that wasn't blocked.
   - Fly's daily volume snapshots (5-day retention) keep pre-delete copies of the whole DB until they rotate
     out: a deletion is complete everywhere after 5 days.
   - Handles in the audit log after a delete (`Publisher._pseudonymise`, same transaction as the delete):
