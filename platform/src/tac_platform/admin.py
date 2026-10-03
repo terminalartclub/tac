@@ -241,12 +241,20 @@ async function act(url, body) {
   if (!r.ok) { alert(url + ' -> ' + r.status + ' ' + await r.text()); return; }
   location.reload();
 }
+function adminPath(raw) {
+  // Only same-origin /v1/admin/... paths. Resolving first normalises "..", "//host" and "%2e%2e" tricks.
+  let u;
+  try { u = new URL(raw, location.origin); } catch (e) { return null; }
+  return u.origin === location.origin && u.pathname.startsWith('/v1/admin/') ? u.pathname + u.search : null;
+}
 document.addEventListener('click', (ev) => {
   const b = ev.target.closest('button[data-act]');
   if (!b) return;
+  const path = adminPath(b.dataset.act);
+  if (!path) return;  // never POST anywhere else, whatever ended up in the attribute
   const body = b.dataset.body ? JSON.parse(b.dataset.body) : {};
   if (b.dataset.reason) body.reason = document.getElementById(b.dataset.reason).value || 'rejected by moderator';
-  act(b.dataset.act, body);
+  act(path, body);
 });
 """
 

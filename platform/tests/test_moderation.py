@@ -1,6 +1,8 @@
 import json
 import os
 
+import pytest
+
 from conftest import handle_slug
 from tac_platform.publish import model_label
 from tac_platform.sandbox import run_limited
@@ -259,3 +261,41 @@ async def test_admin_button_paths_percent_encode_segments(ctx):
     assert _seg("a/b?c#d") == "a%2Fb%3Fc%23d"
     html_ = _button("x", f"/v1/admin/users/{_seg('a/../../x')}/house", {"house": True})
     assert "data-act='/v1/admin/users/a%2F..%2F..%2Fx/house'" in html_
+
+
+ADMIN_JS_HARNESS = r"""
+const posts = [];
+globalThis.location = { origin: 'https://api.terminalart.club', reload() {} };
+let handler;
+globalThis.document = {
+  addEventListener: (t, f) => { handler = f; },
+  getElementById: () => ({ value: 'r' }),
+};
+globalThis.fetch = async (url, opts) => { posts.push(url); return { ok: true }; };
+globalThis.alert = () => {};
+eval(process.argv[1]);
+const click = (act) => handler({ target: { closest: () => ({ dataset: { act } }) } });
+for (const a of JSON.parse(process.argv[2])) click(a);
+setTimeout(() => console.log(JSON.stringify(posts)), 0);
+"""
+
+
+@pytest.mark.parametrize("act,sent", [
+    ("/v1/admin/users/alex/trust", "/v1/admin/users/alex/trust"),
+    ("/v1/admin/submissions/abc/reject?x=1", "/v1/admin/submissions/abc/reject?x=1"),
+    ("/v1/me", None), ("/v1/submissions", None), ("https://evil.example/v1/admin/x", None),
+    ("//evil.example/v1/admin/x", None), ("/v1/admin/../me", None), ("/v1/admin/%2e%2e/me", None),
+    ("javascript:alert(1)", None), ("v1/admin/x", "/v1/admin/x"), ("", None),
+])
+def test_admin_listener_only_posts_to_admin_paths(act, sent):
+    import shutil
+    import subprocess
+
+    from tac_platform.admin import JS
+
+    if not shutil.which("node"):
+        pytest.skip("node not installed")
+    out = subprocess.run(["node", "-e", ADMIN_JS_HARNESS, JS, json.dumps([act])], capture_output=True, text=True,
+                         timeout=20)
+    assert out.returncode == 0, out.stderr
+    assert json.loads(out.stdout) == ([sent] if sent else [])
