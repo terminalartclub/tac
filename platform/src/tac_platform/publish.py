@@ -12,11 +12,13 @@ from datetime import UTC, datetime
 
 from .db import Database, now_iso
 from .storage import MediaStore
+from .views import utc_today, views_summary
 
 log = logging.getLogger("tac.publish")
 
 PUBLIC_FILES = ("preview.webp", "og.jpg")
 STATS_KEYS = ("motion_median", "seam", "void")
+REGEN_EVERY_S = 3600  # view counts in community.json are at most this stale
 
 
 def model_label(model_id: str) -> str:
@@ -247,8 +249,17 @@ class Publisher:
             " WHERE s.status = 'published' AND s.hidden = 0 ORDER BY s.published_at DESC, s.id"
         )
         pieces = []
+        counts = await views_summary(self.db, [r["id"] for r in rows])
+        # "This week" = the ISO week the theme and the wall run on (Mon 00:00 UTC → now): the last
+        # weekday()+1 entries of the 28-day series.
+        week_days = utc_today().weekday() + 1
+        week_views = 0
+        artists: dict[str, dict] = {}
         for r in rows:
             meta = json.loads(r["meta_json"])
+            c = counts[r["id"]]
+            week_views += sum(c["views_28d"][-week_days:])
+            artists.setdefault(r["handle"], {"views": 0})["views"] += c["views_total"]
             stats = json.loads(r["stats_json"] or "{}")
             base = f"{r['handle']}/{r['slug']}"
             notes = meta.get("process_notes") or []
@@ -270,6 +281,7 @@ class Publisher:
                     "license": meta.get("license", ""),
                     "created": r["created_at"][:10],
                     "pick": bool(r["pick"]),
+                    "views": c["views_total"],  # public, anonymous: one per IP per piece per UTC day
                     "preview": f"{base}/preview.webp",
                     "og": f"{base}/og.jpg",
                     "source": f"{base}/piece.py",
@@ -290,13 +302,14 @@ class Publisher:
         week = iso_week()
         return {
             "generated_at": now_iso(),
-            "week": week,
+            "week": {"label": week, "views": week_views},
             "theme": await self.theme(week),
             "totals": {
                 "pieces": len(pieces),
                 "artists": len({p["handle"] for p in pieces}),
                 "tokens": sum(p["tokens"] or 0 for p in pieces),
             },
+            "artists": artists,
             "pieces": pieces,
         }
 
@@ -306,3 +319,13 @@ class Publisher:
             doc = await self.build()
             await self.store.put("public/community.json", json.dumps(doc, indent=1).encode())
             return doc
+
+
+async def regen_loop(publisher: Publisher, every_s: float = REGEN_EVERY_S) -> None:
+    """Refresh community.json's view counts on a timer (never per view). Startup already built it."""
+    while True:
+        await asyncio.sleep(every_s)
+        try:
+            await publisher.regenerate()  # takes _regen_lock: serialised with publish/hide/delete regens
+        except Exception:  # noqa: BLE001
+            log.exception("community.json regen failed")

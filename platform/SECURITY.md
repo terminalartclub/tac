@@ -195,7 +195,7 @@ docker run --rm --name tac-render-<random> --network none --read-only --tmpfs /t
 - The client IP is the socket peer. `Fly-Client-IP` / `X-Forwarded-For` are honoured only with `TAC_TRUST_PROXY=1`. Otherwise anyone could spoof them and dodge the limits.
 - Known gap: 3 IPs (one phone, one VPN, one home connection) are enough to hide any piece. That's acceptable because hiding only puts the piece in the admin queue, and unhide clears its reports. Revisit if it gets abused.
 
-## 5. View counts (privacy)
+## 5. View counts and site events (privacy)
 
 - **No cookies, no identifiers, no body.** The site fires `POST /v1/pieces/{h}/{s}/view`, and the response is 204 with an empty body in every case: unknown, hidden, duplicate or rate-limited. A probe learns nothing about state.
 - **No raw IPs.**
@@ -209,9 +209,14 @@ docker run --rm --name tac-render-<random> --network none --read-only --tmpfs /t
 - **Abuse limits:**
   - 120 view POSTs per hash per hour. Beyond that they are silently dropped (still 204).
   - Dedupe caps inflation at 1 per IP per piece per day, so inflating by N takes N IPs.
-  - Counts are private and unranked, which leaves little incentive to game them.
+  - Counts are public but unranked; the site shows a piece's count only at ≥ 25 and aggregates only at ≥ 100.
 - **CORS** is echoed only for `TAC_SITE_ORIGINS`. The POST is a "simple" request, so CORS doesn't stop a third-party page firing it. Dedupe and the rate limit are what bound the effect.
-- **Exposure:** only the owner (`/v1/me/pieces`, Bearer) and admins see counts. `community.json` carries none (tested).
+- **Exposure:** view counts are public, aggregated and anonymous. `community.json` carries per-piece totals,
+  per-artist totals and the current ISO week's sum, rebuilt hourly. It carries no hashes, no per-day series and nothing
+  per viewer. The owner (`/v1/me/pieces`, Bearer) also sees the 7-day count and the 28-day series.
+- **Site events** (`POST /v1/events`): an allowlist of three names (`piece_share`, `install_copy`, `install_send`);
+  anything else gets a 400. Only `event_days(name, day, n)` is stored, with no IP, hash, piece or cookie. The limit is
+  60 per IP-day hash per hour, keyed with the same daily salt as views; over it the event is dropped with a 204.
 
 ## 6. Automod
 

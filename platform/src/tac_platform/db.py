@@ -107,6 +107,12 @@ CREATE TABLE IF NOT EXISTS view_days (      -- rollup, kept
     views         INTEGER NOT NULL,
     PRIMARY KEY (submission_id, day)
 );
+CREATE TABLE IF NOT EXISTS event_days (     -- site events, counted per UTC day; no viewer data
+    name TEXT NOT NULL,                         -- piece_share | install_copy | install_send
+    day  TEXT NOT NULL,
+    n    INTEGER NOT NULL,
+    PRIMARY KEY (name, day)
+);
 CREATE TABLE IF NOT EXISTS kv (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL

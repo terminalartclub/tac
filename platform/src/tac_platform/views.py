@@ -1,4 +1,5 @@
-"""Private view counts (v0). Counts are never public: not in community.json, no rankings.
+"""View counts. Public as aggregates only: community.json carries each piece's total, each artist's
+total and the current ISO week's sum (refreshed hourly). The site decides what to show.
 
 POST /v1/pieces/{handle}/{slug}/view  -> 204 always (no auth, no cookies, no body)
 GET  /v1/me/pieces                    -> the caller's own pieces with views_total / views_7d / views_28d

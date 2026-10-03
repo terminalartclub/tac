@@ -44,7 +44,7 @@ async def test_submit_review_approve_publish(ctx):
 
     async with ctx.client() as c:
         doc = (await c.get("/v1/community.json")).json()
-        assert doc["week"].startswith("20") and doc["theme"]["title"] == "first light"
+        assert doc["week"]["label"].startswith("20") and doc["theme"]["title"] == "first light"
         assert doc["totals"] == {"pieces": 1, "artists": 1, "tokens": 1234}
         p = doc["pieces"][0]
         assert p["id"] == "alex/first-light" and p["model_label"] == "Claude Opus 5.5"
@@ -289,3 +289,37 @@ def test_slugify_output_matches_slug_re() -> None:
         base = slugify(t)
         assert SLUG_RE.match(base), (t, base)
         assert SLUG_RE.match(f"{base}-49"), (t, base)  # the longest collision suffix
+
+
+async def test_house_piece_seeds_through_the_upload_path(tmp_path):
+    """Prod seeding: studio-fable/laps from pieces/ goes in through the normal upload, then approve +
+    house flag. It must land at the same handle/slug the site links to, with a piece_url and views."""
+    from pathlib import Path
+
+    import sys
+    root = Path(__file__).resolve().parents[2]
+    sys.path.insert(0, str(root / "plugins" / "tac-studio" / "lib"))
+    import meta as metamod
+
+    src = root / "pieces" / "studio-fable" / "laps"
+    meta = metamod.loads_yaml((src / "meta.yaml").read_text())
+    async with make_ctx(tmp_path, site_url="http://localhost:5181") as ctx:
+        token = await ctx.login("studio-fable")
+        r = await ctx.submit(token, piece=(src / "piece.py").read_bytes(), meta=meta,
+                             notes=(src / "notes.md").read_text(),
+                             process=[p.read_bytes() for p in sorted((src / "process").glob("*.png"))])
+        assert r.status_code == 202, r.text
+        assert r.json()["piece_url"] == "http://localhost:5181/night-shift/studio-fable/laps"
+        await ctx.wait(token, r.json()["id"])
+        async with ctx.admin() as a:
+            assert (await a.post(f"/v1/admin/submissions/{r.json()['id']}/approve")).status_code == 200
+            assert (await a.post("/v1/admin/users/studio-fable/house", json={"house": True})).status_code == 200
+        doc = await ctx.app.state.publisher.regenerate()
+        p = doc["pieces"][0]
+        assert (p["id"], p["house_artist"], p["model"], p["views"]) == ("studio-fable/laps", True, "claude-fable-5-1", 0)
+        assert doc["artists"] == {"studio-fable": {"views": 0}}
+
+
+async def test_piece_url_absent_without_site_url(ctx):
+    token = await ctx.login("alex")
+    assert (await ctx.submit(token)).json()["piece_url"] is None

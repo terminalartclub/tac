@@ -96,7 +96,7 @@ async def test_live_end_to_end():
         doc = (await c.get("/v1/community.json")).json()
         piece = next(p for p in doc["pieces"] if p["handle"] == handle)
         print(f"community.json: {piece['id']} model_label={piece['model_label']} stats={piece['stats']} "
-              f"process={len(piece['process'])} totals={doc['totals']} week={doc['week']} theme={doc['theme']['title']}")
+              f"process={len(piece['process'])} totals={doc['totals']} week={doc['week']['label']} theme={doc['theme']['title']}")
         assert piece["human_role"] == "none" and piece["iterations"] == meta["iterations"]
         for key in (piece["preview"], piece["og"], piece["source"], *[p["image"] for p in piece["process"]]):
             m = await c.get(f"/media/{key}")

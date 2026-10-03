@@ -13,12 +13,12 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from . import admin, auth, me, moderation, render_io, submissions, views, web_auth
+from . import admin, auth, events, me, moderation, render_io, submissions, views, web_auth
 from .automod import Automod
 from .config import Settings
 from .db import Database
 from .pipeline import Pipeline
-from .publish import Publisher
+from .publish import Publisher, regen_loop
 from .storage import LocalStore
 from .web import ApiError
 
@@ -150,13 +150,15 @@ def create_app(settings: Settings | None = None, automod: Automod | None = None)
         if settings.worker_enabled:
             await pipeline.start()
         purger = asyncio.create_task(views.purge_loop(db), name="tac-view-purge")
+        regen = asyncio.create_task(regen_loop(publisher), name="tac-community-regen")
         log.info("tac-platform up: auth=%s automod=%s tools=%s", settings.auth_mode,
                  "on" if pipeline.automod.enabled else "off", settings.tools_dir)
         try:
             yield
         finally:
             purger.cancel()
-            await asyncio.gather(purger, return_exceptions=True)
+            regen.cancel()
+            await asyncio.gather(purger, regen, return_exceptions=True)
             await pipeline.stop()
             await db.close()
 
@@ -183,7 +185,7 @@ def create_app(settings: Settings | None = None, automod: Automod | None = None)
     async def healthz() -> dict:
         return {"ok": True}
 
-    for r in (auth.router, web_auth.router, me.router, submissions.router, moderation.router, views.router,
+    for r in (auth.router, web_auth.router, me.router, submissions.router, moderation.router, views.router, events.router,
               render_io.router, admin.router):
         app.include_router(r)
     app.mount("/media", StaticFiles(directory=public_dir), name="media")

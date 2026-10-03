@@ -40,9 +40,13 @@ async def test_views_dedupe_per_ip_day_and_private(ctx):
     rows = await ctx.app.state.db.fetchall("SELECT * FROM views")
     assert len(rows) == 3 and not any("1.1.1.1" in json.dumps(dict(r)) for r in rows)
 
-    async with ctx.client() as c:  # never public
-        doc = (await c.get("/v1/community.json")).text
-    assert "views" not in doc
+    async with ctx.client() as c:  # public only as aggregates, after the next regen
+        stale = (await c.get("/v1/community.json")).json()
+        assert stale["pieces"][0]["views"] == 0  # never regenerated per view
+        await ctx.app.state.publisher.regenerate()
+        doc = (await c.get("/v1/community.json")).json()
+    assert doc["pieces"][0]["views"] == 3 and doc["artists"] == {h: {"views": 3}} and doc["week"]["views"] == 3
+    assert "ip_day_hash" not in json.dumps(doc) and "views_28d" not in json.dumps(doc)
     async with ctx.admin() as a:
         q = (await a.get("/v1/admin/queue")).json()
         assert q["published"][0]["views_7d"] == 3
@@ -130,3 +134,96 @@ async def test_me_pieces_contract_shape(ctx):
     assert p["url"].startswith("http")
     await ctx.app.state.publisher.hide(h, s, "test")
     assert (await _mine(ctx, token))["pieces"][0]["status"] == "hidden"
+
+
+async def test_community_json_views_fields(ctx):
+    token, sub_a, h, s_a = await _published(ctx, "alex")
+    sub_b = (await ctx.submit(token)).json()["id"]  # same title -> slug "...-2"
+    await ctx.wait(token, sub_b)
+    async with ctx.admin() as a:
+        assert (await a.post(f"/v1/admin/submissions/{sub_b}/approve")).status_code == 200
+    _, s_b = handle_slug((await ctx.wait(token, sub_b, until=("published",)))["preview_url"])
+    _, sub_c, h2, s_c = await _published(ctx, "bea")
+    db, today = ctx.app.state.db, views.utc_today()
+    monday = today - timedelta(days=today.weekday())
+    rows = [(sub_a, today, 5), (sub_a, monday, 2), (sub_a, monday - timedelta(days=1), 100),  # last week
+            (sub_b, today - timedelta(days=60), 7), (sub_c, today, 1)]
+    for sid, day, n in rows:
+        await db.execute("INSERT INTO view_days (submission_id, day, views) VALUES (?, ?, ?)"
+                         " ON CONFLICT(submission_id, day) DO UPDATE SET views = views + excluded.views",
+                         (sid, day.isoformat(), n))
+    doc = await ctx.app.state.publisher.regenerate()
+    by_id = {p["id"]: p["views"] for p in doc["pieces"]}
+    a_total = 107  # (on a Monday, today and monday are one row of 7)
+    assert by_id == {f"{h}/{s_a}": a_total, f"{h}/{s_b}": 7, f"{h2}/{s_c}": 1}
+    assert all(type(v) is int for v in by_id.values())
+    assert doc["artists"] == {h: {"views": a_total + 7}, h2: {"views": 1}}
+    # current ISO week (Mon 00:00 UTC -> now): today + Monday, never last Sunday or 60 days ago
+    assert doc["week"]["views"] == 5 + 2 + 1
+    assert doc["week"]["label"] == f"{today.isocalendar()[0]}-W{today.isocalendar()[1]:02d}"
+    # a hidden piece drops out of every public aggregate
+    await ctx.app.state.publisher.hide(h2, s_c, "test")
+    doc = json.loads(await ctx.app.state.store.get("public/community.json"))
+    assert h2 not in doc["artists"] and doc["week"]["views"] == 7
+
+
+async def test_regen_loop_runs_hourly_under_the_lock(ctx, monkeypatch):
+    import asyncio
+
+    from tac_platform import publish
+
+    pub = ctx.app.state.publisher
+    held: list[bool] = []
+    real_build = pub.build
+
+    async def build():
+        held.append(pub._regen_lock.locked())
+        return await real_build()
+
+    monkeypatch.setattr(pub, "build", build)
+    assert publish.REGEN_EVERY_S == 3600
+    task = asyncio.create_task(publish.regen_loop(pub, every_s=0.01))
+    for _ in range(200):
+        if len(held) >= 2:
+            break
+        await asyncio.sleep(0.01)
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    assert len(held) >= 2 and all(held)
+    assert any(t.get_name() == "tac-community-regen" for t in asyncio.all_tasks())  # started by the app
+
+
+async def test_events_allowlist_and_counts(ctx):
+    db = ctx.app.state.db
+    async with ctx.client(ip="7.7.7.7") as c:
+        for name in ("piece_share", "install_copy", "install_send", "install_copy"):
+            r = await c.post("/v1/events", content=json.dumps({"name": name}),
+                             headers={"content-type": "text/plain;charset=UTF-8"})  # sendBeacon shape
+            assert r.status_code == 204 and r.content == b""
+        for bad in (b'{"name": "page_view"}', b'{"name": ["piece_share"]}', b"[]", b"not json", b"",
+                    b'{"name": "piece_share\\u0000"}'):
+            r = await c.post("/v1/events", content=bad)
+            assert r.status_code == 400 and r.json()["error"] == "unknown_event"
+    rows = {r["name"]: r["n"] for r in await db.fetchall("SELECT name, n FROM event_days")}
+    assert rows == {"piece_share": 1, "install_copy": 2, "install_send": 1}
+    stored = json.dumps([dict(r) for r in await db.fetchall("SELECT * FROM event_days")])
+    assert "7.7.7.7" not in stored
+
+
+async def test_events_rate_limited_silently(ctx):
+    from tac_platform import events
+
+    async with ctx.client(ip="8.8.8.8") as c:
+        codes = {(await c.post("/v1/events", json={"name": "piece_share"})).status_code
+                 for _ in range(events.EVENTS_PER_HOUR + 5)}
+    assert codes == {204}
+    n = (await ctx.app.state.db.fetchone("SELECT n FROM event_days WHERE name = 'piece_share'"))["n"]
+    assert n == events.EVENTS_PER_HOUR
+
+
+async def test_events_cors_only_site_origins(ctx):
+    async with ctx.client() as c:
+        ok = await c.post("/v1/events", json={"name": "install_copy"}, headers={"origin": "http://localhost:5181"})
+        assert ok.headers["access-control-allow-origin"] == "http://localhost:5181"
+        evil = await c.post("/v1/events", json={"name": "install_copy"}, headers={"origin": "https://evil.example"})
+        assert "access-control-allow-origin" not in evil.headers

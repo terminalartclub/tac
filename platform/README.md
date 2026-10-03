@@ -69,10 +69,11 @@ TAC_E2E_URL=http://127.0.0.1:8790 TAC_E2E_ADMIN_TOKEN=t uv run pytest tests/test
 | POST | `/v1/submissions` | Bearer | multipart `piece`, `meta`, `notes?`, `process[≤4]`. 202 `{id, status, url}` |
 | GET | `/v1/submissions/{id}` | Bearer, owner | `{id, status, reasons, preview_url, critique}`; others get 404 |
 | GET | `/v1/submissions/{id}/preview.webp` | signed URL | pre-publish preview (HMAC, 7-day expiry) |
-| GET | `/v1/community.json` | none | gallery feed (CORS `*`) |
+| GET | `/v1/community.json` | none | gallery feed (CORS `*`): pieces with `views`, `artists{handle: {views}}`, `week{label, views}`; rebuilt on every publish change and hourly |
 | GET | `/media/{handle}/{slug}/...` | none | preview.webp, og.jpg, piece.py, process/NN.webp |
 | POST | `/v1/pieces/{handle}/{slug}/report` | none | `{reason}`; 5/h per IP; 3 distinct IPs hide the piece |
-| POST | `/v1/pieces/{handle}/{slug}/view` | none | private view count; 204 always (see below) |
+| POST | `/v1/pieces/{handle}/{slug}/view` | none | count a view; 204 always (see below) |
+| POST | `/v1/events` `{"name": "piece_share"\|"install_copy"\|"install_send"}` | none | per-day event counter; 204, or 400 for an unknown name |
 | GET | `/v1/me/pieces` | cookie or Bearer | own pieces: `{pieces: [{id: "handle/slug", slug, title, status (+ "hidden"), views_total, views_7d, views_28d[28 ints, oldest→newest, last = today UTC], url, critique, reasons}]}` (pinned with the plugin) |
 | GET | `/admin`, `/admin/login?token=` | admin | HTML queue: in review, hidden, published, audit log |
 | GET | `/v1/admin/queue` | admin | JSON version of the queue |
@@ -107,7 +108,7 @@ site JS: GET /api/v1/auth/web/csrf → X-TAC-CSRF on every PATCH/POST/DELETE mad
 - Unknown keys are ignored.
 - `human_role` is passed through to `community.json` and shown in `/admin`.
 
-## View counts (private, v0)
+## View counts (public aggregates)
 
 ```
 site ──POST /v1/pieces/h/s/view──▶ day_salt(UTC day) ─▶ hash = sha256(salt|ip)
@@ -120,12 +121,21 @@ site ──POST /v1/pieces/h/s/view──▶ day_salt(UTC day) ─▶ hash = sha
 ```
 
 - One view per piece, per IP, per UTC day.
-- Counts are private:
-  - only the owner sees them (`GET /v1/me/pieces`: total, last 7 days, a 28-day series from oldest to newest);
-  - admins see `views_7d` in the queue;
-  - nothing goes into `community.json`, and there are no rankings.
+- Counts are public, aggregated and anonymous:
+  - `community.json` carries each piece's all-time `views`, each artist's total (`artists.<handle>.views`) and
+    `week.views`, the sum over the current ISO week (Mon 00:00 UTC → now, the same week as the theme);
+  - it is rebuilt hourly (`regen_loop`, under the publisher's regen lock), never per view, so counts lag by up to an hour;
+  - the site applies the display thresholds (a piece shows `seen N` at N ≥ 25; aggregates at ≥ 100);
+  - the owner also gets the 7-day count and a 28-day series (`GET /v1/me/pieces`); admins see `views_7d` in the queue.
 - CORS: `Access-Control-Allow-Origin` is echoed only for `TAC_SITE_ORIGINS`.
 - Retention: per-hash `views` rows are purged after 30 days (hourly job); the `view_days` rollup is kept.
+
+### Site events
+
+`POST /v1/events` with body `{"name": "piece_share" | "install_copy" | "install_send"}`. Any Content-Type, so
+`navigator.sendBeacon(url, JSON.stringify({name}))` (text/plain, no preflight) works. Only `event_days(name, day, n)`
+is stored. The rate limit is 60 per salted IP-day hash per hour (the views salt); over it the event is dropped with a 204.
+An unknown name returns 400 `{"error": "unknown_event", "allowed": [...]}`.
 
 ## Limits
 

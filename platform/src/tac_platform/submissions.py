@@ -149,7 +149,9 @@ async def _accept(request: Request, user: dict, form, since: str, limit: int) ->
     async with st.db.tx() as tx:
         await tx.audit(f"user:{user['handle']}", "submit", sub_id, None, "queued", slug)
     st.pipeline.wake()
-    return SubmissionAccepted(id=sub_id, status="queued", url=f"{st.settings.public_base_url}/v1/submissions/{sub_id}")
+    site = st.settings.site_url
+    return SubmissionAccepted(id=sub_id, status="queued", url=f"{st.settings.public_base_url}/v1/submissions/{sub_id}",
+                              piece_url=f"{site}/night-shift/{user['handle']}/{slug}" if site else None)
 
 
 @router.get("/v1/submissions/{sub_id}", response_model=SubmissionOut)
