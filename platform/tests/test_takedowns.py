@@ -286,6 +286,24 @@ async def test_suspend_is_one_transaction_and_a_retry_finishes_a_failed_media_sw
     assert (await db.fetchone("SELECT suspended_reason FROM users WHERE handle = ?", (h,)))[0] == "DMCA-2026-001"
 
 
+async def test_suspend_rejects_queued_work_and_the_worker_skips_suspended_owners(tmp_path):
+    async with make_ctx(tmp_path, worker_enabled=False) as ctx:  # nothing claims: rows stay queued
+        alex, sam = await ctx.login("alex"), await ctx.login("sam")
+        a1 = (await ctx.submit(alex)).json()
+        s1 = (await ctx.submit(sam)).json()
+        db, pipe = ctx.app.state.db, ctx.app.state.pipeline
+        async with ctx.admin() as a:
+            r = (await a.post("/v1/admin/users/alex/suspend", json={"reason": "DMCA-2026-003"})).json()
+        assert r["rejected_queued"] == ["alex/first-light"]
+        row = await db.fetchone("SELECT status, reasons_json FROM submissions WHERE id = ?", (a1["id"],))
+        assert (row["status"], json.loads(row["reasons_json"])) == ("rejected", ["account suspended"])
+        # a queued row of a suspended owner (e.g. one that slipped in) is never claimed; others still are
+        await db.execute("UPDATE submissions SET status = 'queued' WHERE id = ?", (a1["id"],))
+        assert await pipe.claim() == s1["id"]
+        assert await pipe.claim() is None
+        assert (await db.fetchone("SELECT status FROM submissions WHERE id = ?", (a1["id"],)))["status"] == "queued"
+
+
 # ---------------------------------------------------------------- Instagram
 
 

@@ -217,7 +217,8 @@ docker run --rm --name tac-render-<random> --network none --read-only --tmpfs /t
   regenerated, og/share 404. Reversible with unhide. Then delete, unhide, or suspend.
 - **Suspend** is one `BEGIN IMMEDIATE` transaction under the DB write lock: set `suspended_at`, delete every
   `access_tokens`, `web_sessions` and `device_codes` row of the user, set `hidden=1` on every published
-  piece (one audit row each), write the suspend audit row. No request
+  piece and reject every `queued` one (one audit row each), write the suspend audit row. The worker's claim
+  skips suspended owners. No request
   authenticated by a revoked credential can start after it commits. Every path that creates a credential
   re-checks `suspended_at` inside its own transaction (web session insert, device approval, token mint), and
   `current_user` refuses a suspended user (403 `suspended`) as a second line. The submission `INSERT` carries

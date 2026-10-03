@@ -139,7 +139,9 @@ class Pipeline:
         async with self.db.tx() as tx:
             row = await tx.fetchone(
                 "UPDATE submissions SET status = 'rendering', updated_at = ?"
-                " WHERE id = (SELECT id FROM submissions WHERE status = 'queued' ORDER BY created_at, id LIMIT 1)"
+                " WHERE id = (SELECT id FROM submissions WHERE status = 'queued'"
+                " AND user_id NOT IN (SELECT id FROM users WHERE suspended_at IS NOT NULL)"  # suspended: never rendered
+                " ORDER BY created_at, id LIMIT 1)"
                 " AND status = 'queued' RETURNING id",
                 (now_iso(),),
             )

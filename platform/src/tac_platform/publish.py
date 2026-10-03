@@ -118,6 +118,14 @@ class Publisher:
                 tokens = await tx.execute("DELETE FROM access_tokens WHERE user_id = ?", (uid,))
                 sessions = await tx.execute("DELETE FROM web_sessions WHERE user_id = ?", (uid,))
                 await tx.execute("DELETE FROM device_codes WHERE user_id = ?", (uid,))  # approved, not yet polled
+                queued = await tx.conn.execute_fetchall(
+                    "SELECT id, slug FROM submissions WHERE user_id = ? AND status = 'queued'", (uid,))
+                for q in queued:  # not rendered yet: stop it (a render already running ends in review, unpublishable)
+                    await tx.execute(
+                        "UPDATE submissions SET status = 'rejected', reasons_json = ?, updated_at = ?"
+                        " WHERE id = ? AND status = 'queued'", (json.dumps(["account suspended"]), now_iso(), q[0]))
+                    await tx.audit(actor, "reject", q[0], "queued", "rejected", "account suspended",
+                                   target=f"{handle}/{q[1]}")
                 visible = await tx.conn.execute_fetchall(
                     "SELECT id, slug, ig_posted_at FROM submissions WHERE user_id = ? AND status = 'published'"
                     " AND hidden = 0", (uid,))
@@ -147,6 +155,7 @@ class Publisher:
                 "already_suspended": already,
                 "revoked_tokens": tokens,
                 "revoked_sessions": sessions,
+                "rejected_queued": [f"{handle}/{q[1]}" for q in queued],
                 "hidden": [f"{handle}/{p[1]}" for p in visible],
                 "ig_posted": [f"{handle}/{p[1]}" for p in visible if p[2]],
                 "media_removed": removed,

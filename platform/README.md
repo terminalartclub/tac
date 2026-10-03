@@ -99,7 +99,8 @@ The terms promise copyright/hate takedowns within 72 hours and that repeat infri
 - **Then decide:** "Delete" (piece → `rejected`, media removed; the artist sees the reason), "Unhide" (claim
   rejected), or "Suspend <handle>" for a repeat offender.
 - **Suspend** (`users.suspended_at`/`suspended_reason`): revokes every plugin token, web session and
-  approved device code in one transaction, hides every published piece (reason `account suspended`), and from
+  approved device code in one transaction, hides every published piece and rejects every queued one
+  (reason `account suspended`; the worker never claims a suspended owner's rows), and from
   then on sign-in (web and device) is refused and submissions get 403 `suspended`. Approve/unhide of their
   pieces is refused while suspended. **Unsuspend** restores sign-in only: unhide pieces one by one.
 - **Instagram:** the platform can't delete our IG posts. Mark a piece "posted to IG" when we post it; once
