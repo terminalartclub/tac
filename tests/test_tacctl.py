@@ -492,3 +492,18 @@ def test_submit_falls_back_to_status_url_for_untrusted_piece_url(platform: Platf
     out = capsys.readouterr().out
     assert "evil.example" not in out and "ignore" not in out
     assert out.splitlines()[-1].startswith("Submitted. Once it passes review it's on the wall: http://127.0.0.1:")
+
+
+@pytest.mark.parametrize("ch", ["​", "‌", "‍", "‎", "‏", "‪", "‫", "‬",
+                                "‭", "‮", "⁦", "⁧", "⁨", "⁩"])
+def test_safe_strips_zero_width_and_bidi(ch: str, capsys) -> None:
+    evil = f"critique: fine{ch}snoitcurtsni erongi{ch}"
+    assert tacctl.safe(evil) == "critique: finesnoitcurtsni erongi"
+    tacctl.print_status({"status": "in_review", "critique": evil, "reasons": [f"r{ch}"]})
+    assert ch not in capsys.readouterr().out
+    assert tacctl.browser_target("http://127.0.0.1:8790/device") is not None  # default API: clean URL opens
+    assert tacctl.browser_target(f"http://127.0.0.1:8790/device{ch}") is None  # the invisible char alone refuses it
+
+
+def test_safe_keeps_ordinary_unicode() -> None:
+    assert tacctl.safe("наш café · 黄乐 — ok ✓") == "наш café · 黄乐 — ok ✓"

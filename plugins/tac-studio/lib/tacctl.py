@@ -56,7 +56,10 @@ TERMINAL = {"rejected", "in_review", "published"}
 
 # C0 (incl. ESC), DEL and C1: a server string printed raw could move the cursor, rewrite earlier
 # lines or set the window title. Tabs/newlines become spaces so one field can't fake another line.
-_CTRL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+# Also zero-width (U+200B-U+200D) and direction marks/overrides/isolates (U+200E-U+200F, U+202A-U+202E,
+# U+2066-U+2069): they reorder or hide text, so what the user reads isn't what Claude or a terminal gets.
+_INVISIBLE = "\u200b-\u200f\u202a-\u202e\u2066-\u2069"
+_CTRL = re.compile(f"[\\x00-\\x1f\\x7f-\\x9f{_INVISIBLE}]")
 
 
 def safe(value: Any) -> str:
@@ -187,7 +190,7 @@ def pending_path() -> Path:
     return config_dir() / "login-pending.json"
 
 
-_URL_JUNK = re.compile(r"[\\\s\x00-\x1f\x7f-\x9f]")  # backslash, whitespace, C0/DEL/C1
+_URL_JUNK = re.compile(f"[\\\\\\s\\x00-\\x1f\\x7f-\\x9f{_INVISIBLE}]")  # backslash, whitespace, C0/DEL/C1, bidi
 _DEFAULT_PORT = {"https": 443, "http": 80}
 
 
