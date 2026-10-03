@@ -12,3 +12,5 @@ This logs in to the TAC community platform only. It never reads or touches Anthr
 3. Report the handle it prints. If it fails or expires, show the error and offer to start again.
 
 If `TAC_API` is set in the environment, that platform is used (default `http://127.0.0.1:8790`).
+It must be `https://`; plain `http://` is refused except on localhost. tacctl opens the browser only
+for https pages on that same host; for anything else it prints the URL and does not open it.

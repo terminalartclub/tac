@@ -290,3 +290,90 @@ def test_mine_wraps_to_terminal_width(platform: Platform, monkeypatch: pytest.Mo
     lines = capsys.readouterr().out.splitlines()
     crit = [ln for ln in lines if ln.startswith("    ") and "✗" not in ln]
     assert len(crit) >= 3 and all(len(ln) <= 50 for ln in crit)
+
+
+# ── hardening: browser opener, API base, server strings ──────────────────
+
+
+@pytest.mark.parametrize("api,url,ok", [
+    ("https://api.terminalart.club", "https://api.terminalart.club/device?code=AB-12", True),
+    ("https://api.terminalart.club", "http://api.terminalart.club/device", False),  # http off loopback
+    ("https://api.terminalart.club", "https://evil.example/device", False),  # other host
+    ("https://api.terminalart.club", "https://api.terminalart.club.evil.example/device", False),
+    ("https://api.terminalart.club", "file:///Applications/Calculator.app", False),
+    ("https://api.terminalart.club", "smb://api.terminalart.club/share", False),
+    ("https://api.terminalart.club", "vscode://api.terminalart.club/x", False),
+    ("https://api.terminalart.club", "javascript:alert(1)", False),
+    ("https://api.terminalart.club", "-a Calculator", False),
+    ("http://127.0.0.1:8790", "http://127.0.0.1:8790/device", True),
+    ("http://[::1]:8790", "http://[::1]:8790/device", True),
+    ("http://localhost:8790", "http://localhost:8790/device", True),
+    ("http://127.0.0.1:8790", "http://localhost:8790/device", False),  # host must equal the API host
+])
+def test_open_browser_only_opens_https_pages_on_api_host(monkeypatch: pytest.MonkeyPatch, capsys,
+                                                         api: str, url: str, ok: bool) -> None:
+    launched: list[str] = []
+    monkeypatch.setattr(tacctl, "_launch", launched.append)
+    monkeypatch.setenv("TAC_API", api)
+    assert tacctl.open_browser(url) is ok
+    assert launched == ([url] if ok else [])
+    if not ok:
+        assert "not opening" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("api,ok", [
+    ("https://api.terminalart.club", True), ("http://127.0.0.1:8790", True), ("http://127.9.9.9", True),
+    ("http://localhost:1", True), ("http://[::1]:8790", True),
+    ("http://api.terminalart.club", False), ("http://10.0.0.5:8790", False), ("ftp://127.0.0.1", False),
+    ("file:///tmp/x", False), ("api.terminalart.club", False),
+])
+def test_api_base_refuses_plain_http_off_loopback(monkeypatch: pytest.MonkeyPatch, api: str, ok: bool) -> None:
+    monkeypatch.setenv("TAC_API", api)
+    if ok:
+        assert tacctl.api_base() == api
+    else:
+        with pytest.raises(tacctl.ApiError, match="refusing API base"):
+            tacctl.api_base()
+
+
+def test_stored_plain_http_api_is_refused(platform: Platform, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    monkeypatch.delenv("TAC_API")
+    tacctl.write_private(tacctl.cred_path(), {"api": "http://tac.evil.example", "access_token": "tok-123"})
+    assert tacctl.main(["status", "sub-1"]) == 1
+    assert "refusing API base" in capsys.readouterr().err
+
+
+def test_login_refuses_server_supplied_file_url(platform: Platform, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    launched: list[str] = []
+    monkeypatch.setattr(tacctl, "_launch", launched.append)
+    monkeypatch.setattr(tacctl, "post_json", lambda url, payload, token=None: (200, {
+        "device_code": "dc-1", "user_code": "\x1b]0;pwned\x07AB-12",
+        "verification_uri": "file:///Applications/Calculator.app\x1b[2J",
+        "verification_uri_complete": "file:///Applications/Calculator.app"}))
+    assert tacctl.main(["login", "--start"]) == 0
+    out = capsys.readouterr().out
+    assert launched == [] and "opened in your browser" not in out and "not opening" in out
+    assert "\x1b" not in out and "\x07" not in out and "code: ]0;pwnedAB-12" in out
+
+
+CTRL = [chr(c) for c in [*range(0x00, 0x20), *range(0x7f, 0xa0)] if chr(c) != "\n"]
+
+
+def test_server_strings_are_stripped_of_control_chars(capsys) -> None:
+    evil = "ok\x1b[2K\x1b[1A\rstatus: published\x9b31m\x07\x00 done"
+    assert tacctl.safe(evil) == "ok[2K[1A status: published31m done"
+    tacctl.print_status({"status": evil, "reasons": [evil], "critique": evil, "preview_url": evil, "url": evil})
+    tacctl.die(f"HTTP 500 {evil}")
+    out, err = capsys.readouterr()
+    assert out.count("\n") == 5 and err.count("\n") == 1  # one line per field: no injected newlines
+    assert not any(c in out + err for c in CTRL)
+
+
+def test_mine_strips_control_chars(platform: Platform, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    tacctl.write_private(tacctl.cred_path(), {"access_token": "tok-123", "handle": "al\x1b[31mex"})
+    monkeypatch.setattr(tacctl, "http", lambda *a, **k: (200, {"pieces": [
+        {"id": "s", "title": "t\x1b]0;x\x07", "status": "rejected\x1b[1A", "critique": "c\x9b2J",
+         "reasons": ["r\x1b[2K"], "views_total": 1, "views_7d": 1, "views_28d": [1]}]}))
+    assert tacctl.main(["mine"]) == 0
+    out = capsys.readouterr().out
+    assert not any(c in out for c in CTRL)

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import ipaddress
 import json
 import os
 import re
@@ -34,6 +35,7 @@ import uuid
 import webbrowser
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 LIB = Path(__file__).resolve().parent
 PLUGIN = LIB.parent
@@ -47,8 +49,46 @@ PROCESS_W = 540
 TERMINAL = {"rejected", "in_review", "published"}
 
 
+# C0 (incl. ESC), DEL and C1: a server string printed raw could move the cursor, rewrite earlier
+# lines or set the window title. Tabs/newlines become spaces so one field can't fake another line.
+_CTRL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+
+
+def safe(value: Any) -> str:
+    """Printable form of a string that came from the server (or a file it wrote)."""
+    return _CTRL.sub(lambda m: " " if m.group() in "\t\n\r" else "", str(value))
+
+
+def is_loopback(host: str | None) -> bool:
+    if not host:
+        return False
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback  # 127.0.0.0/8, ::1
+    except ValueError:
+        return False
+
+
+def checked_base(url: str) -> str:
+    """An API base: https anywhere, plain http only on loopback (the token rides on it)."""
+    try:
+        u = urlsplit(url)
+        host = u.hostname
+    except ValueError:
+        host = None
+    if host and (u.scheme == "https" or (u.scheme == "http" and is_loopback(host))):
+        return url.rstrip("/")
+    raise ApiError(0, f"refusing API base {safe(url)!r}: use https (plain http only for localhost)")
+
+
 def api_base() -> str:
-    return os.environ.get("TAC_API", DEFAULT_API).rstrip("/")
+    return checked_base(os.environ.get("TAC_API", DEFAULT_API))
+
+
+def session_base(creds: dict[str, Any]) -> str:
+    """TAC_API wins; else the platform you logged in to."""
+    return api_base() if os.environ.get("TAC_API") else checked_base(str(creds.get("api") or DEFAULT_API))
 
 
 def work_root() -> Path:
@@ -64,7 +104,7 @@ def cred_path() -> Path:
 
 
 def die(msg: str, code: int = 1) -> int:
-    print(f"error: {msg}", file=sys.stderr)
+    print(f"error: {safe(msg)}", file=sys.stderr)
     return code
 
 
@@ -142,12 +182,39 @@ def pending_path() -> Path:
     return config_dir() / "login-pending.json"
 
 
-def open_browser(url: str) -> None:
+def browser_url_ok(url: str) -> bool:
+    """Only a page on the API's own host: https, or http when that host is loopback. A server-sent
+    file://, smb:// or custom-scheme URL handed to `open`/`xdg-open` would launch a local handler."""
+    try:
+        u, api = urlsplit(url), urlsplit(api_base())
+        host = u.hostname
+        if not host or host != api.hostname:
+            return False
+    except (ValueError, ApiError):
+        return False
+    return u.scheme == "https" or (u.scheme == "http" and is_loopback(host))
+
+
+def _launch(target: str) -> None:
     opener = "open" if sys.platform == "darwin" else "xdg-open" if shutil.which("xdg-open") else None
     if opener:
-        subprocess.run([opener, url], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run([opener, target], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     else:
-        webbrowser.open(url)
+        webbrowser.open(target)
+
+
+def open_browser(url: str) -> bool:
+    """Open a server-supplied URL in the browser; refuse (and just print it) unless browser_url_ok."""
+    if not browser_url_ok(url):
+        print(f"not opening {safe(url)!r}: only https pages on the TAC API host are opened")
+        return False
+    _launch(url)
+    return True
+
+
+def open_local(path: Path) -> None:
+    """Open a file this tool wrote itself (review page, style file)."""
+    _launch(str(path.resolve()))
 
 
 def cmd_login(a: argparse.Namespace) -> int:
@@ -159,11 +226,10 @@ def cmd_login(a: argparse.Namespace) -> int:
         write_private(pending_path(), {"api": base, "device_code": body["device_code"],
                                        "interval": body.get("interval", 5),
                                        "expires_at": time.time() + float(body.get("expires_in", 600))})
-        uri = body.get("verification_uri_complete") or body["verification_uri"]
-        print(f"code: {body['user_code']}")
-        print(f"approve at: {body['verification_uri']}")
-        if not a.no_browser:
-            open_browser(uri)
+        uri = str(body.get("verification_uri_complete") or body.get("verification_uri") or "")
+        print(f"code: {safe(body.get('user_code'))}")
+        print(f"approve at: {safe(body.get('verification_uri'))}")
+        if not a.no_browser and open_browser(uri):
             print("(opened in your browser)")
         print("then run: tacctl login --wait")
         return 0
@@ -172,6 +238,7 @@ def cmd_login(a: argparse.Namespace) -> int:
     except (OSError, json.JSONDecodeError):
         return die("no login in progress — run `tacctl login --start` first")
     interval = max(1.0, float(p.get("interval", 5)))
+    p["api"] = checked_base(str(p.get("api") or DEFAULT_API))
     while time.time() < p["expires_at"]:
         status, body = post_json(f"{p['api']}/v1/auth/token", {"device_code": p["device_code"]})
         if status == 200 and isinstance(body, dict) and body.get("access_token"):
@@ -179,7 +246,7 @@ def cmd_login(a: argparse.Namespace) -> int:
                                         "handle": body.get("handle"),
                                         "created": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")})
             pending_path().unlink(missing_ok=True)
-            print(f"logged in as {body.get('handle')} → {cred_path()} (mode 600)")
+            print(f"logged in as {safe(body.get('handle'))} → {cred_path()} (mode 600)")
             return 0
         if status == 428:
             time.sleep(interval)
@@ -204,7 +271,7 @@ def cmd_logout(a: argparse.Namespace) -> int:
 
 def cmd_whoami(a: argparse.Namespace) -> int:
     c = load_creds()
-    print(f"{c.get('handle')} @ {c.get('api')}" if c else "not logged in — run /tac:login")
+    print(f"{safe(c.get('handle'))} @ {safe(c.get('api'))}" if c else "not logged in — run /tac:login")
     return 0 if c else 1
 
 
@@ -493,7 +560,7 @@ def cmd_style(a: argparse.Namespace) -> int:
         if sys.platform == "darwin":
             subprocess.run(["open", "-t", str(path)], check=False)
         else:
-            open_browser(str(path))
+            open_local(path)
     return 0
 
 
@@ -501,14 +568,14 @@ def cmd_style(a: argparse.Namespace) -> int:
 
 
 def print_status(s: dict[str, Any]) -> None:
-    print(f"status: {s.get('status')}")
+    print(f"status: {safe(s.get('status'))}")
     for r in s.get("reasons") or []:
-        print(f"  reason: {r}")
+        print(f"  reason: {safe(r)}")
     if s.get("critique"):
-        print(f"critique: {s['critique']}")
+        print(f"critique: {safe(s['critique'])}")
     for k in ("preview_url", "url"):
         if s.get(k):
-            print(f"{k.replace('_', ' ')}: {s[k]}")
+            print(f"{k.replace('_', ' ')}: {safe(s[k])}")
 
 
 def poll(base: str, sid: str, token: str, wait_s: float) -> dict[str, Any]:
@@ -519,7 +586,7 @@ def poll(base: str, sid: str, token: str, wait_s: float) -> dict[str, Any]:
         if status != 200 or not isinstance(body, dict):
             raise ApiError(status, str(body))
         if body.get("status") != last:
-            print(f"  … {body.get('status')}", flush=True)
+            print(f"  … {safe(body.get('status'))}", flush=True)
             last = body.get("status")
         if body.get("status") in TERMINAL or time.time() >= deadline:
             return body
@@ -541,7 +608,7 @@ def cmd_submit(a: argparse.Namespace) -> int:
     creds = load_creds()
     if not creds:
         return die("not logged in — run /tac:login first")
-    base = api_base() if os.environ.get("TAC_API") else creds.get("api", api_base())
+    base = session_base(creds)
     send = {k: v for k, v in m.items() if k != "handle"}  # the platform takes the handle from the token
     files = [("piece", sub / "piece.py", "text/x-python")]
     if (sub / "notes.md").exists():
@@ -555,7 +622,7 @@ def cmd_submit(a: argparse.Namespace) -> int:
         return die("the platform rejected your login (401) — run /tac:login again")
     if status not in (200, 201, 202) or not isinstance(resp, dict) or "id" not in resp:
         return die(f"upload failed: HTTP {status} {resp}")
-    print(f"uploaded: submission {resp['id']} ({resp.get('status')})")
+    print(f"uploaded: submission {safe(resp['id'])} ({safe(resp.get('status'))})")
     record = {"id": resp["id"], "api": base, "url": resp.get("url"), "submitted": time.time()}
     (work_root() / a.name / ".submission.json").write_text(json.dumps(record, indent=2))
     if a.no_wait:
@@ -575,7 +642,7 @@ def cmd_status(a: argparse.Namespace) -> int:
     creds = load_creds()
     if not creds:
         return die("not logged in — run /tac:login")
-    base = api_base() if os.environ.get("TAC_API") else creds.get("api", api_base())
+    base = session_base(creds)
     status, body = http("GET", f"{base}/v1/submissions/{a.id}",
                         headers={"Authorization": f"Bearer {creds['access_token']}"})
     if status != 200 or not isinstance(body, dict):
@@ -604,7 +671,7 @@ def cmd_mine(a: argparse.Namespace) -> int:
     if not creds:
         print("not logged in — run /tac:login (or `tacctl login --start`) first")
         return 1
-    base = api_base() if os.environ.get("TAC_API") else creds.get("api", api_base())
+    base = session_base(creds)
     status, body = http("GET", f"{base}/v1/me/pieces",
                         headers={"Authorization": f"Bearer {creds['access_token']}", "Accept": "application/json"})
     if status == 401:
@@ -613,7 +680,7 @@ def cmd_mine(a: argparse.Namespace) -> int:
     if status != 200:
         return die(f"HTTP {status} {body}")
     pieces = body.get("pieces", []) if isinstance(body, dict) else body if isinstance(body, list) else []
-    print(f"@{creds.get('handle')} · your pieces (only you see these counts)")
+    print(f"@{safe(creds.get('handle'))} · your pieces (only you see these counts)")
     if not pieces:
         print("  none yet — /tac:create, then /tac:submit")
         return 0
@@ -626,9 +693,9 @@ def cmd_mine(a: argparse.Namespace) -> int:
             notes_ += [("reason", str(r)) for r in (p.get("reasons") or [])]
         extra.append(notes_)
         series = next((p[k] for k in ("views_28d", "series_28d", "series") if isinstance(p.get(k), list)), [])
-        rows.append((str(p.get("title") or p.get("slug") or p.get("id")), str(p.get("status") or "?"),
-                     str(p.get("views_total") if p.get("views_total") is not None else "–"),
-                     str(p.get("views_7d") if p.get("views_7d") is not None else "–"), sparkline(series)))
+        rows.append((safe(p.get("title") or p.get("slug") or p.get("id")), safe(p.get("status") or "?"),
+                     safe(p.get("views_total") if p.get("views_total") is not None else "–"),
+                     safe(p.get("views_7d") if p.get("views_7d") is not None else "–"), sparkline(series)))
     hdr = ("piece", "status", "views", "7d", "last 28 days")
     w = [max(len(hdr[i]), *(len(r[i]) for r in rows)) for i in range(4)]
     fmt = f"  {{:<{w[0]}}}  {{:<{w[1]}}}  {{:>{w[2]}}}  {{:>{w[3]}}}  {{}}"
@@ -639,7 +706,7 @@ def cmd_mine(a: argparse.Namespace) -> int:
         print(fmt.format(*r))
         for kind, text in notes_:
             first, rest = ("    ", "    ") if kind == "critique" else ("    ✗ ", "      ")
-            line = textwrap.fill(" ".join(text.split()), width=width, initial_indent=first, subsequent_indent=rest)
+            line = textwrap.fill(" ".join(safe(text).split()), width=width, initial_indent=first, subsequent_indent=rest)
             print(f"\x1b[2m{line}\x1b[0m" if dim else line)
     print("manage or unpublish at terminalart.club/me")
     return 0
@@ -663,7 +730,7 @@ def cmd_play(a: argparse.Namespace) -> int:
     page = review.build(work_root(), render=not a.no_render, only=a.name)
     print(f"review page: file://{page.resolve()}")
     if not a.no_browser:
-        open_browser(f"file://{page.resolve()}")
+        open_local(page)
     return 0
 
 
