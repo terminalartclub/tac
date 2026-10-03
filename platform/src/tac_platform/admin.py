@@ -448,6 +448,8 @@ async function act(url, body) {
   let j = {};
   try { j = await r.json(); } catch (e) {}
   if (j && typeof j.reminder === 'string') alert(j.reminder);  // e.g. "also remove from Instagram"
+  if (j && Array.isArray(j.media_failed) && j.media_failed.length)
+    alert('Public media could not be deleted for: ' + j.media_failed.join(', ') + '. Click Re-sweep to retry.');
   location.reload();
 }
 function adminPath(raw) {
@@ -530,6 +532,11 @@ def _suspend_button(handle: str, suspended: bool) -> str:
     return _button(f"Suspend {handle}", f"{path}/suspend", cls="bad",
                    prompt=f"Suspend {handle}: reason (for the takedown log). Revokes every sign-in and hides "
                           "every published piece.")
+
+
+def _resweep_button(handle: str) -> str:
+    """Suspend again: idempotent, it hides anything visible and retries any public media delete that failed."""
+    return _button("Re-sweep", f"/v1/admin/users/{_seg(handle)}/suspend", {"reason": "re-sweep"})
 
 
 def _delete_account_button(handle: str) -> str:
@@ -674,7 +681,8 @@ async def admin_page(request: Request, page_n: int = Query(1, alias="page"), fin
                     else "<p class=muted>nothing taken down is still on Instagram</p>") + "</section>")
     sus = "".join(
         f"<tr><td>{e(u['handle'])}</td><td>{e(u['suspended_at'])}</td><td>{e(u['suspended_reason'] or '')}</td>"
-        f"<td>{_suspend_button(u['handle'], True)}{_delete_account_button(u['handle'])}</td></tr>"
+        f"<td>{_resweep_button(u['handle'])}{_suspend_button(u['handle'], True)}"
+        f"{_delete_account_button(u['handle'])}</td></tr>"
         for u in q["suspended_users"]
     )
     parts.append("<section><h2>Suspended users <span class=count>" + str(len(q["suspended_users"])) + "</span></h2>"

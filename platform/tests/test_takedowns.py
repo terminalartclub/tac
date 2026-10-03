@@ -275,9 +275,12 @@ async def test_suspend_is_one_transaction_and_a_retry_finishes_a_failed_media_sw
     async with ctx.client() as c:
         assert (await c.get(f"/media/{h}/{s2}/preview.webp")).status_code == 200  # the leftover
 
-    store.delete_prefix = real_delete  # store is back; the moderator retries
+    store.delete_prefix = real_delete  # store is back; the moderator clicks Re-sweep
     async with ctx.admin() as a:
-        r = (await a.post(f"/v1/admin/users/{h}/suspend", json={"reason": "retry"})).json()
+        page = (await a.get("/admin")).text
+        btn = re.search(r"<button type=button data-act='([^']*)' data-body='([^']*)'>Re-sweep</button>", page)
+        assert btn and btn.group(1) == f"/v1/admin/users/{h}/suspend"
+        r = (await a.post(btn.group(1), json=json.loads(htmlmod.unescape(btn.group(2))))).json()
     assert r["already_suspended"] is True and r["hidden"] == []
     assert r["media_removed"] == [f"{h}/{s2}"] and r["media_failed"] == []
     async with ctx.client() as c:
@@ -638,6 +641,24 @@ def test_admin_listener_confirm_comes_before_the_prompt():
                          text=True, timeout=20)
     assert out.returncode == 0, out.stderr
     assert json.loads(out.stdout) == [["/v1/admin/users/a/delete", {"reason": "ERASE-1"}]]  # declined = nothing
+
+
+def test_admin_listener_alerts_failed_media_deletes():
+    import shutil
+    import subprocess
+
+    from tac_platform.admin import JS
+
+    if not shutil.which("node"):
+        pytest.skip("node not installed")
+    harness = ADMIN_JS_HARNESS.replace(
+        "json: async () => ({ reminder: 'also remove from Instagram' })",
+        "json: async () => ({ reminder: null, media_failed: ['alex/a', 'alex/b'] })")
+    out = subprocess.run(["node", "-e", harness, JS, json.dumps(["DMCA-1"])], capture_output=True, text=True,
+                         timeout=20)
+    assert out.returncode == 0, out.stderr
+    assert json.loads(out.stdout)["alerts"] == [
+        "Public media could not be deleted for: alex/a, alex/b. Click Re-sweep to retry."]
 
 
 def test_admin_listener_prompt_requires_a_reason():

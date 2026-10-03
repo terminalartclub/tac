@@ -120,7 +120,8 @@ deliberate (no strikes needed). *Repeat offender:* suspend with a reason that li
 earlier takedowns (the log has them); their pieces all go down with it, and an appeal that succeeds is
 unsuspend plus unhiding only the pieces that were fine. *Account deletion request from a suspended artist*
 (they can't sign in to do it): delete the account from /admin. Deleting a suspended account also blocks that
-GitHub identity from signing up again; "Unblock" under Blocked identities undoes a mistake. In every case, if the piece was on Instagram,
+GitHub identity from signing up again; "Unblock" under Blocked identities undoes a mistake. If a suspend reports
+media it couldn't delete (an alert after the click), press "Re-sweep" on the suspended user until it's clean. In every case, if the piece was on Instagram,
 remove it there too and click "Removed from IG".
 
 ## Web sign-in (site)
