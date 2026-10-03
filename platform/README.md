@@ -62,14 +62,14 @@ TAC_E2E_URL=http://127.0.0.1:8790 TAC_E2E_ADMIN_TOKEN=t uv run pytest tests/test
 | GET | `/v1/auth/web/csrf` | cookie | `{csrf, header: "X-TAC-CSRF"}` for cookie-authenticated state changes |
 | POST | `/v1/auth/web/logout` | cookie + CSRF | revokes the session, clears the cookie |
 | POST | `/v1/auth/web/logout-all` | cookie + CSRF | revokes every web session of the user (sign out everywhere), clears the cookie; plugin tokens stay |
-| GET | `/v1/me` | cookie or Bearer | `{handle, display_name, bio, link, instagram, created}` |
-| PATCH | `/v1/me` | cookie+CSRF or Bearer | `{display_name ≤ 40, bio ≤ 280, link: https ≤ 200, instagram: bare handle (leading @ stripped, URLs refused, IG rules)}`. Omitted = unchanged, `""`/null = cleared, unknown keys = 400 |
+| GET | `/v1/me` | cookie or Bearer | `{handle, display_name, bio, link, instagram, instagram_confirmed, created}` |
+| PATCH | `/v1/me` | cookie+CSRF or Bearer | `{display_name ≤ 40, bio ≤ 280, link: https ≤ 200, instagram: bare handle (leading @ stripped, URLs refused, IG rules; a changed handle resets `instagram_confirmed`)}`. Omitted = unchanged, `""`/null = cleared, unknown keys = 400 |
 | DELETE | `/v1/me` | cookie+CSRF or Bearer | `{"confirm": "<handle>"}`. Deletes the account, pieces, media, sessions and tokens; 409 while a render is running |
 | POST | `/v1/me/pieces/{id or handle/slug}/unpublish` | cookie+CSRF or Bearer, owner | published or in_review → rejected ("unpublished/withdrawn by the artist"); public + render media deleted |
 | POST | `/v1/submissions` | Bearer | multipart `piece`, `meta`, `notes?`, `process[≤4]`. 202 `{id, status, url, piece_url}` (`piece_url` = `TAC_SITE_URL/night-shift/<handle>/<slug>`, null without `TAC_SITE_URL`) |
 | GET | `/v1/submissions/{id}` | Bearer, owner | `{id, status, reasons, preview_url, critique}`; others get 404 |
 | GET | `/v1/submissions/{id}/preview.webp` | signed URL | pre-publish preview (HMAC, 7-day expiry) |
-| GET | `/v1/community.json` | none | gallery feed (CORS `*`): pieces with `views`, `artists{handle: {views, instagram?}}`, `week{label, views}`; rebuilt on every publish change and hourly |
+| GET | `/v1/community.json` | none | gallery feed (CORS `*`): pieces with `views`, `artists{handle: {views, instagram? (admin-confirmed only)}}`, `week{label, views}`; rebuilt on every publish change and hourly |
 | GET | `/media/{handle}/{slug}/...` | none | preview.webp, og.jpg, share.jpg, card.jpg, piece.py, process/NN.webp |
 | GET | `/v1/og?path=/night-shift[/@handle \| /handle/slug]` | none | the site's index.html with link-preview `<head>` tags for that path; 404 if unknown (see below) |
 | POST | `/v1/pieces/{handle}/{slug}/report` | none | `{reason}`; 5/h per IP; 3 distinct IPs hide the piece |
@@ -81,6 +81,7 @@ TAC_E2E_URL=http://127.0.0.1:8790 TAC_E2E_ADMIN_TOKEN=t uv run pytest tests/test
 | POST | `/v1/admin/submissions/{id}/approve` · `/reject {reason}` | admin | from `in_review` only (409 otherwise) |
 | POST | `/v1/admin/pieces/{handle}/{slug}/unhide` · `/delete {reason}` | admin | delete makes the piece `rejected` and removes its media |
 | POST | `/v1/admin/users/{handle}/trust {trusted}` | admin | trusted + clean automod means auto-publish |
+| POST | `/v1/admin/users/{handle}/instagram-confirm {instagram}` | admin | confirms the user's current IG handle (compare-and-set: 409 if it changed); only confirmed handles are public and tagged |
 | POST | `/v1/admin/users/{handle}/house {house}` | admin | sets `house_artist` on all of that handle's pieces in community.json; clients can't set it (ignored in meta) |
 
 Errors are always `{"error": "<code>", "detail"?: ...}`. Admin auth is the `X-Admin-Token` header or the `tac_admin` cookie. Cookie-authenticated POSTs also need `X-TAC-Admin-CSRF: 1`.

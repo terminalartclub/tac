@@ -53,7 +53,7 @@ async def test_login_logout_same_user_as_plugin(ctx):
     c = await web_login(ctx, "alex", "/p/alex")
     async with aclosing(c):
         me = (await c.get("/v1/me")).json()
-        assert me["handle"] == "alex" and set(me) == {"handle", "display_name", "bio", "link", "instagram", "created"}
+        assert me["handle"] == "alex" and set(me) == {"handle", "display_name", "bio", "link", "instagram", "instagram_confirmed", "created"}
         # rotation: logging in again replaces the session
         old = c.cookies.get("tac_session")
         r = await c.post("/v1/auth/web/login", data={"handle": "alex", "return": "/"})
@@ -412,21 +412,74 @@ async def test_instagram_invalid_or_url_refused(ctx, bad):
         assert (await b.get("/v1/me")).json()["instagram"] == "kept"  # a refused update writes nothing
 
 
-async def test_instagram_in_community_artists_only_when_set(ctx):
+async def _confirm_ig(ctx, handle: str, ig: str) -> int:
+    async with ctx.admin() as a:
+        return (await a.post(f"/v1/admin/users/{handle}/instagram-confirm", json={"instagram": ig},
+                             headers={"x-tac-admin-csrf": "1"})).status_code
+
+
+async def _artists(ctx) -> dict:
+    async with ctx.client() as c:
+        return (await c.get("/v1/community.json")).json()["artists"]
+
+
+async def test_instagram_public_only_after_admin_confirmation(ctx):
     alex, bea = await ctx.login("alex"), await ctx.login("bea")
     await published(ctx, alex)
     await published(ctx, bea)
     async with ctx.client(authorization=f"Bearer {alex}") as b:
-        assert (await b.patch("/v1/me", json={"instagram": "@alex.makes"})).status_code == 200
-    async with ctx.client() as c:
-        doc = (await c.get("/v1/community.json")).json()
-    assert doc["artists"]["alex"]["instagram"] == "alex.makes"
-    assert "instagram" not in doc["artists"]["bea"]
-    assert all("instagram" not in p.get("artist", {}) for p in doc["pieces"])  # artists map only
+        me = (await b.patch("/v1/me", json={"instagram": "@alex.makes"})).json()
+    assert (me["instagram"], me["instagram_confirmed"]) == ("alex.makes", False)  # site shows "pending"
+    assert "instagram" not in (await _artists(ctx))["alex"]  # unconfirmed: never public
+    assert await _confirm_ig(ctx, "alex", "alex.makes") == 200
+    artists = await _artists(ctx)
+    assert artists["alex"]["instagram"] == "alex.makes" and "instagram" not in artists["bea"]
+    assert all("instagram" not in p.get("artist", {}) for p in (await ctx.app.state.publisher.build())["pieces"])
     async with ctx.client(authorization=f"Bearer {alex}") as b:
-        assert (await b.patch("/v1/me", json={"instagram": ""})).json()["instagram"] == ""  # cleared
-    async with ctx.client() as c:
-        assert "instagram" not in (await c.get("/v1/community.json")).json()["artists"]["alex"]
+        assert (await b.get("/v1/me")).json()["instagram_confirmed"] is True
+        same = (await b.patch("/v1/me", json={"instagram": "alex.makes"})).json()  # same handle: kept
+        assert same["instagram_confirmed"] is True
+        changed = (await b.patch("/v1/me", json={"instagram": "someone.famous"})).json()  # new claim: reset
+        assert (changed["instagram"], changed["instagram_confirmed"]) == ("someone.famous", False)
+    assert "instagram" not in (await _artists(ctx))["alex"]
+    async with ctx.client(authorization=f"Bearer {alex}") as b:
+        await b.patch("/v1/me", json={"instagram": "alex.makes"})  # changing back does not restore it
+        assert (await b.get("/v1/me")).json()["instagram_confirmed"] is False
+        assert (await b.patch("/v1/me", json={"bio": "hi"})).json()["instagram_confirmed"] is False
+
+
+async def test_instagram_confirm_is_compare_and_set(ctx):
+    token = await ctx.login("alex")
+    await published(ctx, token)
+    async with ctx.client(authorization=f"Bearer {token}") as b:
+        await b.patch("/v1/me", json={"instagram": "new.handle"})
+    assert await _confirm_ig(ctx, "alex", "old.handle") == 409  # admin looked at a stale handle
+    assert "instagram" not in (await _artists(ctx))["alex"]
+    assert await _confirm_ig(ctx, "nobody", "x") == 404
+    async with ctx.client() as c:  # admin only
+        r = await c.post("/v1/admin/users/alex/instagram-confirm", json={"instagram": "new.handle"})
+        assert r.status_code in (401, 403)
+
+
+async def test_instagram_confirmed_migration_on_old_db(tmp_path):
+    import aiosqlite
+
+    from tac_platform.db import Database
+
+    path = tmp_path / "old.sqlite3"
+    async with aiosqlite.connect(path) as c:  # users table as it was before instagram_confirmed existed
+        await c.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, handle TEXT NOT NULL UNIQUE, github_id INTEGER UNIQUE,"
+                        " trusted INTEGER NOT NULL DEFAULT 0, house_artist INTEGER NOT NULL DEFAULT 0,"
+                        " display_name TEXT, bio TEXT, link TEXT, instagram TEXT, created_at TEXT NOT NULL)")
+        await c.execute("INSERT INTO users (handle, instagram, created_at) VALUES ('old', 'old.ig', 'x')")
+        await c.commit()
+    db = Database(path)
+    await db.open()
+    try:
+        row = await db.fetchone("SELECT instagram, instagram_confirmed FROM users WHERE handle = 'old'")
+        assert (row["instagram"], row["instagram_confirmed"]) == ("old.ig", 0)  # existing claims start unconfirmed
+    finally:
+        await db.close()
 
 
 async def test_instagram_shown_in_admin_queue(ctx):
@@ -436,5 +489,11 @@ async def test_instagram_shown_in_admin_queue(ctx):
     sub = (await ctx.submit(token)).json()
     await ctx.wait(token, sub["id"])
     async with ctx.admin() as a:
-        assert (await a.get("/v1/admin/queue")).json()["in_review"][0]["instagram"] == "alex.makes"
-        assert "ig @alex.makes" in (await a.get("/admin")).text
+        it = (await a.get("/v1/admin/queue")).json()["in_review"][0]
+        assert (it["instagram"], it["instagram_confirmed"]) == ("alex.makes", False)
+        page = (await a.get("/admin")).text
+        assert "ig @alex.makes (unconfirmed)" in page and "confirm ig @alex.makes" in page
+    assert await _confirm_ig(ctx, "alex", "alex.makes") == 200
+    async with ctx.admin() as a:
+        page = (await a.get("/admin")).text
+        assert "ig @alex.makes ✓" in page and "confirm ig @" not in page

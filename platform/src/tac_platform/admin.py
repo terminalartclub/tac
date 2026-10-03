@@ -80,7 +80,7 @@ async def _queue(request: Request) -> dict:
     cols = (
         "s.id, s.slug, s.title, s.status, s.hidden, s.meta_json, s.reasons_json, s.critique, s.flags_json,"
         " s.stats_json, s.process_n, s.created_at, u.handle, u.trusted, u.house_artist, u.display_name, u.link,"
-        " u.instagram"
+        " u.instagram, u.instagram_confirmed"
     )
     review = await db.fetchall(
         f"SELECT {cols} FROM submissions s JOIN users u ON u.id = s.user_id"
@@ -112,6 +112,7 @@ async def _queue(request: Request) -> dict:
             "display_name": r["display_name"] or "",
             "link": r["link"] or "",
             "instagram": r["instagram"] or "",
+            "instagram_confirmed": bool(r["instagram"]) and bool(r["instagram_confirmed"]),
             "meta": json.loads(r["meta_json"]),
             "reasons": json.loads(r["reasons_json"]),
             "critique": r["critique"],
@@ -188,6 +189,27 @@ async def trust(handle: str, body: TrustIn, request: Request) -> dict:
     return {"handle": handle, "trusted": body.trusted}
 
 
+class InstagramConfirmIn(BaseModel):
+    instagram: str  # the handle the admin looked at; the confirm only applies if it is still the current one
+
+
+@router.post("/v1/admin/users/{handle}/instagram-confirm")
+async def instagram_confirm(handle: str, body: InstagramConfirmIn, request: Request) -> dict:
+    """Mark the user's CURRENT Instagram handle as verified (the admin checked the IG account links back).
+    Compare-and-set on the handle: if the user changed it after the admin looked, nothing is confirmed (409)."""
+    require_admin(request)
+    async with request.app.state.db.tx() as tx:
+        if not await tx.fetchone("SELECT 1 FROM users WHERE handle = ?", (handle,)):
+            raise ApiError(404, "not_found")
+        if not await tx.execute(
+            "UPDATE users SET instagram_confirmed = 1 WHERE handle = ? AND instagram = ?", (handle, body.instagram)
+        ):
+            raise ApiError(409, "instagram_changed")
+        await tx.audit("admin", "instagram_confirm", detail=f"{handle}: {body.instagram}")
+    await request.app.state.publisher.regenerate()  # the handle may now appear in community.json
+    return {"handle": handle, "instagram": body.instagram, "instagram_confirmed": True}
+
+
 class HouseIn(BaseModel):
     house: bool
 
@@ -216,6 +238,16 @@ async function act(url, body) {
 }
 function withReason(url, id) { act(url, {reason: document.getElementById(id).value || 'rejected by moderator'}); }
 """
+
+
+def _ig_button(it: dict) -> str:
+    """Confirm the artist's Instagram handle (shown only while unconfirmed). The handle is sent back, so a
+    change by the user after this page loaded makes the confirm a 409 instead of confirming the new one."""
+    if not it["instagram"] or it["instagram_confirmed"]:
+        return ""
+    h, ig = e(it["handle"]), e(it["instagram"])  # ig is [A-Za-z0-9._] by validation; escaped anyway
+    return (f"<button onclick=\"act('/v1/admin/users/{h}/instagram-confirm',{{instagram:'{ig}'}})\">"
+            f"confirm ig @{ig}</button>")
 
 
 def _house_button(it: dict) -> str:
@@ -249,12 +281,12 @@ async def _card(request: Request, it: dict, mode: str) -> str:
             f"<button class=bad onclick=\"withReason('/v1/admin/submissions/{e(sid)}/reject','{e(rid)}')\">Reject</button>"
             f"<button onclick=\"act('/v1/admin/users/{h}/trust',{{trusted:{'false' if it['trusted'] else 'true'}}})\">"
             f"{'Untrust' if it['trusted'] else 'Trust'} {h}</button>"
-            + _house_button(it)
+            + _house_button(it) + _ig_button(it)
         )
     else:
         unhide = f"<button class=primary onclick=\"act('/v1/admin/pieces/{h}/{s}/unhide')\">Unhide</button>" if mode == "hidden" else ""
         actions = (
-            f"{unhide}{_house_button(it)}<input type=text id='{e(rid)}' placeholder='delete reason'>"
+            f"{unhide}{_house_button(it)}{_ig_button(it)}<input type=text id='{e(rid)}' placeholder='delete reason'>"
             f"<button class=bad onclick=\"withReason('/v1/admin/pieces/{h}/{s}/delete','{e(rid)}')\">Delete</button>"
         )
     return (
@@ -264,7 +296,8 @@ async def _card(request: Request, it: dict, mode: str) -> str:
         f"<h2>{e(it['title'])} <span class=count>by {h}"
         f"{' (' + e(it['display_name']) + ')' if it['display_name'] else ''}"
         f"{' · ' + e(it['link']) if it['link'] else ''}"
-        f"{' · ig @' + e(it['instagram']) if it['instagram'] else ''} · {e(it['created_at'][:16])}"
+        f"{' · ig @' + e(it['instagram']) + (' ✓' if it['instagram_confirmed'] else ' (unconfirmed)') if it['instagram'] else ''}"
+        f" · {e(it['created_at'][:16])}"
         f"{' · trusted' if it['trusted'] else ''}{' · house artist' if it['house_artist'] else ''}"
         f"{' <span class=chip>high_tokens</span>' if it['high_tokens'] else ''} · {it['views_7d']} views 7d · human: {e(it['meta'].get('human_role', 'none'))} · {e(it['meta'].get('size', 'full'))}</span></h2>"
         f"<p>{e(it['meta'].get('description', ''))}</p>"

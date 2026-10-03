@@ -106,13 +106,14 @@ def profile_out(row) -> dict:
         "bio": row["bio"] or "",
         "link": row["link"] or "",
         "instagram": row["instagram"] or "",
+        "instagram_confirmed": bool(row["instagram"]) and bool(row["instagram_confirmed"]),
         "created": row["created_at"][:10],
     }
 
 
 async def _load(request: Request, user_id: int):
     return await request.app.state.db.fetchone(
-        "SELECT handle, display_name, bio, link, instagram, created_at FROM users WHERE id = ?", (user_id,)
+        "SELECT handle, display_name, bio, link, instagram, instagram_confirmed, created_at FROM users WHERE id = ?", (user_id,)
     )
 
 
@@ -131,8 +132,14 @@ async def patch_me(body: ProfileIn, request: Request) -> dict:
     changes = body.model_dump(exclude_unset=True)
     if changes:
         cols = ", ".join(f"{k} = ?" for k in changes)  # keys are ProfileIn's field names only (extra="forbid")
+        params = [v or None for v in changes.values()]
+        if "instagram" in changes:
+            # A different handle drops the admin confirmation. SQLite evaluates every SET expression
+            # against the old row, so this compares old vs new atomically in the same statement.
+            cols += ", instagram_confirmed = CASE WHEN instagram IS ? THEN instagram_confirmed ELSE 0 END"
+            params.append(changes["instagram"] or None)
         async with st.db.tx() as tx:
-            await tx.execute(f"UPDATE users SET {cols} WHERE id = ?", (*[v or None for v in changes.values()], user["id"]))
+            await tx.execute(f"UPDATE users SET {cols} WHERE id = ?", (*params, user["id"]))
             await tx.audit(f"user:{user['handle']}", "profile_update", detail=",".join(sorted(changes)))
         if await st.db.fetchone(
             "SELECT 1 FROM submissions WHERE user_id = ? AND status = 'published' AND hidden = 0 LIMIT 1", (user["id"],)
