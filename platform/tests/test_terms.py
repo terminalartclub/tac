@@ -235,3 +235,22 @@ async def test_non_ascii_nonce_cookie_is_a_400_not_a_500(tmp_path, monkeypatch, 
             r = await other.post("/device/github/terms", data={"token": token, "agree": "1"},
                                  headers={"cookie": f"{terms.NONCE_COOKIE}={cookie}".encode()})
             assert r.status_code == 400 and "expired" in r.text
+
+
+async def test_pending_terms_token_expires_after_ttl(tmp_path, monkeypatch):
+    import time as real_time
+
+    clock = [real_time.time()]
+    monkeypatch.setattr(terms.time, "time", lambda: clock[0])
+    async with make_ctx(tmp_path, worker_enabled=False, auth_mode="github", github_client_id="cid") as ctx:
+        async with ctx.client() as c:
+            d, step = await _gh_device_callback(ctx, c, monkeypatch)
+            token = token_of(step)
+            assert int(token.split(".")[3]) == int(clock[0]) + terms.PENDING_TTL_S  # exp = issue + 10 min
+            clock[0] += terms.PENDING_TTL_S + 1  # just past the deadline
+            r = await c.post("/device/github/terms", data={"token": token, "agree": "1"})
+            assert r.status_code == 400 and "expired" in r.text
+            assert (await user_terms(ctx, "alexgh"))[0] is None  # nothing recorded
+            clock[0] -= 2  # one second before the deadline: still good
+            r = await c.post("/device/github/terms", data={"token": token, "agree": "1"})
+            assert r.status_code == 200 and "connected as alexgh" in r.text
