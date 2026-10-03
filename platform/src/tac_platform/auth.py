@@ -39,7 +39,7 @@ def normalize_user_code(value: str) -> str:
 
 
 async def current_user(request: Request) -> dict:
-    """Bearer token (plugin) or `tac_session` cookie (site) -> {id, handle, trusted, via}. Raises 401.
+    """Bearer token (plugin) or session cookie (site, sessions.cookie_name) -> {id, handle, trusted, via}. Raises 401.
 
     A Bearer header, when present, wins and is never CSRF-checked (browsers can't attach it
     cross-site). Cookie auth on a state-changing method must pass require_csrf.

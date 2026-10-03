@@ -1,4 +1,4 @@
-"""Web sessions (cookie `tac_session`) and their CSRF token.
+"""Web sessions (cookie `__Host-tac_session` in prod, `tac_session` in dev) and their CSRF token.
 
 The cookie holds 32 random bytes; the DB stores only sha256(id) with a 30-day expiry.
 CSRF token = HMAC(install secret, "csrf|" + sha256(id)): readable only via a credentialed GET
@@ -14,7 +14,11 @@ from fastapi import Request, Response
 from .db import now_iso
 from .web import ApiError, sha256_hex
 
-COOKIE = "tac_session"
+COOKIE_DEV = "tac_session"
+# __Host- makes the browser enforce Secure, Path=/ and no Domain: the cookie never reaches a sibling
+# subdomain and a sibling can't plant one. terminalart.club -> api.terminalart.club is same-site, so a
+# host-only SameSite=Lax cookie on the API host already rides the site's credentialed fetches.
+COOKIE_PROD = "__Host-tac_session"
 TTL_S = 30 * 86400
 CSRF_HEADER = "x-tac-csrf"
 SAFE_METHODS = ("GET", "HEAD", "OPTIONS")
@@ -25,6 +29,10 @@ def csrf_for(secret: str, session_hash: str) -> str:
     return hmac.new(secret.encode(), f"csrf|{session_hash}".encode(), "sha256").hexdigest()
 
 
+def cookie_name(request: Request) -> str:
+    return COOKIE_PROD if request.app.state.settings.env == "prod" else COOKIE_DEV
+
+
 def cookie_secure(request: Request) -> bool:
     s = request.app.state.settings
     return s.env == "prod" or s.public_base_url.startswith("https://")
@@ -32,20 +40,19 @@ def cookie_secure(request: Request) -> bool:
 
 def set_session_cookie(request: Request, response: Response, session_id: str) -> None:
     response.set_cookie(
-        COOKIE, session_id, max_age=TTL_S, path="/", httponly=True, samesite="lax",
-        secure=cookie_secure(request), domain=request.app.state.settings.cookie_domain or None,
+        cookie_name(request), session_id, max_age=TTL_S, path="/", httponly=True, samesite="lax",
+        secure=cookie_secure(request),
     )
 
 
 def clear_session_cookie(request: Request, response: Response) -> None:
-    response.delete_cookie(COOKIE, path="/", httponly=True, samesite="lax", secure=cookie_secure(request),
-                           domain=request.app.state.settings.cookie_domain or None)
+    response.delete_cookie(cookie_name(request), path="/", httponly=True, samesite="lax", secure=cookie_secure(request))
 
 
 async def create_session(request: Request, user_id: int, handle: str) -> str:
     """New session id. Rotation: any session presented with this request is revoked first."""
     db = request.app.state.db
-    old = request.cookies.get(COOKIE)
+    old = request.cookies.get(cookie_name(request))
     sid = secrets.token_urlsafe(32)
     async with db.tx() as tx:
         if old:
@@ -59,7 +66,7 @@ async def create_session(request: Request, user_id: int, handle: str) -> str:
 
 
 async def session_row(request: Request):
-    sid = request.cookies.get(COOKIE)
+    sid = request.cookies.get(cookie_name(request))
     if not sid:
         return None
     return await request.app.state.db.fetchone(

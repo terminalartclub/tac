@@ -56,7 +56,7 @@ TAC_E2E_URL=http://127.0.0.1:8790 TAC_E2E_ADMIN_TOKEN=t uv run pytest tests/test
 | POST | `/v1/auth/device` | none | `{device_code, user_code, verification_uri, interval: 3, expires_in: 600}`; 30/h per IP |
 | POST | `/v1/auth/token` | none | `{device_code}`. 428 pending, 200 `{access_token, handle}`, 410 expired/used, 400 unknown |
 | GET/POST | `/device` | none | dev: code + handle form (10 tries / 10 min per IP); github: code, then OAuth |
-| GET | `/v1/auth/web/login?return=/path` | none | site sign-in. dev: handle form · github: OAuth redirect. Sets `tac_session` and 303s to `TAC_SITE_URL + return` (relative paths only) |
+| GET | `/v1/auth/web/login?return=/path` | none | site sign-in. dev: handle form · github: OAuth redirect. Sets the session cookie (`__Host-tac_session` in prod, `tac_session` in dev) and 303s to `TAC_SITE_URL + return` (relative paths only) |
 | POST | `/v1/auth/web/login` | none | dev form submit (10 per 10 min per IP) |
 | GET | `/v1/auth/web/github/callback` | none | github mode OAuth return |
 | GET | `/v1/auth/web/csrf` | cookie | `{csrf, header: "X-TAC-CSRF"}` for cookie-authenticated state changes |
@@ -88,12 +88,13 @@ Errors are always `{"error": "<code>", "detail"?: ...}`. Admin auth is the `X-Ad
 site ──GET /api/v1/auth/web/login?return=/me──▶ dev: handle form ─POST─┐   prod: GitHub OAuth ─callback─┐
                                                                         ▼                                ▼
                           user (same row as the plugin's device login) ─▶ session: 32 random bytes in cookie,
-                          sha256 in DB, 30 days, rotated on login ─▶ Set-Cookie tac_session (HttpOnly, SameSite=Lax,
-                          Path=/, Secure in prod, Domain=TAC_COOKIE_DOMAIN) ─▶ 303 TAC_SITE_URL + return
+                          sha256 in DB, 30 days, rotated on login ─▶ Set-Cookie __Host-tac_session (prod) / tac_session (dev)
+                          (HttpOnly, SameSite=Lax, Path=/, Secure in prod, never a Domain) ─▶ 303 TAC_SITE_URL + return
 site JS: GET /api/v1/auth/web/csrf → X-TAC-CSRF on every PATCH/POST/DELETE made with the cookie
 ```
 
-- **Dev:** the site's vite dev server proxies `/api` → `http://127.0.0.1:8790` (the site builder adds the proxy). So the cookie is first-party on `localhost:5181`, and `TAC_SITE_URL` / `TAC_COOKIE_DOMAIN` stay unset.
+- **Dev:** the site's vite dev server proxies `/api` → `http://127.0.0.1:8790` (the site builder adds the proxy). So the cookie is first-party on `localhost:5181`, and `TAC_SITE_URL` stays unset.
+- **Prod:** the cookie is host-only on the API host. `terminalart.club` → `api.terminalart.club` is same-site, so the site's credentialed fetches carry it without a `Domain`; a `Domain=.terminalart.club` cookie would reach (and could be overwritten from) every subdomain.
 - Dev login lets anyone sign in as any handle, existing or new; it is for local use only. `TAC_ENV=prod` refuses to start unless `TAC_AUTH=github`.
 - **GitHub OAuth app:** set the authorization callback URL to `TAC_PUBLIC_BASE_URL`. Both `/device/github/callback` and `/v1/auth/web/github/callback` are sub-paths of it, which GitHub accepts.
 
@@ -159,7 +160,6 @@ site ──POST /v1/pieces/h/s/view──▶ day_salt(UTC day) ─▶ hash = sha
 | `TAC_AUTOMOD_MODEL` / `TAC_AUTOMOD_EFFORT` | `claude-opus-5-5` / `low` | |
 | `TAC_SITE_ORIGINS` | `http://localhost:5181,https://terminalart.club` | the only origins that get credentialed CORS on `/v1/*` (never `/v1/admin`, `/v1/render-io`) |
 | `TAC_SITE_URL` | unset | web login redirects to `TAC_SITE_URL + return`; unset = relative (dev proxy). Prod: `https://terminalart.club` |
-| `TAC_COOKIE_DOMAIN` | unset | `tac_session` cookie domain. Prod: `.terminalart.club`; dev: unset (host-only) |
 | `TAC_TRUST_PROXY` | `0` | `1` = take the client IP from `Fly-Client-IP` / `X-Forwarded-For` (only behind Fly's proxy) |
 | `TAC_WORKER` | `1` | `0` = don't start the in-process pipeline worker |
 

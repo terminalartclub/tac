@@ -143,11 +143,11 @@ docker run --rm --name tac-render-<random> --network none --read-only --tmpfs /t
 
 ### Web sessions (site sign-in)
 
-- **Cookie:** `tac_session` = 32 random bytes; the DB stores only sha256.
+- **Cookie:** `__Host-tac_session` in prod (`tac_session` in dev) = 32 random bytes; the DB stores only sha256.
   - 30-day expiry, enforced server-side. Expired rows are purged hourly.
   - Rotated on every login: a session presented at login is revoked.
   - Logout deletes the row.
-  - Flags: `HttpOnly; SameSite=Lax; Path=/`, plus `Secure` in prod (or with an https base URL). `Domain` comes from `TAC_COOKIE_DOMAIN` (`.terminalart.club` in prod, host-only in dev).
+  - Flags: `HttpOnly; SameSite=Lax; Path=/`, plus `Secure` in prod (or with an https base URL). Never a `Domain`: the cookie is host-only on the API host, and the prod `__Host-` prefix makes the browser enforce Secure, Path=/ and no Domain. A sibling subdomain can neither read it nor plant (toss) one. There is no cookie-domain setting.
 - **Same user records as the plugin.** One account can be authenticated three ways:
   - plugin: a Bearer token;
   - site: the session cookie;

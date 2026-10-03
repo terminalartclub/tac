@@ -7,6 +7,7 @@ import httpx
 import pytest
 
 from conftest import ADMIN, handle_slug, make_ctx
+from tac_platform.web import sha256_hex
 from tac_platform.web_auth import safe_return
 
 SITE = "http://localhost:5181"
@@ -79,14 +80,59 @@ async def test_redirect_and_cookie_flags_dev(ctx):
         assert "max-age=2592000" in cookie
 
 
-async def test_cookie_flags_prod_like(tmp_path):
-    async with make_ctx(tmp_path, worker_enabled=False, public_base_url="https://api.terminalart.club",
-                        cookie_domain=".terminalart.club", site_url="https://terminalart.club") as ctx:
-        async with ctx.client() as c:
-            r = await c.post("/v1/auth/web/login", data={"handle": "alex", "return": "/p/alex"})
-        assert r.headers["location"] == "https://terminalart.club/p/alex"
-        cookie = r.headers["set-cookie"].lower()
-        assert "secure" in cookie and "domain=.terminalart.club" in cookie and "samesite=lax" in cookie
+PROD = dict(worker_enabled=False, env="prod", auth_mode="github", renderer="docker", github_client_id="cid",
+            public_base_url="https://api.terminalart.club", site_url="https://terminalart.club",
+            site_origins=("https://terminalart.club",))
+
+
+async def github_login(ctx, monkeypatch, base: str, ret: str = "/p/alex") -> tuple[httpx.AsyncClient, httpx.Response]:
+    """Browser-like client through the web GitHub flow (identity faked); returns the client and the callback."""
+    from tac_platform import web_auth
+
+    async def fake_identity(st, code):
+        return 4242, "alexgh"
+
+    monkeypatch.setattr(web_auth, "github_identity", fake_identity)
+    c = httpx.AsyncClient(transport=httpx.ASGITransport(app=ctx.app, client=("10.0.0.1", 5000)), base_url=base)
+    r = await c.get("/v1/auth/web/login", params={"return": ret})
+    state = parse_qs(urlsplit(r.headers["location"]).query)["state"][0]
+    cb = await c.get("/v1/auth/web/github/callback", params={"code": "gh-code", "state": state})
+    assert cb.status_code == 303, cb.text
+    return c, cb
+
+
+async def test_cookie_prod_is_host_prefixed_without_domain(tmp_path, monkeypatch):
+    async with make_ctx(tmp_path, **PROD) as ctx:
+        c, cb = await github_login(ctx, monkeypatch, "https://api.terminalart.club")
+        async with aclosing(c):
+            assert cb.headers["location"] == "https://terminalart.club/p/alex"
+            cookie = cb.headers["set-cookie"].lower()
+            assert cookie.startswith("__host-tac_session=") and "domain=" not in cookie
+            assert "secure" in cookie and "path=/" in cookie and "samesite=lax" in cookie and "httponly" in cookie
+            # every reader uses the configured name: current_user, csrf, logout
+            assert c.cookies.get("__Host-tac_session") and not c.cookies.get("tac_session")
+            assert (await c.get("/v1/me")).json()["handle"] == "alexgh"
+            r = await c.post("/v1/auth/web/logout", headers=await csrf(c))
+            assert r.status_code == 204 and r.headers["set-cookie"].startswith("__Host-tac_session=")
+            assert (await c.get("/v1/me")).status_code == 401
+        # the dev cookie name carries nothing in prod
+        sid = "x" * 43
+        await ctx.app.state.db.execute(
+            "INSERT INTO web_sessions (session_sha256, user_id, created_at, expires_at) VALUES (?, 1, '', ?)",
+            (sha256_hex(sid), time.time() + 60))
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=ctx.app), base_url="https://api.terminalart.club",
+                                     cookies={"tac_session": sid}) as dev:
+            assert (await dev.get("/v1/me")).status_code == 401
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=ctx.app), base_url="https://api.terminalart.club",
+                                     cookies={"__Host-tac_session": sid}) as ok:
+            assert (await ok.get("/v1/me")).status_code == 200
+
+
+def test_cookie_domain_knob_gone(monkeypatch, tmp_path):
+    from tac_platform.config import Settings
+
+    monkeypatch.setenv("TAC_COOKIE_DOMAIN", ".terminalart.club")
+    assert not hasattr(Settings.from_env(data_dir=tmp_path), "cookie_domain")
 
 
 async def test_session_stored_hashed_and_expires(ctx):

@@ -48,7 +48,6 @@ class Settings:
 
     site_origins: tuple[str, ...] = ("http://localhost:5181", "https://terminalart.club")
     site_url: str = ""  # web login redirects to site_url + return path; "" = relative (dev proxy)
-    cookie_domain: str = ""  # prod: .terminalart.club
     trust_proxy: bool = False  # honour Fly-Client-IP / X-Forwarded-For
     worker_enabled: bool = True
     submissions_per_day: int = 3
@@ -102,7 +101,6 @@ class Settings:
                 if o.strip()
             ),
             site_url=_env("TAC_SITE_URL", "").rstrip("/"),
-            cookie_domain=_env("TAC_COOKIE_DOMAIN", ""),
             trust_proxy=_env("TAC_TRUST_PROXY", "0") == "1",
             worker_enabled=_env("TAC_WORKER", "1") == "1",
         )
