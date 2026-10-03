@@ -4,7 +4,7 @@ GET /v1/og?path=/night-shift                     the wall (feed)
 GET /v1/og?path=/night-shift/@<handle>           an artist
 GET /v1/og?path=/night-shift/<handle>/<slug>     a piece
 
-Returns the site's own index.html (TAC_SITE_URL/index.html, cached, refreshed every 10 min) with the
+Returns the site's own index.html (TAC_SITE_URL/index.html, cached, refreshed every 2 min) with the
 <head> link-preview tags replaced for that path. The site's nginx proxies unmatched /night-shift/
 paths here, so a messenger's crawler sees per-piece tags and a browser still boots the SPA.
 
@@ -35,53 +35,71 @@ log = logging.getLogger("tac.og")
 router = APIRouter()
 
 SITE_NAME = "terminal art club"
-TEMPLATE_TTL_S = 600
+TEMPLATE_TTL_S = 120  # short: after a site deploy the old index.html points at hashed assets that are gone
+TEMPLATE_FAIL_TTL_S = 30  # a failed fetch is remembered this long (no fetch per crawler hit while the site is down)
 TEMPLATE_MAX_BYTES = 512 * 1024
 CACHE_CONTROL = "public, max-age=300"
 FEED = "/night-shift"
 _PIECE = re.compile(r"^/night-shift/([^/@]+)/([^/]+)/?$")
 _ARTIST = re.compile(r"^/night-shift/@([^/]+)/?$")
 _FEED = re.compile(r"^/night-shift/?$")
-# Tags we own; any existing copy in the template is removed before ours go in.
-_OWNED = ("og:title", "og:description", "og:url", "og:type", "og:site_name", "og:image", "og:image:width",
-          "og:image:height", "og:image:alt", "twitter:card", "twitter:image", "twitter:title",
-          "twitter:description", "description")
 
 
 class Template:
-    """The site's index.html, fetched lazily and re-fetched after TEMPLATE_TTL_S. A failed refresh
-    keeps serving the last good copy; with no copy at all the endpoint answers 503."""
+    """The site's index.html, fetched lazily and re-fetched after TEMPLATE_TTL_S.
 
-    def __init__(self, url: str, fetch=None) -> None:
+    - A failed refresh keeps serving the last good copy and retries after TEMPLATE_FAIL_TTL_S.
+    - With no copy at all, a failure is remembered for TEMPLATE_FAIL_TTL_S: every request in that
+      window gets an immediate 503 instead of another 5 s upstream attempt.
+    - The body is streamed and cut off at TEMPLATE_MAX_BYTES; only a 200 counts (3xx is not followed).
+    """
+
+    def __init__(self, url: str, fetch=None, transport: httpx.AsyncBaseTransport | None = None) -> None:
         self.url = url
         self.html: str | None = None
         self.fetched_at = 0.0
+        self.failed_at: float | None = None
         self._lock = asyncio.Lock()
+        self._transport = transport
         self._fetch = fetch or self._http_fetch
 
     async def _http_fetch(self, url: str) -> str:
-        async with httpx.AsyncClient(timeout=5.0, follow_redirects=False) as c:
-            r = await c.get(url, headers={"Accept": "text/html"})
-        r.raise_for_status()
-        if len(r.content) > TEMPLATE_MAX_BYTES:
-            raise ValueError(f"template over {TEMPLATE_MAX_BYTES} bytes")
-        return r.text
+        async with httpx.AsyncClient(timeout=5.0, follow_redirects=False, transport=self._transport) as c:
+            async with c.stream("GET", url, headers={"Accept": "text/html"}) as r:
+                if r.status_code != 200:
+                    raise ValueError(f"HTTP {r.status_code}")
+                body = bytearray()
+                async for chunk in r.aiter_bytes():
+                    body += chunk
+                    if len(body) > TEMPLATE_MAX_BYTES:
+                        raise ValueError(f"template over {TEMPLATE_MAX_BYTES} bytes")
+                return bytes(body).decode(r.encoding or "utf-8", "replace")
+
+    def _failing(self, now: float) -> bool:
+        return self.html is None and self.failed_at is not None and now - self.failed_at < TEMPLATE_FAIL_TTL_S
 
     async def get(self) -> str:
-        if self.html is not None and time.monotonic() - self.fetched_at < TEMPLATE_TTL_S:
+        now = time.monotonic()
+        if self.html is not None and now - self.fetched_at < TEMPLATE_TTL_S:
             return self.html
+        if self._failing(now):
+            raise ApiError(503, "og_unavailable")
         async with self._lock:  # one refresh at a time; the others wait and reuse it
-            if self.html is None or time.monotonic() - self.fetched_at >= TEMPLATE_TTL_S:
+            now = time.monotonic()
+            if self._failing(now):
+                raise ApiError(503, "og_unavailable")
+            if self.html is None or now - self.fetched_at >= TEMPLATE_TTL_S:
                 try:
                     text = await self._fetch(self.url)
                     if not re.search(r"</head\s*>", text, re.I):
                         raise ValueError("template has no </head>")
-                    self.html, self.fetched_at = text, time.monotonic()
+                    self.html, self.fetched_at, self.failed_at = text, time.monotonic(), None
                 except Exception as e:  # noqa: BLE001
                     log.warning("og template fetch failed (%s): %s", self.url, e)
+                    self.failed_at = time.monotonic()
                     if self.html is None:
                         raise ApiError(503, "og_unavailable") from None
-                    self.fetched_at = time.monotonic() - TEMPLATE_TTL_S + 60  # retry in a minute
+                    self.fetched_at = self.failed_at - TEMPLATE_TTL_S + TEMPLATE_FAIL_TTL_S  # stale; retry soon
         return self.html
 
 

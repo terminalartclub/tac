@@ -5,11 +5,13 @@ import io
 import json
 import re
 
+import httpx
 import pytest
 from PIL import Image
 
 from conftest import META, handle_slug, make_ctx
 from tac_platform import cards, og
+from tac_platform.web import ApiError
 
 SITE = "http://localhost:5181"
 TEMPLATE = """<!doctype html><html><head><meta charset="utf-8">
@@ -261,3 +263,53 @@ async def test_card_render_failure_still_publishes(site, monkeypatch):
     assert [p["id"] for p in doc["pieces"]] == [f"{h}/{s}"]
     m = metas((await get_og(site, f"/night-shift/{h}/{s}")).text)
     assert m["og:image"][0].endswith("/og.jpg")  # falls back to the render's own still
+
+
+
+def _template(handler) -> og.Template:
+    return og.Template(f"{SITE}/index.html", transport=httpx.MockTransport(handler))
+
+
+async def test_template_http_fetch_streams_with_cap_and_no_redirects():
+    ok = _template(lambda req: httpx.Response(200, text=TEMPLATE))
+    assert await ok.get() == TEMPLATE
+
+    big = _template(lambda req: httpx.Response(200, content=b"<html><head></head>" + b"x" * og.TEMPLATE_MAX_BYTES))
+    with pytest.raises(ApiError) as e:
+        await big.get()
+    assert e.value.status == 503
+
+    seen = []
+
+    def redirect(req):
+        seen.append(str(req.url))
+        return httpx.Response(302, headers={"location": "https://evil.example/index.html"})
+
+    with pytest.raises(ApiError):
+        await _template(redirect).get()
+    assert seen == [f"{SITE}/index.html"]  # the redirect was not followed
+
+    with pytest.raises(ApiError):
+        await _template(lambda req: httpx.Response(503, text="<html><head></head></html>")).get()
+
+
+async def test_template_negative_cache_window(monkeypatch):
+    clock = [5000.0]
+    monkeypatch.setattr(og.time, "monotonic", lambda: clock[0])
+    hits = []
+    up = [False]
+
+    def handler(req):
+        hits.append(1)
+        return httpx.Response(200, text=TEMPLATE) if up[0] else httpx.Response(500)
+
+    t = _template(handler)
+    for _ in range(5):  # within 30 s of the failure: immediate 503, one upstream attempt only
+        with pytest.raises(ApiError):
+            await t.get()
+        clock[0] += 5
+    assert len(hits) == 1
+    up[0] = True
+    clock[0] += og.TEMPLATE_FAIL_TTL_S  # window over: retried and recovered
+    assert await t.get() == TEMPLATE and len(hits) == 2
+    assert og.TEMPLATE_TTL_S == 120 and og.TEMPLATE_FAIL_TTL_S == 30

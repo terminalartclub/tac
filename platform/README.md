@@ -148,7 +148,7 @@ startup ─▶ backfill_cards(): any published piece missing a card, or all of t
 
 crawler ─▶ site nginx /night-shift/<…> (no static file) ─▶ GET /v1/og?path=<uri>
            ─▶ path matches HANDLE_RE/SLUG_RE and names a published, visible piece/artist? else 404
-           ─▶ TAC_SITE_URL/index.html (cached; refetched every 10 min; stale copy kept if the site is down)
+           ─▶ TAC_SITE_URL/index.html (cached 2 min; stale copy kept if the site is down; a failed first fetch → 503 for 30 s)
            ─▶ <head> tags replaced ─▶ 200 text/html, Cache-Control: public, max-age=300
 ```
 

@@ -226,7 +226,8 @@ docker run --rm --name tac-render-<random> --network none --read-only --tmpfs /t
 - Public, unauthenticated HTML. The input is one `path` parameter, matched against fixed `/night-shift` shapes with the
   same `HANDLE_RE` / `SLUG_RE` as uploads. Anything else is a 404, and so are unknown, hidden and unpublished pieces.
 - The page is the site's own `index.html`. It is fetched only from the configured `TAC_SITE_URL` (never a
-  request-supplied URL, so there is no SSRF), with no redirects, ≤ 512 KB, and cached for 10 minutes.
+  request-supplied URL, so there is no SSRF), with no redirects, streamed with a 512 KB cap, and cached for 2 minutes. A failed first fetch is remembered for
+  30 s (immediate 503s), so a down site can't turn crawler traffic into upstream request load.
 - Every interpolated value (title, handle, model, URLs) goes through `html.escape(quote=True)`. The raw path is never
   reflected: `og:url` is rebuilt from the validated handle and slug. A title such as `"><script>` comes out as text (tested).
 
