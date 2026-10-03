@@ -25,7 +25,7 @@ async def test_device_flow_dev_mode(ctx):
         assert d["user_code"] in page.text
 
         # lowercase + no dash is normalised
-        r = await c.post("/device", data={"user_code": d["user_code"].replace("-", "").lower(), "handle": "alex"})
+        r = await c.post("/device", data={"user_code": d["user_code"].replace("-", "").lower(), "handle": "alex", "agree": "1"})
         assert r.status_code == 200 and "alex" in r.text
 
         r = await c.post("/v1/auth/token", json={"device_code": d["device_code"]})
@@ -38,7 +38,8 @@ async def test_device_flow_dev_mode(ctx):
         assert r.status_code == 410
 
         me = await c.get("/v1/me", headers={"authorization": f"Bearer {token}"})
-        assert me.json()["handle"] == "alex" and set(me.json()) == {"handle", "display_name", "bio", "link", "instagram", "instagram_confirmed", "created"}
+        assert me.json()["handle"] == "alex" and set(me.json()) == {"handle", "display_name", "bio", "link", "instagram", "instagram_confirmed", "created",
+                                                 "terms_version", "terms_current"}
         assert (await c.get("/v1/me", headers={"authorization": "Bearer nope"})).status_code == 401
         assert (await c.get("/v1/me")).status_code == 401
 
@@ -52,15 +53,15 @@ async def test_device_flow_dev_mode(ctx):
 async def test_device_expired_and_bad_input(ctx):
     async with ctx.client() as c:
         d = (await c.post("/v1/auth/device", json={})).json()
-        bad = await c.post("/device", data={"user_code": d["user_code"], "handle": "No Caps!"})
+        bad = await c.post("/device", data={"user_code": d["user_code"], "handle": "No Caps!", "agree": "1"})
         assert bad.status_code == 400
-        reserved = await c.post("/device", data={"user_code": d["user_code"], "handle": "admin"})
+        reserved = await c.post("/device", data={"user_code": d["user_code"], "handle": "admin", "agree": "1"})
         assert reserved.status_code == 400
 
         await ctx.app.state.db.execute("UPDATE device_codes SET expires_at = 0")
         r = await c.post("/v1/auth/token", json={"device_code": d["device_code"]})
         assert r.status_code == 410
-        late = await c.post("/device", data={"user_code": d["user_code"], "handle": "late"})
+        late = await c.post("/device", data={"user_code": d["user_code"], "handle": "late", "agree": "1"})
         assert late.status_code == 400
         assert (await c.post("/v1/auth/token", json={"device_code": "unknown"})).status_code == 400
 
@@ -69,16 +70,16 @@ async def test_handle_unique(ctx):
     await ctx.login("taken")
     async with ctx.client() as c:
         d = (await c.post("/v1/auth/device", json={})).json()
-        r = await c.post("/device", data={"user_code": d["user_code"], "handle": "taken"})
+        r = await c.post("/device", data={"user_code": d["user_code"], "handle": "taken", "agree": "1"})
         assert r.status_code == 409
         # the code stays usable with another handle
-        r = await c.post("/device", data={"user_code": d["user_code"], "handle": "other"})
+        r = await c.post("/device", data={"user_code": d["user_code"], "handle": "other", "agree": "1"})
         assert r.status_code == 200
 
 
 async def test_device_form_rate_limited(ctx):
     async with ctx.client(ip="10.1.1.1") as c:
-        codes = [r.status_code for r in [await c.post("/device", data={"user_code": "BBBB-BBBB", "handle": "xx"})
+        codes = [r.status_code for r in [await c.post("/device", data={"user_code": "BBBB-BBBB", "handle": "xx", "agree": "1"})
                                          for _ in range(11)]]
     assert codes[:10] == [400] * 10 and codes[10] == 429
 
@@ -172,7 +173,7 @@ def _resolve(page_path: str, action: str, prefix: str = "/api") -> str:
 
 async def test_device_forms_post_relative_dev(ctx):
     async with ctx.client() as c:
-        pages = [await c.get("/device"), await c.post("/device", data={"user_code": "nope", "handle": "alex"})]
+        pages = [await c.get("/device"), await c.post("/device", data={"user_code": "nope", "handle": "alex", "agree": "1"})]
     for r in pages:  # the form, and its error re-render
         assert not ABSOLUTE_ACTION.search(r.text), r.text
         assert _resolve("/device", _action(r.text)) == "/api/device"  # behind the proxy

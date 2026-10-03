@@ -30,6 +30,9 @@ class SubmissionMeta(BaseModel):
     human_role: Literal["none", "seeded", "directed"] = "none"  # declared; the server recomputes it from notes.md
     size: Literal["sketch", "full"] = "full"
     tokens_source: Literal["user", "transcript-estimate", "subagent-total", "unknown"] = "unknown"
+    # The submitter's attestation: they may share it, and it copies no one else's characters, brands or
+    # logos. Only a literal JSON true counts; anything else is stored as False and the upload is refused.
+    rights_confirmed: bool = False
 
     @field_validator("tokens", mode="before")
     @classmethod
@@ -43,6 +46,11 @@ class SubmissionMeta(BaseModel):
         if v > MAX_TOKENS:
             raise ValueError(f"tokens must be at most {MAX_TOKENS:,} (got {v:,}); the largest house piece used ~530,000")
         return v
+
+    @field_validator("rights_confirmed", mode="before")
+    @classmethod
+    def literal_true(cls, v: object) -> bool:
+        return v is True
 
     @field_validator("title", "description")
     @classmethod

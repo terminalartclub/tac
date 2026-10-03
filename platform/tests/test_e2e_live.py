@@ -57,7 +57,7 @@ async def test_live_end_to_end():
         # 1. device login, the human half done by posting the dev form
         d = (await c.post("/v1/auth/device", json={})).json()
         assert (await c.post("/v1/auth/token", json={"device_code": d["device_code"]})).status_code == 428
-        r = await c.post("/device", data={"user_code": d["user_code"], "handle": handle})
+        r = await c.post("/device", data={"user_code": d["user_code"], "handle": handle, "agree": "1"})
         assert r.status_code == 200, r.text
         tok = await c.post("/v1/auth/token", json={"device_code": d["device_code"]})
         assert tok.status_code == 200, tok.text

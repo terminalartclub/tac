@@ -25,6 +25,8 @@ CREATE TABLE IF NOT EXISTS users (
     link         TEXT,
     instagram    TEXT,                       -- bare IG handle, claimed by the user (unverified)
     instagram_confirmed INTEGER NOT NULL DEFAULT 0,  -- admin-confirmed; only then public / tagged
+    terms_version     INTEGER,               -- the TERMS_VERSION last accepted at sign-in; NULL = never
+    terms_accepted_at TEXT,
     created_at  TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS access_tokens (
@@ -150,6 +152,10 @@ class Database:
         for col in ("display_name", "bio", "link", "instagram"):
             if col not in cols:
                 await self.conn.execute(f"ALTER TABLE users ADD COLUMN {col} TEXT")
+        if "terms_version" not in cols:
+            await self.conn.execute("ALTER TABLE users ADD COLUMN terms_version INTEGER")
+        if "terms_accepted_at" not in cols:
+            await self.conn.execute("ALTER TABLE users ADD COLUMN terms_accepted_at TEXT")
         if "instagram_confirmed" not in cols:
             await self.conn.execute("ALTER TABLE users ADD COLUMN instagram_confirmed INTEGER NOT NULL DEFAULT 0")
 

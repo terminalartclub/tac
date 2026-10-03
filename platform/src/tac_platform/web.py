@@ -120,6 +120,10 @@ button.primary { min-height:48px; padding:0 28px; border:0; background:var(--acc
 button.primary:hover { filter:brightness(1.08); }
 button.bad { border-color:var(--accent-pink); color:var(--accent-pink); }
 .err { color:var(--accent-pink); } .ok { color:var(--accent-cyan); }
+label.agree { display:flex; gap:10px; align-items:flex-start; margin:18px 0 4px; color:var(--text); font-size:14px;
+  cursor:pointer; }
+label.agree input { width:18px; height:18px; margin:1px 0 0; flex:none; accent-color:var(--accent-cyan); }
+label.agree a { color:var(--accent-cyan); }
 pre { background:var(--bg-elevated); border:1px solid var(--border-light); border-radius:var(--radius);
   padding:12px; max-height:420px; overflow:auto; white-space:pre; color:var(--text); }
 /* admin */

@@ -30,10 +30,10 @@ async def test_dev_pages_share_style(ctx):
         d = (await c.post("/v1/auth/device", json={})).json()
         pages = {
             "web login": await c.get("/v1/auth/web/login", params={"return": "/me"}),
-            "web login error": await c.post("/v1/auth/web/login", data={"handle": "X!", "return": "/"}),
+            "web login error": await c.post("/v1/auth/web/login", data={"handle": "X!", "return": "/", "agree": "1"}),
             "device": await c.get("/device", params={"code": d["user_code"]}),
-            "device error": await c.post("/device", data={"user_code": "nope", "handle": "alex"}),
-            "device connected": await c.post("/device", data={"user_code": d["user_code"], "handle": "alex"}),
+            "device error": await c.post("/device", data={"user_code": "nope", "handle": "alex", "agree": "1"}),
+            "device connected": await c.post("/device", data={"user_code": d["user_code"], "handle": "alex", "agree": "1"}),
             "admin login bad": await c.get("/admin/login", params={"token": "wrong"}),
             "admin signed out": await c.get("/admin"),
         }

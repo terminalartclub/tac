@@ -17,7 +17,8 @@ FIXTURES = Path(__file__).parent / "fixtures"
 ADMIN = "test-admin-token"
 PIECE = b'from rich.text import Text\n\nwhile True:\n    canvas.write(Text("~"))\n    await sleep(0.1)\n'
 META = {"title": "First Light", "description": "a window going grey", "model": "claude-opus-5-5",
-        "tokens": 1234, "iterations": 3, "loop_s": 30.0, "license": "CC-BY-4.0 art / MIT code"}
+        "tokens": 1234, "iterations": 3, "loop_s": 30.0, "license": "CC-BY-4.0 art / MIT code",
+        "rights_confirmed": True}
 
 
 def png_bytes(color=(200, 100, 30)) -> bytes:
@@ -66,7 +67,7 @@ class Ctx:
     async def login(self, handle: str) -> str:
         async with self.client() as c:
             d = (await c.post("/v1/auth/device", json={})).json()
-            r = await c.post("/device", data={"user_code": d["user_code"], "handle": handle})
+            r = await c.post("/device", data={"user_code": d["user_code"], "handle": handle, "agree": "1"})
             assert r.status_code == 200, r.text
             t = await c.post("/v1/auth/token", json={"device_code": d["device_code"]})
             assert t.status_code == 200, t.text

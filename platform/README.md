@@ -62,11 +62,11 @@ TAC_E2E_URL=http://127.0.0.1:8790 TAC_E2E_ADMIN_TOKEN=t uv run pytest tests/test
 | GET | `/v1/auth/web/csrf` | cookie | `{csrf, header: "X-TAC-CSRF"}` for cookie-authenticated state changes |
 | POST | `/v1/auth/web/logout` | cookie + CSRF | revokes the session, clears the cookie |
 | POST | `/v1/auth/web/logout-all` | cookie + CSRF | revokes every web session of the user (sign out everywhere), clears the cookie; plugin tokens stay |
-| GET | `/v1/me` | cookie or Bearer | `{handle, display_name, bio, link, instagram, instagram_confirmed, created}` |
+| GET | `/v1/me` | cookie or Bearer | `{handle, display_name, bio, link, instagram, instagram_confirmed, created, terms_version, terms_current}` |
 | PATCH | `/v1/me` | cookie+CSRF or Bearer | `{display_name ≤ 40, bio ≤ 280, link: https ≤ 200, instagram: bare handle (leading @ stripped, URLs refused, IG rules; a changed handle resets `instagram_confirmed`)}`. Omitted = unchanged, `""`/null = cleared, unknown keys = 400 |
 | DELETE | `/v1/me` | cookie+CSRF or Bearer | `{"confirm": "<handle>"}`. Deletes the account, pieces, media, sessions and tokens; 409 while a render is running |
 | POST | `/v1/me/pieces/{id or handle/slug}/unpublish` | cookie+CSRF or Bearer, owner | published or in_review → rejected ("unpublished/withdrawn by the artist"); public + render media deleted |
-| POST | `/v1/submissions` | Bearer | multipart `piece`, `meta`, `notes?`, `process[≤4]`. 202 `{id, status, url, piece_url}` (`piece_url` = `TAC_SITE_URL/@<handle>/<slug>`, null without `TAC_SITE_URL`) |
+| POST | `/v1/submissions` | Bearer | multipart `piece`, `meta`, `notes?`, `process[≤4]`. 202 `{id, status, url, piece_url}` (`piece_url` = `TAC_SITE_URL/@<handle>/<slug>`, null without `TAC_SITE_URL`). 403 `terms_not_accepted` `{terms_url, terms_version}` until the current terms are accepted; 400 `rights_not_confirmed` unless `meta.rights_confirmed` is `true` |
 | GET | `/v1/submissions/{id}` | Bearer, owner | `{id, status, reasons, preview_url, critique}`; others get 404 |
 | GET | `/v1/submissions/{id}/preview.webp` | signed URL | pre-publish preview (HMAC, 7-day expiry) |
 | GET | `/v1/community.json` | none | gallery feed (CORS `*`): pieces with `views`, `artists{handle: {views, instagram? (admin-confirmed only)}}`, `week{label, views}`; rebuilt on every publish change and hourly |
@@ -105,10 +105,32 @@ site JS: GET /api/v1/auth/web/csrf → X-TAC-CSRF on every PATCH/POST/DELETE mad
 ## Submission meta
 
 `meta` is a JSON string.
-- Required: `title` (≤ 80), `model` (`claude-…` id).
+- Required: `title` (≤ 80), `model` (`claude-…` id), `rights_confirmed: true` (see Terms acceptance).
 - Optional: `description` (≤ 400), `tokens` (whole number 0–2,000,000 or null; > 1,000,000 shows a `high_tokens` badge in `/admin` and is never auto-published, even for trusted handles), `iterations`, `loop_s`, `license`, `process_notes` (≤ 4 strings, one per process image), `human_role` (`none` default | `seeded` | `directed`, i.e. how much the person steered the piece).
 - Unknown keys are ignored.
 - `human_role` is passed through to `community.json` and shown in `/admin`.
+
+## Terms acceptance
+
+```
+sign-in ─▶ identity known? ─ dev /device, dev web form: no ─▶ box on the form (always shown; required for a new
+        │                                                    handle or one behind the current version)
+        └─ GitHub device / GitHub web: yes, after the OAuth callback
+              users.terms_version >= TAC_TERMS_VERSION ? ─ yes ─▶ signed in, no box
+                                                          └ no ─▶ interstitial: the box + a signed 10-min token
+                                                                  bound to an httpOnly nonce cookie
+box ticked ─▶ users.terms_version = TAC_TERMS_VERSION, terms_accepted_at = now, audit "terms_accepted vN"
+box missing ─▶ 400, the same form re-rendered with an inline error; nothing created, no code approved
+```
+
+- The box: `I agree to the Terms and the Content policy`, linking `TAC_SITE_URL/terms` and `/content-policy`
+  (`https://terminalart.club` when `TAC_SITE_URL` is unset). Required and unticked.
+- `POST /v1/submissions` answers 403 `terms_not_accepted` while `terms_version < TAC_TERMS_VERSION` (the plugin says
+  `accept the updated terms: run /tac:login`), and 400 `rights_not_confirmed` unless `meta.rights_confirmed` is the
+  JSON `true`: the submitter's statement that they may share the piece and that it copies no one else's characters,
+  brands or logos. The attestation is stored with the piece's meta.
+- `GET /v1/me` returns `terms_version` (last accepted, null = never) and `terms_current`.
+- Seeding house pieces through the upload sets `rights_confirmed: true`; the operator attests for them.
 
 ## View counts (public aggregates)
 
@@ -201,6 +223,7 @@ crawler ─▶ site nginx /@<…>, /gallery, /night-shift/<…> (no static file)
 | `ANTHROPIC_API_KEY` | unset | enables automod; never passed to renders |
 | `TAC_AUTOMOD_MODEL` / `TAC_AUTOMOD_EFFORT` | `claude-opus-5-5` / `low` | |
 | `TAC_SITE_ORIGINS` | dev: `http://localhost:5181`; prod: required | the only origins that get credentialed CORS on `/v1/*` (never `/v1/admin`, `/v1/render-io`). Prod refuses to start when unset or when any origin is not `https://` |
+| `TAC_TERMS_VERSION` | `1` | mirrors `TERMS_VERSION` in the site's `legal.js`; raising it makes every user re-accept at the next sign-in, and uploads 403 until they do |
 | `TAC_SITE_URL` | unset | web login redirects to `TAC_SITE_URL + return`; unset = relative (dev proxy). Prod: `https://terminalart.club` |
 | `TAC_TRUST_PROXY` | `0` | `1` = take the client IP from `Fly-Client-IP` / `X-Forwarded-For` (only behind Fly's proxy) |
 | `TAC_WORKER` | `1` | `0` = don't start the in-process pipeline worker |

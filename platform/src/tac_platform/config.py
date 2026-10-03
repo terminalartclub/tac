@@ -70,6 +70,7 @@ class Settings:
 
     site_origins: tuple[str, ...] = ()  # unset: DEV_SITE_ORIGINS in dev, refused in prod
     site_url: str = ""  # web login redirects to site_url + return path; "" = relative (dev proxy)
+    terms_version: int = 1  # mirrors TERMS_VERSION in the site's legal.js; bump = everyone re-accepts
     trust_proxy: bool = False  # honour Fly-Client-IP / X-Forwarded-For
     worker_enabled: bool = True
     submissions_per_day: int = 3
@@ -79,6 +80,8 @@ class Settings:
 
     def __post_init__(self) -> None:
         """Normalize env/auth once, failing closed: an unknown value must never fall back to dev behaviour."""
+        if isinstance(self.terms_version, bool) or not isinstance(self.terms_version, int) or self.terms_version < 1:
+            raise RuntimeError(f"TAC_TERMS_VERSION must be an integer >= 1, got {self.terms_version!r}")
         env = str(self.env).strip().lower()
         if env not in ENVS:
             raise RuntimeError(f"TAC_ENV={self.env!r} is not one of {sorted(ENVS)}; refusing to start")
@@ -147,6 +150,7 @@ class Settings:
             anthropic_api_key_present=bool(os.environ.get("ANTHROPIC_API_KEY")),
             site_origins=tuple(o.strip().rstrip("/") for o in _env("TAC_SITE_ORIGINS", "").split(",") if o.strip()),
             site_url=_env("TAC_SITE_URL", "").rstrip("/"),
+            terms_version=int(_env("TAC_TERMS_VERSION", "1")),
             trust_proxy=_env("TAC_TRUST_PROXY", "0") == "1",
             worker_enabled=_env("TAC_WORKER", "1") == "1",
         )

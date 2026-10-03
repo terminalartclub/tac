@@ -119,6 +119,19 @@ docker run --rm --name tac-render-<random> --network none --read-only --tmpfs /t
 
 ## 3. Auth and tokens
 
+### Terms acceptance
+
+- Every sign-in path ends with the current `TAC_TERMS_VERSION` accepted, or it doesn't end: the dev `/device` form
+  and the dev web form require the box server-side (a missing box is a 400 and creates nothing); the GitHub device
+  and web flows stop after the OAuth callback at an interstitial when the user is behind, and only then approve the
+  device code or set the session.
+- The interstitial token is `kind.user_id.extra.exp.nonce` + HMAC(secret), valid 10 minutes, and must match an
+  httpOnly `SameSite=Lax` nonce cookie set on the same response. A leaked form token alone (no cookie) can't finish
+  a sign-in; a device token can't finish a web sign-in (the kind is signed); the web step keeps the login-CSRF check.
+- Acceptance is stored per user (`terms_version`, `terms_accepted_at`) with an audit row per acceptance. Uploads
+  are refused (403 `terms_not_accepted`) until the current version is accepted, and need `meta.rights_confirmed: true`.
+
+
 - Device code: 32 random bytes, stored as sha256. The user code is 8 chars over the 20-letter RFC 8628 alphabet (20^8 ≈ 2.6e10), lives 10 min, and the form allows 10 attempts per 10 min per IP. Brute force is out of reach.
 - A device code is consumed exactly once (compare-and-swap `approved → consumed`). Replays get 410.
 - Access tokens: 32 random bytes (`secrets.token_urlsafe`). The DB keeps only sha256, so a DB leak does not leak usable tokens. They don't expire yet (TODO: expiry + revoke endpoint).

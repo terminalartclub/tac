@@ -17,6 +17,7 @@ import httpx
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
+from . import terms
 from .db import now_iso
 from .models import HANDLE_RE, DeviceCodeOut, TokenIn, TokenOut
 from .sessions import cookie_secure, require_csrf, session_row
@@ -141,6 +142,8 @@ def relative_to(request: Request, target: str) -> str:
 
 
 def _device_form(request: Request, code: str = "", handle: str = "", error: str = "", github: bool = False) -> str:
+    """dev: code + handle + the terms box (every dev device sign-in creates a new user).
+    github: code only; the terms box comes after the OAuth callback, and only for users who are behind."""
     err = f"<p class=err>{html.escape(error)}</p>" if error else ""
     handle_field = (
         ""
@@ -150,6 +153,7 @@ def _device_form(request: Request, code: str = "", handle: str = "", error: str 
         " autocomplete=off>"
     )
     action = html.escape(relative_to(request, "/device/github" if github else "/device"))
+    agree = "" if github else terms.checkbox(request.app.state.settings)
     button = "continue with GitHub" if github else "connect"
     return page(
         "terminal art club · connect",
@@ -158,7 +162,7 @@ def _device_form(request: Request, code: str = "", handle: str = "", error: str 
         "<label for=user_code>code shown in your terminal</label>"
         f"<input id=user_code name=user_code type=text required value='{html.escape(code)}' autocomplete=off"
         " placeholder='XXXX-XXXX'>"
-        f"{handle_field}<p><button class=primary type=submit>{button}</button></p></form></div>",
+        f"{handle_field}{agree}<p><button class=primary type=submit>{button}</button></p></form></div>",
         home=site_home(request),
     )
 
@@ -182,7 +186,8 @@ async def _approve(request: Request, user_code: str, user_id: int, handle: str) 
 
 
 @router.post("/device", response_class=HTMLResponse)
-async def device_submit(request: Request, user_code: str = Form(""), handle: str = Form("")):
+async def device_submit(request: Request, user_code: str = Form(""), handle: str = Form(""),
+                        agree: str = Form("")):
     st = request.app.state
     if st.settings.auth_mode != "dev":
         raise ApiError(404, "not_found")
@@ -194,6 +199,8 @@ async def device_submit(request: Request, user_code: str = Form(""), handle: str
         return HTMLResponse(_device_form(request, user_code, handle, "That code is not XXXX-XXXX."), 400)
     if not HANDLE_RE.match(handle) or handle in RESERVED_HANDLES:
         return HTMLResponse(_device_form(request, code, handle, "Handles are 2-24 of a-z, 0-9 and dash."), 400)
+    if not terms.ticked(agree):
+        return HTMLResponse(_device_form(request, code, handle, TERMS_ERROR), 400)
     # One transaction: code still pending + handle free -> create user + approve code.
     # Dev mode: a handle belongs to the first device that claims it; no re-login as an existing handle.
     error, status = "", 200
@@ -212,6 +219,7 @@ async def device_submit(request: Request, user_code: str = Form(""), handle: str
                 "UPDATE device_codes SET status = 'approved', user_id = ? WHERE user_code = ?", (user["id"], code)
             )
             await tx.audit(f"user:{handle}", "user_created")
+            await terms.record(tx, user["id"], handle, st.settings.terms_version)
             await tx.audit(f"user:{handle}", "device_approved")
     if error:
         return HTMLResponse(_device_form(request, code, handle, error), status)
@@ -337,11 +345,60 @@ async def github_callback(request: Request, code: str = "", state: str = ""):
     if row is None:
         error = f"Handle '{login}' is unavailable (TODO: pick one)."
         return HTMLResponse(_device_form(request, error=error, github=True), 409)
-    if not await _approve(request, user_code, row["id"], row["handle"]):
+    if not terms.is_current(await _terms_row(st, row["id"]), st.settings):
+        token, nonce = terms.make_pending(st.secret, "device", row["id"], user_code)
+        resp = _device_terms_page(request, token, row["handle"])
+        _set_terms_nonce(request, resp, nonce)
+        return resp
+    return await _finish_device(request, user_code, row["id"], row["handle"])
+
+
+TERMS_ERROR = "Tick the box to agree to the Terms and the Content policy."
+
+
+async def _terms_row(st, user_id: int):
+    return await st.db.fetchone("SELECT terms_version FROM users WHERE id = ?", (user_id,))
+
+
+def _set_terms_nonce(request: Request, resp, nonce: str) -> None:
+    resp.set_cookie(terms.NONCE_COOKIE, nonce, max_age=terms.PENDING_TTL_S, httponly=True, samesite="lax",
+                    secure=cookie_secure(request), path="/")
+
+
+def _device_terms_page(request: Request, token: str, handle: str, error: str = "", status: int = 200) -> HTMLResponse:
+    body = terms.interstitial_body(request.app.state.settings, relative_to(request, "/device/github/terms"),
+                                   token, handle, error)
+    return HTMLResponse(page("terminal art club · connect", body, home=site_home(request)), status)
+
+
+async def _finish_device(request: Request, user_code: str, user_id: int, handle: str):
+    if not await _approve(request, user_code, user_id, handle):
         return HTMLResponse(_device_form(request, error="That code expired. Start again.", github=True), 400)
-    return page(
+    resp = HTMLResponse(page(
         "terminal art club · connected",
-        f"<h1>connected as {html.escape(row['handle'])}</h1>"
+        f"<h1>connected as {html.escape(handle)}</h1>"
         "<div class=card><p class=muted>Go back to your terminal; it picks this up within a few seconds.</p></div>",
         home=site_home(request),
-    )
+    ))
+    resp.delete_cookie(terms.NONCE_COOKIE, path="/")
+    return resp
+
+
+@router.post("/device/github/terms", response_class=HTMLResponse)
+async def github_device_terms(request: Request, token: str = Form(""), agree: str = Form("")):
+    """Second step of a GitHub device sign-in for a user who hasn't accepted the current terms."""
+    st = request.app.state
+    if st.settings.auth_mode != "github":
+        raise ApiError(404, "not_found")
+    pending = terms.read_pending(st.secret, "device", token, request)
+    if pending is None:
+        return HTMLResponse(_device_form(request, error="That sign-in expired. Start again.", github=True), 400)
+    user_id, user_code = pending
+    user = await st.db.fetchone("SELECT id, handle FROM users WHERE id = ?", (user_id,))
+    if user is None:
+        return HTMLResponse(_device_form(request, error="That sign-in expired. Start again.", github=True), 400)
+    if not terms.ticked(agree):
+        return _device_terms_page(request, token, user["handle"], TERMS_ERROR, 400)
+    async with st.db.tx() as tx:
+        await terms.record(tx, user["id"], user["handle"], st.settings.terms_version)
+    return await _finish_device(request, user_code, user["id"], user["handle"])

@@ -7,6 +7,7 @@ from urllib.parse import urlsplit
 from fastapi import APIRouter, Request, Response
 from pydantic import BaseModel, ConfigDict, field_validator
 
+from . import terms
 from .auth import current_user
 from .sessions import clear_session_cookie
 from .web import ApiError, take_rate_token
@@ -99,7 +100,7 @@ class DeleteIn(BaseModel):
     confirm: str
 
 
-def profile_out(row) -> dict:
+def profile_out(row, settings) -> dict:
     return {
         "handle": row["handle"],
         "display_name": row["display_name"] or "",
@@ -108,19 +109,22 @@ def profile_out(row) -> dict:
         "instagram": row["instagram"] or "",
         "instagram_confirmed": bool(row["instagram"]) and bool(row["instagram_confirmed"]),
         "created": row["created_at"][:10],
+        "terms_version": row["terms_version"],  # last accepted; None = never
+        "terms_current": terms.is_current(row, settings),
     }
 
 
 async def _load(request: Request, user_id: int):
     return await request.app.state.db.fetchone(
-        "SELECT handle, display_name, bio, link, instagram, instagram_confirmed, created_at FROM users WHERE id = ?", (user_id,)
+        "SELECT handle, display_name, bio, link, instagram, instagram_confirmed, created_at, terms_version"
+        " FROM users WHERE id = ?", (user_id,)
     )
 
 
 @router.get("/v1/me")
 async def get_me(request: Request) -> dict:
     user = await current_user(request)
-    return profile_out(await _load(request, user["id"]))
+    return profile_out(await _load(request, user["id"]), request.app.state.settings)
 
 
 @router.patch("/v1/me")
@@ -145,7 +149,7 @@ async def patch_me(body: ProfileIn, request: Request) -> dict:
             "SELECT 1 FROM submissions WHERE user_id = ? AND status = 'published' AND hidden = 0 LIMIT 1", (user["id"],)
         ):
             await st.publisher.regenerate()  # artist block in community.json
-    return profile_out(await _load(request, user["id"]))
+    return profile_out(await _load(request, user["id"]), request.app.state.settings)
 
 
 @router.post("/v1/me/pieces/{piece_id:path}/unpublish")

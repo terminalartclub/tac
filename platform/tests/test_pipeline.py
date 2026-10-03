@@ -304,6 +304,7 @@ async def test_house_piece_seeds_through_the_upload_path(tmp_path):
 
     src = root / "pieces" / "studio-fable" / "laps"
     meta = metamod.loads_yaml((src / "meta.yaml").read_text())
+    meta["rights_confirmed"] = True  # the seeding operator attests for house pieces, like any submitter
     async with make_ctx(tmp_path, site_url="http://localhost:5181") as ctx:
         token = await ctx.login("studio-fable")
         r = await ctx.submit(token, piece=(src / "piece.py").read_bytes(), meta=meta,

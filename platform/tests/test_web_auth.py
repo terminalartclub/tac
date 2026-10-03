@@ -18,7 +18,7 @@ async def web_login(ctx, handle: str, ret: str = "/me") -> httpx.AsyncClient:
     c = ctx.client(ip="10.7.7.7")
     form = await c.get("/v1/auth/web/login", params={"return": ret})
     assert form.status_code == 200 and "action='login'" in form.text
-    r = await c.post("/v1/auth/web/login", data={"handle": handle, "return": ret})
+    r = await c.post("/v1/auth/web/login", data={"handle": handle, "return": ret, "agree": "1"})
     assert r.status_code == 303, r.text
     assert c.cookies.get("tac_session")
     return c
@@ -53,10 +53,11 @@ async def test_login_logout_same_user_as_plugin(ctx):
     c = await web_login(ctx, "alex", "/p/alex")
     async with aclosing(c):
         me = (await c.get("/v1/me")).json()
-        assert me["handle"] == "alex" and set(me) == {"handle", "display_name", "bio", "link", "instagram", "instagram_confirmed", "created"}
+        assert me["handle"] == "alex" and set(me) == {"handle", "display_name", "bio", "link", "instagram", "instagram_confirmed", "created",
+                                                 "terms_version", "terms_current"}
         # rotation: logging in again replaces the session
         old = c.cookies.get("tac_session")
-        r = await c.post("/v1/auth/web/login", data={"handle": "alex", "return": "/"})
+        r = await c.post("/v1/auth/web/login", data={"handle": "alex", "return": "/", "agree": "1"})
         assert r.status_code == 303 and c.cookies.get("tac_session") != old
         assert (await ctx.app.state.db.fetchone("SELECT COUNT(*) AS n FROM web_sessions"))["n"] == 1
         # logout needs CSRF; then the session is gone server-side and the cookie cleared
@@ -90,7 +91,7 @@ async def test_logout_all_revokes_every_session(ctx):
 
 async def test_redirect_and_cookie_flags_dev(ctx):
     async with ctx.client() as c:
-        r = await c.post("/v1/auth/web/login", data={"handle": "alex", "return": "//evil.example/x"})
+        r = await c.post("/v1/auth/web/login", data={"handle": "alex", "return": "//evil.example/x", "agree": "1"})
         assert r.status_code == 303 and r.headers["location"] == "/"
         cookie = r.headers["set-cookie"].lower()
         assert "httponly" in cookie and "samesite=lax" in cookie and "path=/" in cookie
@@ -115,8 +116,23 @@ async def github_login(ctx, monkeypatch, base: str, ret: str = "/p/alex") -> tup
     r = await c.get("/v1/auth/web/login", params={"return": ret})
     state = parse_qs(urlsplit(r.headers["location"]).query)["state"][0]
     cb = await c.get("/v1/auth/web/github/callback", params={"code": "gh-code", "state": state})
+    if cb.status_code == 200:  # first sign-in: the terms step
+        cb = await accept_terms(c, cb, "/v1/auth/web/terms")
     assert cb.status_code == 303, cb.text
     return c, cb
+
+
+def terms_token(page: httpx.Response) -> str:
+    import re
+
+    m = re.search(r"name=token value='([^']+)'", page.text)
+    assert m and "name=agree" in page.text, page.text
+    return m.group(1)
+
+
+async def accept_terms(c: httpx.AsyncClient, page: httpx.Response, path: str, agree: bool = True) -> httpx.Response:
+    data = {"token": terms_token(page), **({"agree": "1"} if agree else {})}
+    return await c.post(path, data=data)
 
 
 async def test_cookie_prod_is_host_prefixed_without_domain(tmp_path, monkeypatch):
@@ -342,13 +358,13 @@ async def test_cors_credentials_only_for_site_origins(ctx):
 
 async def test_login_rate_limited(ctx):
     async with ctx.client(ip="10.3.3.3") as c:
-        codes = [(await c.post("/v1/auth/web/login", data={"handle": "X!", "return": "/"})).status_code for _ in range(11)]
+        codes = [(await c.post("/v1/auth/web/login", data={"handle": "X!", "return": "/", "agree": "1"})).status_code for _ in range(11)]
     assert codes[:10] == [400] * 10 and codes[10] == 429
 
 
 async def test_login_csrf_cross_site_form_rejected(ctx):
     async with ctx.client() as c:
-        r = await c.post("/v1/auth/web/login", data={"handle": "alex"}, headers={"sec-fetch-site": "cross-site"})
+        r = await c.post("/v1/auth/web/login", data={"handle": "alex", "agree": "1"}, headers={"sec-fetch-site": "cross-site"})
     assert r.status_code == 403
 
 
@@ -357,7 +373,7 @@ async def test_github_mode_login(tmp_path, monkeypatch):
 
     async with make_ctx(tmp_path, worker_enabled=False, auth_mode="github", github_client_id="cid") as ctx:
         async with ctx.client() as c:
-            assert (await c.post("/v1/auth/web/login", data={"handle": "alex"})).status_code == 404  # no dev form
+            assert (await c.post("/v1/auth/web/login", data={"handle": "alex", "agree": "1"})).status_code == 404  # no dev form
             r = await c.get("/v1/auth/web/login", params={"return": "/p/x"})
             assert r.status_code == 303 and r.headers["location"].startswith("https://github.com/login/oauth/authorize?")
             q = parse_qs(urlsplit(r.headers["location"]).query)
@@ -371,7 +387,9 @@ async def test_github_mode_login(tmp_path, monkeypatch):
             monkeypatch.setattr(web_auth, "github_identity", fake_identity)
             bad = await c.get("/v1/auth/web/github/callback", params={"code": "gh-code", "state": state + "x"})
             assert bad.status_code == 400
-            ok = await c.get("/v1/auth/web/github/callback", params={"code": "gh-code", "state": state})
+            step = await c.get("/v1/auth/web/github/callback", params={"code": "gh-code", "state": state})
+            assert step.status_code == 200 and "tac_session=" not in step.headers.get("set-cookie", "")
+            ok = await accept_terms(c, step, "/v1/auth/web/terms")
             assert ok.status_code == 303 and ok.headers["location"] == "/p/x"
             assert "tac_session=" in ok.headers["set-cookie"]
         row = await ctx.app.state.db.fetchone("SELECT handle, github_id FROM users")

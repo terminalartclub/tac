@@ -17,7 +17,8 @@ from urllib.parse import urlencode, urlsplit
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
-from .auth import RESERVED_HANDLES, github_identity, user_for_github
+from . import terms
+from .auth import RESERVED_HANDLES, TERMS_ERROR, github_identity, relative_to, user_for_github
 from .db import now_iso
 from .models import HANDLE_RE
 from .sessions import (
@@ -67,6 +68,9 @@ def _login_form(request: Request, ret: str, handle: str = "", error: str = "") -
         "<label for=handle>handle (a-z, 0-9, dash; 2-24)</label>"
         f"<input id=handle name=handle type=text required pattern='[a-z0-9-]{{2,24}}' value='{html.escape(handle)}'"
         " autocomplete=username>"
+        # dev form: the handle isn't known until submit, so the box is always shown; the server only
+        # requires it for a new handle or one behind the current terms version
+        f"{terms.checkbox(request.app.state.settings)}"
         "<p><button class=primary type=submit>sign in</button></p></form></div>",
         home=site_home(request),
     )
@@ -95,7 +99,8 @@ async def web_login(request: Request):
 
 
 @router.post("/v1/auth/web/login")
-async def web_login_submit(request: Request, handle: str = Form(""), return_: str = Form("/", alias="return")):
+async def web_login_submit(request: Request, handle: str = Form(""), return_: str = Form("/", alias="return"),
+                           agree: str = Form("")):
     st = request.app.state
     if st.settings.auth_mode != "dev":
         raise ApiError(404, "not_found")
@@ -109,11 +114,20 @@ async def web_login_submit(request: Request, handle: str = Form(""), return_: st
         return HTMLResponse(_login_form(request, return_, handle, "Handles are 2-24 of a-z, 0-9 and dash."), 400)
     # dev only (prod refuses TAC_AUTH=dev): an existing handle signs in as that user, a new one is created
     async with st.db.tx() as tx:
-        row = await tx.fetchone("SELECT id FROM users WHERE handle = ?", (handle,))
-        if row is None:
-            await tx.execute("INSERT INTO users (handle, created_at) VALUES (?, ?)", (handle, now_iso()))
-            await tx.audit(f"user:{handle}", "user_created", detail="web-dev")
-            row = await tx.fetchone("SELECT id FROM users WHERE handle = ?", (handle,))
+        row = await tx.fetchone("SELECT id, terms_version FROM users WHERE handle = ?", (handle,))
+        behind = not terms.is_current(row, st.settings)  # also true for a new handle
+        if behind and not terms.ticked(agree):
+            error = TERMS_ERROR
+        else:
+            error = ""
+            if row is None:
+                await tx.execute("INSERT INTO users (handle, created_at) VALUES (?, ?)", (handle, now_iso()))
+                await tx.audit(f"user:{handle}", "user_created", detail="web-dev")
+                row = await tx.fetchone("SELECT id, terms_version FROM users WHERE handle = ?", (handle,))
+            if behind:
+                await terms.record(tx, row["id"], handle, st.settings.terms_version)
+    if error:
+        return HTMLResponse(_login_form(request, return_, handle, error), 400)
     sid = await create_session(request, row["id"], handle)
     resp = _redirect(request, return_)
     set_session_cookie(request, resp, sid)
@@ -144,11 +158,55 @@ async def web_github_callback(request: Request, code: str = "", state: str = "")
             f"<h1>sign in</h1><p class=err>Handle '{html.escape(ident[1])}' is unavailable.</p>",
             home=site_home(request),
         ), 409)
-    sid = await create_session(request, row["id"], row["handle"])
+    full = await st.db.fetchone("SELECT terms_version FROM users WHERE id = ?", (row["id"],))
+    if not terms.is_current(full, st.settings):
+        token, nonce = terms.make_pending(st.secret, "web", row["id"], safe_return(ret))
+        resp = _terms_page(request, token, row["handle"])
+        resp.set_cookie(terms.NONCE_COOKIE, nonce, max_age=terms.PENDING_TTL_S, httponly=True, samesite="lax",
+                        secure=cookie_secure(request), path="/")
+        resp.delete_cookie("tac_web_nonce", path="/v1/auth/web/")
+        return resp
+    return await _sign_in(request, row["id"], row["handle"], ret)
+
+
+def _terms_page(request: Request, token: str, handle: str, error: str = "", status: int = 200) -> HTMLResponse:
+    body = terms.interstitial_body(request.app.state.settings, relative_to(request, "/v1/auth/web/terms"),
+                                   token, handle, error)
+    return HTMLResponse(page("terminal art club · sign in", body, home=site_home(request)), status)
+
+
+async def _sign_in(request: Request, user_id: int, handle: str, ret: str) -> Response:
+    sid = await create_session(request, user_id, handle)
     resp = _redirect(request, ret)
     set_session_cookie(request, resp, sid)
     resp.delete_cookie("tac_web_nonce", path="/v1/auth/web/")
+    resp.delete_cookie(terms.NONCE_COOKIE, path="/")
     return resp
+
+
+@router.post("/v1/auth/web/terms")
+async def web_terms(request: Request, token: str = Form(""), agree: str = Form("")):
+    """Second step of a GitHub web sign-in for a user who hasn't accepted the current terms."""
+    st = request.app.state
+    if st.settings.auth_mode != "github":
+        raise ApiError(404, "not_found")
+    site = request.headers.get("sec-fetch-site")
+    if site is not None and site not in OK_FETCH_SITES and site != "none":
+        raise ApiError(403, "csrf_check_failed", detail="cross-site login")  # login CSRF
+    pending = terms.read_pending(st.secret, "web", token, request)
+    expired = page("terminal art club · sign in", "<h1>sign in</h1><p class=err>That sign-in expired. Start again.</p>",
+                   home=site_home(request))
+    if pending is None:
+        return HTMLResponse(expired, 400)
+    user_id, ret = pending
+    user = await st.db.fetchone("SELECT id, handle FROM users WHERE id = ?", (user_id,))
+    if user is None:
+        return HTMLResponse(expired, 400)
+    if not terms.ticked(agree):
+        return _terms_page(request, token, user["handle"], TERMS_ERROR, 400)
+    async with st.db.tx() as tx:
+        await terms.record(tx, user["id"], user["handle"], st.settings.terms_version)
+    return await _sign_in(request, user["id"], user["handle"], ret)
 
 
 @router.get("/v1/auth/web/csrf")

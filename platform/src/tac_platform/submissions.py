@@ -16,6 +16,7 @@ from starlette.datastructures import UploadFile
 
 from .auth import current_user
 from .db import now_iso
+from . import terms
 from .models import SubmissionAccepted, SubmissionMeta, SubmissionOut
 from .notes import human_role
 from .web import ApiError
@@ -53,6 +54,11 @@ def _sign_preview(secret: str, sub_id: str, exp: int) -> str:
 async def create_submission(request: Request):
     st = request.app.state
     user = await current_user(request)
+    accepted = await st.db.fetchone("SELECT terms_version FROM users WHERE id = ?", (user["id"],))
+    if not terms.is_current(accepted, st.settings):
+        raise ApiError(403, "terms_not_accepted", terms_url=terms.terms_url(st.settings),
+                       terms_version=st.settings.terms_version,
+                       detail="accept the current terms by signing in again (/tac:login)")
 
     since = (datetime.now(UTC) - timedelta(days=1)).isoformat(timespec="seconds")
     limit = st.settings.submissions_per_day
@@ -93,6 +99,10 @@ async def _accept(request: Request, user: dict, form, since: str, limit: int) ->
     except ValidationError as exc:
         errors = [f"{'.'.join(map(str, e['loc']))}: {e['msg']}" for e in exc.errors()]
         raise ApiError(400, "invalid_meta", detail=errors) from None
+    if meta.rights_confirmed is not True:
+        raise ApiError(400, "rights_not_confirmed",
+                       detail="meta.rights_confirmed must be true: you have the right to share this, and it doesn't "
+                              "copy anyone else's characters, brands or logos")
 
     notes = form.get("notes")
     if isinstance(notes, UploadFile):
