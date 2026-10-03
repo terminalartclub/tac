@@ -14,6 +14,7 @@ REPO_DIR = PLATFORM_DIR.parent
 ISOLATED_RENDERERS: frozenset[str] = frozenset({"docker", "fly-machine"})
 ENVS: frozenset[str] = frozenset({"dev", "prod"})
 AUTH_MODES: frozenset[str] = frozenset({"dev", "github"})
+AUTOMOD_EFFORTS: frozenset[str] = frozenset({"low", "medium", "high"})
 DEV_SITE_ORIGINS: tuple[str, ...] = ("http://localhost:5181",)  # dev only; prod must set TAC_SITE_ORIGINS
 
 
@@ -90,6 +91,10 @@ class Settings:
         """Normalize env/auth once, failing closed: an unknown value must never fall back to dev behaviour."""
         if isinstance(self.terms_version, bool) or not isinstance(self.terms_version, int) or self.terms_version < 1:
             raise RuntimeError(f"TAC_TERMS_VERSION must be an integer >= 1, got {self.terms_version!r}")
+        effort = str(self.automod_effort).strip().lower()
+        if effort not in AUTOMOD_EFFORTS:  # automod runs thinking-off (between_tools): xhigh/max 400 on every call
+            raise RuntimeError(f"TAC_AUTOMOD_EFFORT={self.automod_effort!r} is not one of {sorted(AUTOMOD_EFFORTS)}")
+        object.__setattr__(self, "automod_effort", effort)
         if not (self.automod_budget_usd >= 0):  # also rejects NaN
             raise RuntimeError(f"TAC_AUTOMOD_BUDGET_USD must be a number >= 0, got {self.automod_budget_usd!r}")
         env = str(self.env).strip().lower()

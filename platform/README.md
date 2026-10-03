@@ -248,7 +248,7 @@ submission rendered ─▶ this month's automod_spend >= budget ? ─ yes ─▶
 | `TAC_RENDER_CONCURRENCY` | `1` | parallel renders (each is ~1 CPU-bound core) |
 | `TAC_THEMES_FILE` | `platform/themes.json` | `{"2026-W40": {"title", "blurb"}}`, upserted at startup |
 | `ANTHROPIC_API_KEY` | unset | enables automod; never passed to renders |
-| `TAC_AUTOMOD_MODEL` / `TAC_AUTOMOD_EFFORT` | `claude-sonnet-5-5` / `low` | the model must have a price in `Settings.automod_prices` (startup fails otherwise) |
+| `TAC_AUTOMOD_MODEL` / `TAC_AUTOMOD_EFFORT` | `claude-sonnet-5-5` / `low` (`low`, `medium` or `high`; `xhigh`/`max` 400 with thinking off, so startup refuses them) | the model must have a price in `Settings.automod_prices` (startup fails otherwise) |
 | `TAC_AUTOMOD_BUDGET_USD` | `10` | hard monthly automod spend cap in USD (UTC calendar month); see Automod budget |
 | `TAC_SITE_ORIGINS` | dev: `http://localhost:5181`; prod: required | the only origins that get credentialed CORS on `/v1/*` (never `/v1/admin`, `/v1/render-io`). Prod refuses to start when unset or when any origin is not `https://` |
 | `TAC_TERMS_VERSION` | `1` | mirrors `TERMS_VERSION` in the site's `legal.js`; raising it makes every user re-accept at the next sign-in, and uploads 403 until they do |

@@ -163,3 +163,14 @@ async def test_charge_failure_after_successful_call_is_logged_and_swallowed(tmp_
         st = await ctx.wait(token, sub["id"], until=("published", "rejected"))
         assert st["status"] == "published"  # the verdict still counts; only the ledger write failed
     assert any("could not record automod spend" in r.message for r in caplog.records)
+
+
+@pytest.mark.parametrize("effort,ok", [("low", True), ("medium", True), ("high", True), (" HIGH ", True),
+                                       ("xhigh", False), ("max", False), ("", False), ("fast", False)])
+def test_automod_effort_validated_at_startup(monkeypatch, effort, ok):
+    monkeypatch.setenv("TAC_AUTOMOD_EFFORT", effort)
+    if ok:
+        assert Settings.from_env().automod_effort == effort.strip().lower()
+    else:
+        with pytest.raises(RuntimeError, match="TAC_AUTOMOD_EFFORT"):
+            Settings.from_env()
