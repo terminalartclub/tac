@@ -174,3 +174,15 @@ def test_automod_effort_validated_at_startup(monkeypatch, effort, ok):
     else:
         with pytest.raises(RuntimeError, match="TAC_AUTOMOD_EFFORT"):
             Settings.from_env()
+
+
+def test_worst_case_call_cost_follows_the_request_limits():
+    from tac_platform import automod as automod_mod
+
+    s = Settings.from_env(auth_mode="dev")
+    worst = budget.worst_case_call_usd(s)
+    tokens_in = 20_000 / 2 + 3 * 512 * 512 / 750 + 1_000  # code + frames + fixed text
+    assert worst == pytest.approx((round(tokens_in) * 2 + 300 * 10) / 1e6)
+    assert 0.02 <= worst <= 0.05  # the figure the README states (~$0.027)
+    # it is computed from automod's limits, not hard-coded
+    assert (automod_mod.CODE_LIMIT, automod_mod.FRAME_MAX_SIDE, automod_mod.MAX_TOKENS) == (20_000, 512, 300)

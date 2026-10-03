@@ -208,14 +208,18 @@ submission rendered ─▶ this month's automod_spend >= budget ? ─ yes ─▶
   `Settings.automod_prices`). Every call that returns usage is charged, including refusals and truncated answers.
   Each call is logged: `automod call: model=… in=… out=… cost=$…`.
 - Estimate, not yet measured on live traffic: ~600 image tokens + ~4–6k code tokens + ~60 output tokens ≈
-  $0.010–0.014 per submission, so $10 covers roughly 700–1,000 submissions a month.
+  $0.010–0.014 per typical submission, so $10 covers roughly 700–1,000 submissions a month.
+- Worst case per call (`automod_budget.worst_case_call_usd`): 20,000 code chars at a dense 2 chars/token = 10,000
+  tokens, plus 3 frames × 512² px / 750 ≈ 1,050 image tokens, plus ~1,000 tokens of prompt, title and description =
+  ~12,050 input tokens × $2/M ≈ $0.024, plus 300 output tokens × $10/M = $0.003. That is about **$0.027 per call**.
 - When the budget is reached, submissions keep flowing: each one goes to `in_review` for a human, and trusted
   handles stop auto-publishing until the next month or a higher budget. `/admin` shows
   `automod: $X.XX of $10 this month` and a badge once the budget is reached.
 - To raise it, set `TAC_AUTOMOD_BUDGET_USD` (e.g. `fly secrets set TAC_AUTOMOD_BUDGET_USD=25`) and restart. The
   ledger isn't reset; the new cap applies to the same month at once.
 - Overshoot: the check is a read before each call and the charge an atomic UPSERT after it, so concurrent reviews
-  can pass the cap by at most `TAC_RENDER_CONCURRENCY − 1` calls (about $0.01 each).
+  can pass the cap by at most `TAC_RENDER_CONCURRENCY − 1` calls, each at most the worst case above (~$0.03).
+  With the default concurrency of 1 there is no overshoot.
 
 ## Limits
 

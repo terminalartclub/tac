@@ -5,7 +5,8 @@ after a call    cost = usage x settings.automod_prices[model]   -> one atomic UP
 
 Never blocks a submission: an over-budget piece waits for a human like any other. The check is a read
 before the call and the charge an atomic add after it, so concurrent reviews can overshoot by at most
-(render_concurrency - 1) calls, about $0.01 each at the default model and limits.
+(render_concurrency - 1) calls, each at most worst_case_call_usd(): about $0.03 at the defaults
+(Sonnet 5.5, 20k code chars, 3 frames <= 512 px, 300 output tokens). A typical call is about $0.01.
 """
 
 import logging
@@ -17,6 +18,25 @@ log = logging.getLogger("tac.automod")
 
 CACHE_WRITE_X = 1.25  # 5-minute cache writes bill at 1.25x input (prompt caching docs)
 CACHE_READ_X = 0.10
+
+
+# Upper-bound token estimates for worst_case_call_usd (estimates, not tokenizer output):
+WORST_CHARS_PER_TOKEN = 2.0  # dense or minified code; ordinary Python is ~3-4 chars/token
+IMAGE_PX_PER_TOKEN = 750  # image tokens ~= width x height / 750 (Anthropic vision docs)
+FRAMES = 3
+FIXED_TEXT_TOKENS = 1_000  # system prompt (~1.2k chars) + title (<=80) + description (<=400) + labels, rounded up
+
+
+def worst_case_call_usd(settings) -> float:
+    """Most one automod call can cost under the request limits in automod.py, at the configured model."""
+    from .automod import CODE_LIMIT, FRAME_MAX_SIDE, MAX_TOKENS  # automod imports this module
+
+    per_mtok = price(settings, settings.automod_model)
+    if per_mtok is None:
+        return float("nan")
+    tokens_in = (CODE_LIMIT / WORST_CHARS_PER_TOKEN + FRAMES * FRAME_MAX_SIDE * FRAME_MAX_SIDE / IMAGE_PX_PER_TOKEN
+                 + FIXED_TEXT_TOKENS)
+    return cost_usd({"input_tokens": round(tokens_in), "output_tokens": MAX_TOKENS}, per_mtok)
 
 
 def this_month() -> str:
