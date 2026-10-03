@@ -103,10 +103,10 @@ Machines bill per second while running.
 | render Machines | shared-cpu-1x 2 GB = $13.39/730 h = $0.0183/h. ~40 s per job incl. boot means ~$0.0002 per render | 0.20 per 1,000 renders |
 | egress | gallery media. 300 pieces × ~0.9 MB preview × 50 views = ~13.5 GB | ~0.27 |
 | **Fly total** | 1,000 renders/mo | **~$4.3** |
-| automod (Anthropic, not Fly) | Opus 5.5 at effort low, ~$0.08–0.10 per submission | ~80–100 per 1,000 |
+| automod (Anthropic, not Fly) | Sonnet 5.5, effort low, thinking off, ≤ 300 output tokens: est. ~$0.010–0.014 per submission | ~10–14 per 1,000; hard-capped by `TAC_AUTOMOD_BUDGET_USD` (default 10) |
 
 - Registry storage and image pulls are not in the verified price list above. Check them on the pricing page.
-- At this volume, automod is ~95% of the bill. If it needs trimming, switch `TAC_AUTOMOD_MODEL` to a Sonnet.
+- Automod is capped at `TAC_AUTOMOD_BUDGET_USD` a month; past it, pieces go to human review (README, Automod budget).
 
 ## Not built (by decision)
 

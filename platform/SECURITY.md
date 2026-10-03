@@ -257,6 +257,9 @@ docker run --rm --name tac-render-<random> --network none --read-only --tmpfs /t
 - A prompt-injected "safe" verdict only matters for trusted handles (auto-publish). Everyone else still gets human review.
 - A refusal (`stop_reason == "refusal"`), an API error or invalid JSON goes to `in_review` with the reason, never to auto-reject or auto-publish.
 - The API key is never passed to renders. Automod sends code to Anthropic, which the submit flow should disclose to artists.
+- Spend is capped: at or above `TAC_AUTOMOD_BUDGET_USD` for the month, no call is made and the piece goes to a human
+  (`automod budget reached`). A flood of submissions can exhaust the budget (bounded by the 3-per-day per-user limit),
+  which degrades to human review and never to auto-publish.
 
 ## 7. Concurrency
 

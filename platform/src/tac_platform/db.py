@@ -117,6 +117,10 @@ CREATE TABLE IF NOT EXISTS event_days (     -- site events, counted per UTC day;
     n    INTEGER NOT NULL,
     PRIMARY KEY (name, day)
 );
+CREATE TABLE IF NOT EXISTS automod_spend (  -- automod cost ledger, one row per UTC month
+    month TEXT PRIMARY KEY,                     -- YYYY-MM
+    usd   REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS kv (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL

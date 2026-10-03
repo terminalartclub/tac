@@ -195,19 +195,22 @@ class Pipeline:
         meta = json.loads(row["meta_json"])
         code = await self.store.get(f"submissions/{sub_id}/piece.py") or b""
         preview = await self.store.get(f"submissions/{sub_id}/render/preview.webp") or b""
-        am = await self.automod.review(code.decode("utf-8", "replace"), preview, row["title"], meta.get("description", ""))
+        am = await self.automod.review(code.decode("utf-8", "replace"), preview, row["title"], meta.get("description", ""),
+                                       db=self.db)
         verdict_json = None
         reasons: list[str] = []
         flags: list[str] = []
         critique = None
-        if am.skipped:
+        if am.budget:
+            reasons = ["automod budget reached"]  # never blocks: a human reviews it
+        elif am.skipped:
             reasons = ["automod skipped"]
         elif am.verdict is None:
             reasons = [am.refusal or am.error or "automod failed"]
         else:
             v = am.verdict
             verdict_json = v.model_dump_json()
-            flags, critique = v.flags, v.critique
+            flags = v.flags
             if not v.safe:
                 reasons = [f"automod: {f}" for f in v.flags] or ["automod: unsafe"]
             elif not v.on_brief:

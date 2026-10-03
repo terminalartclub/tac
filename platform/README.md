@@ -190,6 +190,33 @@ crawler ─▶ site nginx /@<…>, /gallery, /night-shift/<…> (no static file)
   tags then fall back to `og.jpg`.
 - Fonts: JetBrains Mono 2.211 (`src/tac_platform/fonts/`, SIL OFL 1.1, license alongside).
 
+## Automod budget
+
+Automod is the launch review gate, with a hard monthly budget (default $10, `TAC_AUTOMOD_BUDGET_USD`).
+
+```
+submission rendered ─▶ this month's automod_spend >= budget ? ─ yes ─▶ no API call; in_review, reason
+                                                             │          "automod budget reached" (a human decides)
+                                                             └ no ──▶ one call ─▶ cost from response.usage
+                                                                                ─▶ automod_spend[YYYY-MM] += cost
+```
+
+- The call: Claude Sonnet 5.5, effort `low`, thinking off (`between_tools`), `max_tokens` 300, three frames at
+  ≤ 512 px a side, the first 20,000 characters of code. The output is only `{safe, on_brief, flags}`; the artist's
+  own Claude writes the critique.
+- Cost = input × $2/M + output × $10/M (cache writes 1.25× input, cache reads 0.1×; the prices table lives in
+  `Settings.automod_prices`). Every call that returns usage is charged, including refusals and truncated answers.
+  Each call is logged: `automod call: model=… in=… out=… cost=$…`.
+- Estimate, not yet measured on live traffic: ~600 image tokens + ~4–6k code tokens + ~60 output tokens ≈
+  $0.010–0.014 per submission, so $10 covers roughly 700–1,000 submissions a month.
+- When the budget is reached, submissions keep flowing: each one goes to `in_review` for a human, and trusted
+  handles stop auto-publishing until the next month or a higher budget. `/admin` shows
+  `automod: $X.XX of $10 this month` and a badge once the budget is reached.
+- To raise it, set `TAC_AUTOMOD_BUDGET_USD` (e.g. `fly secrets set TAC_AUTOMOD_BUDGET_USD=25`) and restart. The
+  ledger isn't reset; the new cap applies to the same month at once.
+- Overshoot: the check is a read before each call and the charge an atomic UPSERT after it, so concurrent reviews
+  can pass the cap by at most `TAC_RENDER_CONCURRENCY − 1` calls (about $0.01 each).
+
 ## Limits
 
 - `piece.py` ≤ 200 KB, UTF-8.
@@ -221,7 +248,8 @@ crawler ─▶ site nginx /@<…>, /gallery, /night-shift/<…> (no static file)
 | `TAC_RENDER_CONCURRENCY` | `1` | parallel renders (each is ~1 CPU-bound core) |
 | `TAC_THEMES_FILE` | `platform/themes.json` | `{"2026-W40": {"title", "blurb"}}`, upserted at startup |
 | `ANTHROPIC_API_KEY` | unset | enables automod; never passed to renders |
-| `TAC_AUTOMOD_MODEL` / `TAC_AUTOMOD_EFFORT` | `claude-opus-5-5` / `low` | |
+| `TAC_AUTOMOD_MODEL` / `TAC_AUTOMOD_EFFORT` | `claude-sonnet-5-5` / `low` | the model must have a price in `Settings.automod_prices` (startup fails otherwise) |
+| `TAC_AUTOMOD_BUDGET_USD` | `10` | hard monthly automod spend cap in USD (UTC calendar month); see Automod budget |
 | `TAC_SITE_ORIGINS` | dev: `http://localhost:5181`; prod: required | the only origins that get credentialed CORS on `/v1/*` (never `/v1/admin`, `/v1/render-io`). Prod refuses to start when unset or when any origin is not `https://` |
 | `TAC_TERMS_VERSION` | `1` | mirrors `TERMS_VERSION` in the site's `legal.js`; raising it makes every user re-accept at the next sign-in, and uploads 403 until they do |
 | `TAC_SITE_URL` | unset | web login redirects to `TAC_SITE_URL + return`; unset = relative (dev proxy). Prod: `https://terminalart.club` |
@@ -237,7 +265,8 @@ src/tac_platform/
   submissions.py  upload + owner status + signed preview
   pipeline.py     worker: claim -> check -> render -> automod -> decide
   sandbox.py      subprocess with scrubbed env + rlimits (NOT a real sandbox, see SECURITY.md)
-  automod.py      Claude structured-output moderation + critique
+  automod.py      Claude structured-output safety verdict (no critique)
+  automod_budget.py  per-call cost from usage, monthly ledger, budget cutoff
   publish.py      state transitions, public media copy, community.json
   moderation.py   public reports
   admin.py        /admin HTML + /v1/admin JSON

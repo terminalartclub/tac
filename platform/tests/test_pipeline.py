@@ -5,8 +5,8 @@ import pytest
 
 from conftest import META, PIECE, fake_claude, handle_slug, make_ctx, png_bytes
 
-SAFE = {"safe": True, "flags": [], "on_brief": True, "critique": "Hold the fish still for one beat longer."}
-UNSAFE = {"safe": False, "flags": ["malicious_code"], "on_brief": True, "critique": "Remove the network call."}
+SAFE = {"safe": True, "flags": [], "on_brief": True}
+UNSAFE = {"safe": False, "flags": ["malicious_code"], "on_brief": True}
 
 
 async def test_submit_review_approve_publish(ctx):
@@ -92,12 +92,13 @@ async def test_automod_unsafe_rejects(tmp_path):
         sub = (await ctx.submit(token)).json()
         st = await ctx.wait(token, sub["id"])
         assert st["status"] == "rejected" and st["reasons"] == ["automod: malicious_code"]
-        assert st["critique"] == "Remove the network call."
+        assert st["critique"] is None  # automod gives a safety verdict only; no critique
     call = client.messages.calls[0]
-    assert call["model"] == "claude-opus-5-5"
+    assert call["model"] == "claude-sonnet-5-5" and call["max_tokens"] == 300
     assert call["output_config"]["effort"] == "low"
     assert call["output_config"]["format"]["type"] == "json_schema"
-    assert "thinking" not in call
+    assert set(call["output_config"]["format"]["schema"]["properties"]) == {"safe", "on_brief", "flags"}
+    assert call["thinking"] == {"type": "between_tools"}  # Sonnet 5.5: "disabled" is a 400
     kinds = [b["type"] for b in call["messages"][0]["content"]]
     assert kinds.count("image") == 3
     assert "canvas.write" in call["messages"][0]["content"][-1]["text"]
@@ -109,7 +110,7 @@ async def test_automod_safe_trusted_autopublishes(tmp_path):
         await ctx.app.state.db.execute("UPDATE users SET trusted = 1 WHERE handle = 'alex'")
         sub = (await ctx.submit(token)).json()
         st = await ctx.wait(token, sub["id"], until=("published", "rejected"))
-        assert st["status"] == "published" and st["critique"] == SAFE["critique"]
+        assert st["status"] == "published" and st["critique"] is None
         # untrusted with the same verdict waits for a human
         other = await ctx.login("bea")
         sub2 = (await ctx.submit(other)).json()

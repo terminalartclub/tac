@@ -64,8 +64,16 @@ class Settings:
     render_concurrency: int = 1
     themes_file: Path = PLATFORM_DIR / "themes.json"
 
-    automod_model: str = "claude-opus-5-5"
+    automod_model: str = "claude-sonnet-5-5"
     automod_effort: str = "low"
+    automod_budget_usd: float = 10.0  # hard monthly cap (UTC calendar month); at or above it, automod is skipped
+    # USD per million tokens, (input, output). Anthropic first-party list prices; cache writes bill at 1.25x
+    # input and cache reads at 0.1x. A model missing here can't run automod (no way to enforce the budget).
+    automod_prices: dict = field(default_factory=lambda: {
+        "claude-sonnet-5-5": (2.0, 10.0),
+        "claude-opus-5-5": (4.0, 20.0),
+        "claude-haiku-4-5": (1.0, 5.0),
+    })
     anthropic_api_key_present: bool = False
 
     site_origins: tuple[str, ...] = ()  # unset: DEV_SITE_ORIGINS in dev, refused in prod
@@ -82,6 +90,8 @@ class Settings:
         """Normalize env/auth once, failing closed: an unknown value must never fall back to dev behaviour."""
         if isinstance(self.terms_version, bool) or not isinstance(self.terms_version, int) or self.terms_version < 1:
             raise RuntimeError(f"TAC_TERMS_VERSION must be an integer >= 1, got {self.terms_version!r}")
+        if not (self.automod_budget_usd >= 0):  # also rejects NaN
+            raise RuntimeError(f"TAC_AUTOMOD_BUDGET_USD must be a number >= 0, got {self.automod_budget_usd!r}")
         env = str(self.env).strip().lower()
         if env not in ENVS:
             raise RuntimeError(f"TAC_ENV={self.env!r} is not one of {sorted(ENVS)}; refusing to start")
@@ -145,8 +155,9 @@ class Settings:
             render_timeout_s=float(_env("TAC_RENDER_TIMEOUT_S", "240")),
             render_concurrency=int(_env("TAC_RENDER_CONCURRENCY", "1")),
             themes_file=Path(_env("TAC_THEMES_FILE", str(PLATFORM_DIR / "themes.json"))),
-            automod_model=_env("TAC_AUTOMOD_MODEL", "claude-opus-5-5"),
+            automod_model=_env("TAC_AUTOMOD_MODEL", "claude-sonnet-5-5"),
             automod_effort=_env("TAC_AUTOMOD_EFFORT", "low"),
+            automod_budget_usd=float(_env("TAC_AUTOMOD_BUDGET_USD", "10")),
             anthropic_api_key_present=bool(os.environ.get("ANTHROPIC_API_KEY")),
             site_origins=tuple(o.strip().rstrip("/") for o in _env("TAC_SITE_ORIGINS", "").split(",") if o.strip()),
             site_url=_env("TAC_SITE_URL", "").rstrip("/"),

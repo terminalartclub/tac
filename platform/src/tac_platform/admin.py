@@ -11,6 +11,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from pydantic import BaseModel
 
 from .models import HIGH_TOKENS, RejectIn
+from . import automod_budget
 from .views import views_summary
 from .web import ApiError, page
 
@@ -348,7 +349,14 @@ async def admin_page(request: Request):
         )
     q = await _queue(request)
     audit = await request.app.state.db.fetchall("SELECT * FROM audit_log ORDER BY id DESC LIMIT 40")
-    parts = [f"<script>{JS}</script><h1>review</h1>"]
+    st = request.app.state
+    spent = await automod_budget.month_spend(st.db)
+    status = "" if st.pipeline.automod.enabled else " (off: no ANTHROPIC_API_KEY)"
+    over = " <span class=chip>budget reached: pieces go to human review</span>" if (
+        st.pipeline.automod.enabled and spent >= st.settings.automod_budget_usd) else ""
+    parts = [f"<script>{JS}</script><h1>review</h1>",
+             f"<p class=muted id=automod-spend>automod: ${spent:.2f} of ${st.settings.automod_budget_usd:g} this month"
+             f"{e(status)}{over}</p>"]
     for key, title, mode in (("in_review", "In review", "review"), ("hidden", "Hidden by reports", "hidden"),
                              ("published", "Published", "published")):
         parts.append(f"<section><h2>{title} <span class=count>{len(q[key])}</span></h2>")

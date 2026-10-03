@@ -105,12 +105,13 @@ class RejectIn(BaseModel):
 
 
 class AutomodVerdict(BaseModel):
+    """Safety verdict only. The critique is written by the artist's own Claude in the plugin, not here."""
+
     safe: bool
     flags: list[str]
     on_brief: bool
-    critique: str
 
-    @field_validator("critique")
+    @field_validator("flags")
     @classmethod
-    def cap(cls, v: str) -> str:
-        return v.strip()[:600]
+    def short_flags(cls, v: list[str]) -> list[str]:
+        return [f.strip()[:40] for f in v][:8]
