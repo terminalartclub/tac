@@ -108,13 +108,15 @@ The terms promise copyright/hate takedowns within 72 hours and that repeat infri
 - **The log:** every hide, unhide, delete, suspend and unsuspend writes an audit row with its reason and
   target. `/admin/takedowns` lists the last 100: the record to answer a copyright complaint with.
 
-**Moderator runbook.** *Copyright email:* hide the piece now with the claim reference as the reason (e.g.
-"DMCA from X, 2026-10-03"), reply that it's down, then delete if the claim holds or unhide if it doesn't; a
-second upheld claim against the same artist is grounds to suspend. *Hate content:* hide now, then delete
-with the reason, and suspend at once for anything deliberate (no strikes needed). *Repeat offender:* suspend
-with a reason that names the earlier takedowns (the log has them); their pieces all go down with it, and an
-appeal that succeeds is unsuspend plus unhiding only the pieces that were fine. In every case, if the piece
-was on Instagram, remove it there too and click "Removed from IG".
+**Moderator runbook.** Reasons are reference IDs only (e.g. `DMCA-2026-001`): no names, emails or
+descriptions of the work. *Copyright email:* hide the piece now with the claim's reference ID as the reason,
+reply that it's down, then delete if the claim holds or unhide if it doesn't; a second upheld claim against the
+same artist is grounds to suspend. *Hate content:* hide now, then delete, and suspend at once for anything
+deliberate (no strikes needed). *Repeat offender:* suspend with a reason that lists the reference IDs of the
+earlier takedowns (the log has them); their pieces all go down with it, and an appeal that succeeds is
+unsuspend plus unhiding only the pieces that were fine. *Account deletion request from a suspended artist*
+(they can't sign in to do it): delete the account from /admin. In every case, if the piece was on Instagram,
+remove it there too and click "Removed from IG".
 
 ## Web sign-in (site)
 

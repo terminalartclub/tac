@@ -205,7 +205,10 @@ docker run --rm --name tac-render-<random> --network none --read-only --tmpfs /t
   - Needs `{"confirm": "<handle>"}`.
   - In one transaction it deletes the user, submissions, reports, views and rollups, Bearer tokens, web sessions and device codes. Then it removes all media and regenerates `community.json`.
   - Refused with 409 while a render is in flight, so the worker can't write files for a deleted user.
-  - The audit log keeps rows naming the handle: the operational record, no content.
+  - Deleting an account keeps the log lines that name the handle and record what happened. Moderation
+    actions also keep a short moderator reason, such as a complaint reference, so we can answer takedown
+    claims and enforce the repeat-infringer rule. No content is kept.
+  - A suspended account can't sign in to delete itself: email hello@terminalart.club and we delete it.
 
 ### Takedowns and suspension
 
