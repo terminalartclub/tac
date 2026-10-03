@@ -89,3 +89,26 @@ def test_dev_auth_refuses_non_loopback_bind(host, tmp_path, monkeypatch):
 def test_dev_auth_on_loopback_bind_starts(host, tmp_path, monkeypatch):
     monkeypatch.setenv("TAC_HOST", host)
     create_app(Settings.from_env(data_dir=tmp_path, auth_mode="dev"))
+
+
+
+@pytest.mark.parametrize("unset", [("TAC_GITHUB_CLIENT_ID",), ("TAC_GITHUB_CLIENT_SECRET",),
+                                   ("TAC_GITHUB_CLIENT_ID", "TAC_GITHUB_CLIENT_SECRET")])
+def test_github_auth_refuses_to_start_without_oauth_credentials(unset, tmp_path, monkeypatch):
+    for name in unset:
+        monkeypatch.delenv(name)
+    s = Settings.from_env(data_dir=tmp_path, **{**PROD, "public_base_url": "https://api.terminalart.club"})
+    with pytest.raises(RuntimeError) as e:
+        create_app(s)
+    msg = str(e.value)
+    for name in ("TAC_GITHUB_CLIENT_ID", "TAC_GITHUB_CLIENT_SECRET"):
+        assert (name in msg) == (name in unset)  # names exactly the missing secrets
+    assert "fly secrets set " + " ".join(f"{n}=…" for n in unset) + " -a tac-api" in msg
+    assert "https://api.terminalart.club/device/github/callback" in msg
+
+
+def test_github_auth_blank_credentials_count_as_missing(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAC_GITHUB_CLIENT_SECRET", "   ")
+    with pytest.raises(RuntimeError, match="set TAC_GITHUB_CLIENT_SECRET"):
+        create_app(Settings.from_env(data_dir=tmp_path, auth_mode="github"))
+    create_app(Settings.from_env(data_dir=tmp_path, auth_mode="dev"))  # dev login doesn't need them

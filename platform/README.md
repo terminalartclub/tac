@@ -261,7 +261,7 @@ decision. `audit_log` keeps the durable record.
 | `TAC_FLY_RENDER_APP` / `TAC_FLY_RENDER_IMAGE` / `TAC_FLY_RENDER_REGION` | `tac-render` / unset / unset | `fly-machine` backend: app, `registry.fly.io/tac-render:<tag>`, region |
 | `FLY_API_TOKEN` | unset | `fly-machine` only: deploy token scoped to the tac-render app (see DEPLOY.md) |
 | `TAC_AUTH` | `dev` | `dev` (handle form; loopback `TAC_HOST` and base URL only) or `github` (OAuth; see TODOs in `auth.py`); any other value refuses to start |
-| `TAC_GITHUB_CLIENT_ID` / `TAC_GITHUB_CLIENT_SECRET` | | github mode only |
+| `TAC_GITHUB_CLIENT_ID` / `TAC_GITHUB_CLIENT_SECRET` | | required with `TAC_AUTH=github`: startup refuses without both, naming the missing secret |
 | `TAC_ADMIN_TOKEN` | unset | admin disabled (403) when unset |
 | `TAC_TOOLS_DIR` | `<repo>/tools` | where `check_piece.py` / `render_piece.py` live |
 | `TAC_TOOLS_PYTHON` | this venv's python | interpreter for the tools (needs rich, Pillow, fonttools) |

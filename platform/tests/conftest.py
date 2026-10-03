@@ -92,6 +92,14 @@ class Ctx:
         raise AssertionError(f"timed out waiting, last: {body}")
 
 
+@pytest.fixture(autouse=True)
+def github_oauth_placeholders(monkeypatch):
+    """TAC_AUTH=github refuses to start without OAuth credentials (config.check_prod_safety). Tests that build a
+    GitHub-mode app get placeholders; the gate's own tests delete them."""
+    monkeypatch.setenv("TAC_GITHUB_CLIENT_ID", "test-client-id")
+    monkeypatch.setenv("TAC_GITHUB_CLIENT_SECRET", "test-client-secret")
+
+
 @asynccontextmanager
 async def make_ctx(tmp_path: Path, automod_client=None, **overrides) -> AsyncIterator[Ctx]:
     settings = Settings.from_env(

@@ -132,6 +132,17 @@ class Settings:
                 "TAC_AUTH=dev lets anyone sign in as any handle: it runs only with a loopback TAC_HOST "
                 "(bind), TAC_PUBLIC_BASE_URL and TAC_SITE_URL (127.0.0.1, localhost, ::1)"
             )
+        if self.auth_mode == "github":
+            missing = [name for name, value in (("TAC_GITHUB_CLIENT_ID", self.github_client_id),
+                                                ("TAC_GITHUB_CLIENT_SECRET", self.github_client_secret))
+                       if not str(value or "").strip()]
+            if missing:  # otherwise every sign-in redirects to GitHub with an empty client_id= and fails there
+                raise RuntimeError(
+                    f"TAC_AUTH=github needs the GitHub OAuth app's credentials; set {' and '.join(missing)} "
+                    f"(on Fly: fly secrets set {' '.join(f'{n}=…' for n in missing)} -a tac-api). "
+                    f"The OAuth app's callback URLs: {self.public_base_url}/device/github/callback and "
+                    f"{self.public_base_url}/v1/auth/web/github/callback"
+                )
 
     @property
     def sqlite_path(self) -> Path:

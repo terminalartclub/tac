@@ -15,6 +15,17 @@ FLY = tomllib.loads((PLATFORM / "fly.toml").read_text())
 ENV = FLY["env"]
 
 
+def test_fly_oauth_credentials_are_secrets_and_required(tmp_path, monkeypatch):
+    for k, v in ENV.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.setenv("TAC_DATA_DIR", str(tmp_path))
+    assert not {"TAC_GITHUB_CLIENT_ID", "TAC_GITHUB_CLIENT_SECRET"} & set(ENV)  # Fly secrets, never [env]
+    monkeypatch.delenv("TAC_GITHUB_CLIENT_ID")
+    monkeypatch.delenv("TAC_GITHUB_CLIENT_SECRET")
+    with pytest.raises(RuntimeError, match=r"fly secrets set TAC_GITHUB_CLIENT_ID=… TAC_GITHUB_CLIENT_SECRET=… -a tac-api"):
+        create_app(Settings.from_env())  # the next deploy without them fails with this instruction
+
+
 def test_fly_env_passes_the_prod_gate(tmp_path, monkeypatch):
     for k, v in ENV.items():
         monkeypatch.setenv(k, v)
