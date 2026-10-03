@@ -1,0 +1,50 @@
+# tac-api: one always-on Machine (shared-cpu-1x 512 MB) + the tac_data volume (SQLite + media).
+# Secrets (fly secrets set -a tac-api, never here): FLY_API_TOKEN (deploy token, tac-render only),
+# TAC_ADMIN_TOKEN, TAC_GITHUB_CLIENT_ID, TAC_GITHUB_CLIENT_SECRET, ANTHROPIC_API_KEY (optional: automod).
+# tests/test_deploy_files.py checks this [env] against the prod startup gate.
+app = "tac-api"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  TAC_ENV = "prod"
+  TAC_AUTH = "github"
+  TAC_RENDERER = "fly-machine"
+  TAC_FLY_RENDER_APP = "tac-render"
+  # tag = the tac-community commit the render image was built from (platform/render-image/build.sh)
+  TAC_FLY_RENDER_IMAGE = "registry.fly.io/tac-render:63606a9"
+  TAC_FLY_RENDER_REGION = "iad"
+  TAC_PUBLIC_BASE_URL = "https://api.terminalart.club"
+  TAC_SITE_URL = "https://terminalart.club"
+  # the live site + the tac-site-next preview
+  TAC_SITE_ORIGINS = "https://terminalart.club,https://tac-site-next.fly.dev"
+  TAC_TRUST_PROXY = "1"
+  TAC_DATA_DIR = "/data"
+  TAC_HOST = "0.0.0.0"
+  TAC_PORT = "8790"
+
+[[mounts]]
+  source = "tac_data"
+  destination = "/data"
+
+[http_service]
+  internal_port = 8790
+  force_https = true
+  # one Machine owns the SQLite file and runs the render worker: never stop it, never run two
+  auto_stop_machines = "off"
+  auto_start_machines = false
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    method = "GET"
+    path = "/healthz"
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "15s"
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory_mb = 512
