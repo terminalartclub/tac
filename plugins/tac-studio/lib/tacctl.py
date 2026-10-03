@@ -599,7 +599,7 @@ def cmd_style(a: argparse.Namespace) -> int:
 # ── submit ─────────────────────────────────────────────────────────────────
 
 
-def print_status(s: dict[str, Any]) -> None:
+def print_status(s: dict[str, Any], base: str) -> None:
     print(f"status: {safe(s.get('status'))}")
     for r in s.get("reasons") or []:
         print(f"  reason: {safe(r)}")
@@ -607,7 +607,8 @@ def print_status(s: dict[str, Any]) -> None:
         print(f"critique: {safe(s['critique'])}")
     for k in ("preview_url", "url"):
         if s.get(k):
-            print(f"{k.replace('_', ' ')}: {safe(s[k])}")
+            link = trusted_link(s[k], base)  # links are printed only when clean and on our hosts
+            print(f"{k.replace('_', ' ')}: {link}" if link else f"{k.replace('_', ' ')}: (omitted: not a TAC link)")
 
 
 def poll(base: str, sid: str, token: str, wait_s: float) -> dict[str, Any]:
@@ -660,7 +661,7 @@ def cmd_submit(a: argparse.Namespace) -> int:
     (work_root() / a.name / ".submission.json").write_text(json.dumps(record, indent=2))
     share = share_url(resp, base)
     if a.no_wait:
-        print_status(resp)
+        print_status(resp, base)
         print(submitted_line(share))
         return 0
     try:
@@ -668,7 +669,7 @@ def cmd_submit(a: argparse.Namespace) -> int:
     except ApiError as e:
         return die(f"status poll failed: {e}")
     final.setdefault("url", resp.get("url"))
-    print_status(final)
+    print_status(final, base)
     if final.get("status") == "rejected":
         return 1
     print(submitted_line(share))
@@ -696,23 +697,37 @@ def site_hosts(base: str) -> set[str]:
     return hosts
 
 
-def share_url(resp: dict[str, Any], base: str) -> Any:
-    """piece_url only if it is https, clean (no whitespace, control chars, backslash or userinfo) and on
-    the site or API host; it is printed into Claude's context. Otherwise the status URL."""
-    pu = resp.get("piece_url")
-    if isinstance(pu, str) and not _URL_JUNK.search(pu):
-        try:
-            u = urlsplit(pu)
-            if u.scheme == "https" and "@" not in u.netloc and (u.hostname or "").lower() in site_hosts(base) \
-                    and u.port in (None, 443):
-                return pu
-        except ValueError:
-            pass
-    return resp.get("url")
+def trusted_link(value: Any, base: str) -> str | None:
+    """A server-sent link we may print (it lands in Claude's context), or None. Clean: a string with no
+    whitespace, control/bidi chars, backslash or userinfo. And on our hosts: the API origin itself
+    (same scheme/host/port, so plain http only where the API is loopback), or https on the site host."""
+    if not isinstance(value, str) or not value or _URL_JUNK.search(value):
+        return None
+    try:
+        u, api = urlsplit(value), urlsplit(base)
+        if "@" in u.netloc or not u.hostname:
+            return None
+        if _origin(u) == _origin(api):
+            return value
+        if u.scheme == "https" and u.port in (None, 443) and u.hostname.lower() in site_hosts(base):
+            return value
+    except ValueError:
+        pass
+    return None
 
 
-def submitted_line(url: Any) -> str:
-    return f"Submitted. Once it passes review it's on the wall: {safe(url)}. Share the link. /tac:mine shows who's watching."
+def share_url(resp: dict[str, Any], base: str) -> str | None:
+    """The link for the success line: piece_url, else the status url, each only if trusted_link; else None."""
+    return trusted_link(resp.get("piece_url"), base) or trusted_link(resp.get("url"), base)
+
+
+SUBMITTED_NO_LINK = "submitted — see /tac:mine for its status"
+
+
+def submitted_line(url: str | None) -> str:
+    if not url:
+        return SUBMITTED_NO_LINK
+    return f"Submitted. Once it passes review it's on the wall: {url}. Share the link. /tac:mine shows who's watching."
 
 
 def cmd_status(a: argparse.Namespace) -> int:
@@ -724,7 +739,7 @@ def cmd_status(a: argparse.Namespace) -> int:
                         headers={"Authorization": f"Bearer {creds['access_token']}"})
     if status != 200 or not isinstance(body, dict):
         return die(f"HTTP {status} {body}")
-    print_status(body)
+    print_status(body, base)
     return 0
 
 
