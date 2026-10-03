@@ -195,3 +195,56 @@ async def test_og_503_without_any_template(site):
 
 async def test_og_404_without_site_url(ctx):
     assert (await get_og(ctx, "/night-shift")).status_code == 404
+
+
+async def test_backfill_failure_never_fails_boot_and_keeps_version_unset(tmp_path, monkeypatch):
+    from tac_platform.storage import LocalStore
+
+    async with make_ctx(tmp_path, site_url=SITE) as ctx:
+        h, s = await publish(ctx)
+        await ctx.app.state.card_backfill
+        ctx.app.state.store.path(f"public/{h}/{s}/card.jpg").unlink()
+        await ctx.app.state.db.execute("DELETE FROM kv WHERE key = 'cards_version'")
+
+    real_put = LocalStore.put
+
+    async def failing_put(self, key, data):
+        if key.endswith(("share.jpg", "card.jpg")):
+            raise OSError("disk full")
+        return await real_put(self, key, data)
+
+    monkeypatch.setattr(LocalStore, "put", failing_put)
+    async with make_ctx(tmp_path, site_url=SITE) as ctx:  # boot succeeds despite the failing piece
+        async with ctx.client() as c:
+            assert (await c.get("/healthz")).status_code == 200
+            assert (await c.get("/v1/community.json")).json()["pieces"][0]["id"] == f"{h}/{s}"
+        assert await ctx.app.state.card_backfill == 0
+        assert await ctx.app.state.db.fetchone("SELECT 1 FROM kv WHERE key = 'cards_version'") is None
+
+    monkeypatch.setattr(LocalStore, "put", real_put)
+    async with make_ctx(tmp_path, site_url=SITE) as ctx:  # next boot retries and records the version
+        assert await ctx.app.state.card_backfill == 1
+        row = await ctx.app.state.db.fetchone("SELECT value FROM kv WHERE key = 'cards_version'")
+        assert row["value"] == cards.VERSION
+
+
+async def test_backfill_holds_media_lock_per_piece_and_skips_hidden(site, monkeypatch):
+    h, s = await publish(site)
+    pub = site.app.state.publisher
+    await site.app.state.card_backfill
+    site.app.state.store.path(f"public/{h}/{s}/card.jpg").unlink()
+    held = []
+    real = pub.write_cards
+
+    async def spy(handle, slug):
+        held.append(pub._media_lock.locked())
+        return await real(handle, slug)
+
+    monkeypatch.setattr(pub, "write_cards", spy)
+    assert await pub.backfill_cards() == 1 and held == [True]
+    assert not pub._media_lock.locked()  # released after the piece, not held across the loop
+    await pub.hide(h, s, "test")
+    await site.app.state.db.execute("UPDATE kv SET value = 'old' WHERE key = 'cards_version'")
+    assert await pub.backfill_cards() == 0
+    assert await site.app.state.store.get(f"public/{h}/{s}/share.jpg") is None  # hidden stays unpublished
+

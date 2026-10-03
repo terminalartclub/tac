@@ -262,3 +262,4 @@ async def test_events_rate_limit_shared_across_ipv6_64(ctx):
     assert codes == {204}
     n = (await ctx.app.state.db.fetchone("SELECT n FROM event_days WHERE name = 'install_copy'"))["n"]
     assert n == events.EVENTS_PER_HOUR  # one /64 = one rate bucket, however many addresses
+

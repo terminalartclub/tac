@@ -137,45 +137,64 @@ class Publisher:
         await self.write_cards(handle, slug)
 
     async def write_cards(self, handle: str, slug: str) -> bool:
-        """share.jpg (og:image) + card.jpg (twitter:image) from the public og.jpg. A failure is logged,
-        never fatal: the piece still publishes, and the og endpoint falls back to og.jpg."""
-        row = await self._piece_row(handle, slug)
-        og = await self.store.get(f"public/{handle}/{slug}/og.jpg")
-        if row is None or og is None:
-            return False
-        model = model_label(json.loads(row["meta_json"]).get("model", ""))
+        """share.jpg (og:image) + card.jpg (twitter:image) from the public og.jpg. Any failure (render,
+        store read or write) is logged and returns False, never raises: the piece still publishes, and
+        the og endpoint falls back to og.jpg. Caller holds _media_lock."""
         try:
+            row = await self._piece_row(handle, slug)
+            og = await self.store.get(f"public/{handle}/{slug}/og.jpg")
+            if row is None or og is None:
+                log.warning("no og.jpg for %s/%s: share cards skipped", handle, slug)
+                return False
+            model = model_label(json.loads(row["meta_json"]).get("model", ""))
             share, _ = await asyncio.to_thread(cards.share_jpg, og, handle, model)
             card = await asyncio.to_thread(cards.card_jpg, og, row["title"], handle, model)
+            await self.store.put(f"public/{handle}/{slug}/share.jpg", share)
+            await self.store.put(f"public/{handle}/{slug}/card.jpg", card)
+            return True
         except Exception:  # noqa: BLE001
-            log.exception("share card render failed for %s/%s", handle, slug)
+            log.exception("share cards failed for %s/%s", handle, slug)
             return False
-        await self.store.put(f"public/{handle}/{slug}/share.jpg", share)
-        await self.store.put(f"public/{handle}/{slug}/card.jpg", card)
-        return True
 
     async def backfill_cards(self) -> int:
-        """Startup: render cards for published pieces that lack them, or all of them when the card
-        layout (cards.VERSION) changed. Idempotent; returns how many were written."""
+        """Render cards for published pieces that lack them, or all of them when the card layout
+        (cards.VERSION) changed. Runs as a background task after startup. Idempotent; returns how many
+        were written. Per piece: own try/except, _media_lock held for that piece only, and the piece is
+        re-checked under the lock (a hide in between must not get its public files written back).
+        cards_version is recorded only when every piece succeeded, so failures are retried next boot."""
         version = await self.db.fetchone("SELECT value FROM kv WHERE key = 'cards_version'")
         stale = version is None or version["value"] != cards.VERSION
         rows = await self.db.fetchall(
             "SELECT u.handle, s.slug FROM submissions s JOIN users u ON u.id = s.user_id"
             " WHERE s.status = 'published' AND s.hidden = 0"
         )
-        n = 0
-        async with self._media_lock:  # never races a hide deleting the same public dir
-            for r in rows:
-                h, sl = r["handle"], r["slug"]
-                have = all([await self.store.get(f"public/{h}/{sl}/{f}") is not None for f in ("share.jpg", "card.jpg")])
-                if (stale or not have) and await self.write_cards(h, sl):
-                    n += 1
-        await self.db.execute(
-            "INSERT INTO kv (key, value) VALUES ('cards_version', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            (cards.VERSION,),
-        )
-        if n:
-            log.info("rendered share cards for %d published pieces", n)
+        n = failed = 0
+        for r in rows:
+            h, sl = r["handle"], r["slug"]
+            try:
+                async with self._media_lock:
+                    cur = await self._piece_row(h, sl)
+                    if cur is None or cur["status"] != "published" or cur["hidden"]:
+                        continue
+                    have = all([await self.store.get(f"public/{h}/{sl}/{f}") is not None
+                                for f in ("share.jpg", "card.jpg")])
+                    if not (stale or not have):
+                        continue
+                    if await self.write_cards(h, sl):
+                        n += 1
+                    else:
+                        failed += 1
+            except Exception:  # noqa: BLE001
+                failed += 1
+                log.exception("card backfill failed for %s/%s", h, sl)
+        if not failed:
+            await self.db.execute(
+                "INSERT INTO kv (key, value) VALUES ('cards_version', ?)"
+                " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (cards.VERSION,),
+            )
+        if n or failed:
+            log.info("share card backfill: %d rendered, %d failed", n, failed)
         return n
 
     async def _row(self, sub_id: str):

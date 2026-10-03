@@ -147,12 +147,14 @@ def create_app(settings: Settings | None = None, automod: Automod | None = None)
         app.state.settings, app.state.db, app.state.store = settings, db, store
         app.state.secret, app.state.publisher, app.state.pipeline = secret, publisher, pipeline
         app.state.og_template = og.Template(f"{settings.site_url}/index.html")
-        await publisher.backfill_cards()
         await publisher.regenerate()
         if settings.worker_enabled:
             await pipeline.start()
         purger = asyncio.create_task(views.purge_loop(db), name="tac-view-purge")
         regen = asyncio.create_task(regen_loop(publisher), name="tac-community-regen")
+        # Cards render in the background: serving never waits on Pillow, and a failure never fails boot.
+        backfill = asyncio.create_task(publisher.backfill_cards(), name="tac-card-backfill")
+        app.state.card_backfill = backfill
         log.info("tac-platform up: auth=%s automod=%s tools=%s", settings.auth_mode,
                  "on" if pipeline.automod.enabled else "off", settings.tools_dir)
         try:
@@ -160,7 +162,8 @@ def create_app(settings: Settings | None = None, automod: Automod | None = None)
         finally:
             purger.cancel()
             regen.cancel()
-            await asyncio.gather(purger, regen, return_exceptions=True)
+            backfill.cancel()
+            await asyncio.gather(purger, regen, backfill, return_exceptions=True)
             await pipeline.stop()
             await db.close()
 
