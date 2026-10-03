@@ -229,6 +229,7 @@ Every job writes INFO lines on the `tac.pipeline` logger, one per transition, ke
 pipeline <id>: claimed (queued -> rendering)
 pipeline <id>: render start (backend=docker)
 pipeline <id>: render finish in 41.3s (check_exit=0 render_exit=0 timed_out=False backend_error=False)
+pipeline <id>: isolation {"routes": [], "tcp": "OSError"}        # Fly renders only: the in-VM network probe
 pipeline <id>: automod verdict safe=True on_brief=True flags=[] cost=$0.01012
 pipeline <id>: final status in_review
 pipeline <id>: final status rejected ["render failed (exit 1): ..."]   # reasons as JSON (escaped)

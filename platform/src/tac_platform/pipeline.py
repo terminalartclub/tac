@@ -186,6 +186,8 @@ class Pipeline:
         log.info("pipeline %s: render finish in %.1fs (check_exit=%s render_exit=%s timed_out=%s backend_error=%s)",
                  sub_id, time.monotonic() - started, _rc(job.check), _rc(job.render), job.timed_out,
                  job.backend_error is not None)
+        if job.isolation is not None:  # Fly: the in-VM probe, run before any untrusted code (DEPLOY.md smoke test)
+            log.info("pipeline %s: isolation %s", sub_id, json.dumps(job.isolation, ensure_ascii=True, sort_keys=True))
         if job.timed_out:
             raise Rejected([f"render timed out after {self.settings.render_timeout_s:.0f} s"])
         if job.backend_error:

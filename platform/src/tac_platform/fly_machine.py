@@ -149,9 +149,11 @@ class FlyMachineRenderer:
                     return JobResult(check=None, backend_error=f"machine {machine_id} produced no output"
                                      f"{await self._exit_hint(api, machine_id)}")
                 result = await asyncio.to_thread(unpack, data, out_dir)
+                iso = result.get("isolation") if isinstance(result.get("isolation"), dict) else None
                 if result.get("error"):
-                    return JobResult(check=None, backend_error=f"machine {machine_id}: {result['error']}")
-                return JobResult(check=_run_result(result.get("check")), render=_run_result(result.get("render")))
+                    return JobResult(check=None, backend_error=f"machine {machine_id}: {result['error']}", isolation=iso)
+                return JobResult(check=_run_result(result.get("check")), render=_run_result(result.get("render")),
+                                 isolation=iso)
             except (httpx.HTTPError, FlyApiError, KeyError, ValueError, tarfile.TarError) as exc:
                 return JobResult(check=None, backend_error=f"{type(exc).__name__}: {exc}"[:300])
             finally:

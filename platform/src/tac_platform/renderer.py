@@ -35,6 +35,7 @@ class JobResult:
     render: RunResult | None = None
     backend_error: str | None = None  # infrastructure failure: not the piece's fault
     timed_out: bool = False  # the whole job (check + render) ran past its wall clock
+    isolation: dict | None = None  # the render backend's network-isolation probe (Fly: result.json "isolation")
 
 
 class Renderer(Protocol):

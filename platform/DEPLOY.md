@@ -82,8 +82,11 @@ fly deploy -a tac-api
 
 - **Smoke test before opening uploads:**
   1. Submit one piece and confirm it reaches `in_review`.
-  2. Look at the job's `result.json` `isolation` field in the API log: it must be `{"routes": [], "tcp": "OSError"}`.
-  3. If it shows `network isolation unavailable`, the Fly kernel refused the namespace. Renders then fail closed (no untrusted code runs). Stop there and see SECURITY.md.
+  2. Find the job's isolation line in the API log (`fly logs -a tac-api | grep ': isolation '`). It must read
+     `pipeline <id>: isolation {"routes": [], "tcp": "OSError"}`: no routes and a refused TCP connect inside the
+     piece's namespace. This is the probe from the render's `result.json`, JSON-escaped with sorted keys, logged
+     right after the `render finish` line.
+  3. If the probe shows routes or `"tcp": "OK"`, the job also fails with `network isolation unavailable`: the Fly kernel refused the namespace. Renders then fail closed (no untrusted code runs). Stop there and see SECURITY.md.
 - **Rotation:** run step 3 again, then `fly secrets set` the new token and `fly tokens revoke <old id>` (`fly tokens list -a tac-render`).
 
 ## Cost
@@ -115,7 +118,7 @@ Machines bill per second while running.
 
 ## Before going public: checklist
 
-- [ ] Steps 0–6 above. Smoke test shows `isolation: {"routes": [], "tcp": "OSError"}` from a real Fly Machine.
+- [ ] Steps 0–6 above. Smoke test shows `pipeline <id>: isolation {"routes": [], "tcp": "OSError"}` in the tac-api log from a real Fly Machine.
 - [ ] Dockerfile + fly.toml for `tac-api` (`uv sync --frozen`, `tac-platform`, `/healthz` check, `auto_stop_machines = "off"`, volume at `/data`).
 - [ ] GitHub OAuth tested end to end; pick-a-handle step for invalid or taken logins.
 - [ ] Token expiry + revoke; admin via a GitHub allow-list instead of a shared token.

@@ -377,3 +377,39 @@ async def test_real_bootstrap_drops_network_for_piece(tmp_path, monkeypatch):
         finally:
             server.should_exit = True
             await serve
+
+
+async def test_isolation_probe_is_logged(tmp_path, monkeypatch, caplog):
+    caplog.set_level("INFO", logger="tac.pipeline")
+    probe = {"routes": [], "tcp": "OSError", "note": "line\nbreak\x1b[2K"}
+
+    async def with_probe(api, body):
+        out = out_tar({**OK_RESULT, "isolation": probe}, good_outputs())
+        assert (await api.io("PUT", body["config"]["env"]["TAC_OUT_URL"], out)).status_code == 200
+
+    cm, ctx, api = await _ctx_with(tmp_path, monkeypatch, lambda app: FakeMachinesApi(app, with_probe))
+    try:
+        st = await _submit(ctx)
+        assert st["status"] == "in_review", st
+    finally:
+        await cm.__aexit__(None, None, None)
+    lines = [r.getMessage() for r in caplog.records if ": isolation " in r.getMessage()]
+    assert len(lines) == 1, lines
+    assert lines[0].endswith('isolation {"note": "line\\nbreak\\u001b[2K", "routes": [], "tcp": "OSError"}')
+
+
+async def test_isolation_probe_logged_when_isolation_fails(tmp_path, monkeypatch, caplog):
+    caplog.set_level("INFO", logger="tac.pipeline")
+
+    async def no_netns(api, body):
+        result = {"check": None, "render": None, "error": "network isolation unavailable",
+                  "isolation": {"routes": ["default via 172.19.0.1"], "tcp": "OK"}}
+        await api.io("PUT", body["config"]["env"]["TAC_OUT_URL"], out_tar(result))
+
+    cm, ctx, api = await _ctx_with(tmp_path, monkeypatch, lambda app: FakeMachinesApi(app, no_netns))
+    try:
+        assert (await _submit(ctx))["status"] == "rejected"
+    finally:
+        await cm.__aexit__(None, None, None)
+    assert any(r.getMessage().endswith('isolation {"routes": ["default via 172.19.0.1"], "tcp": "OK"}')
+               for r in caplog.records)
