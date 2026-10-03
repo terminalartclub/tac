@@ -304,6 +304,62 @@ async def test_suspend_rejects_queued_work_and_the_worker_skips_suspended_owners
         assert (await db.fetchone("SELECT status FROM submissions WHERE id = ?", (a1["id"],)))["status"] == "queued"
 
 
+# Race tests: the early "is the owner suspended?" checks are stubbed to say no (a suspend landed right after
+# them), so only the guard inside the write statement stands between a suspended user and the wall.
+
+
+async def test_submission_insert_guard_refuses_when_the_early_check_is_stale(ctx, monkeypatch):
+    from tac_platform import submissions
+
+    token = await ctx.login("alex")
+    uid = (await ctx.app.state.db.fetchone("SELECT id FROM users WHERE handle = 'alex'"))["id"]
+
+    async def stale_current_user(request):  # authenticated before the suspend committed
+        return {"id": uid, "handle": "alex", "trusted": 0, "via": "bearer"}
+
+    async with ctx.admin() as a:
+        assert (await a.post("/v1/admin/users/alex/suspend", json={"reason": "x"})).status_code == 200
+    monkeypatch.setattr(submissions, "current_user", stale_current_user)
+    before = await ctx.app.state.store.list("submissions/")
+    r = await ctx.submit(token)
+    assert r.status_code == 403 and r.json()["error"] == "suspended"
+    assert (await ctx.app.state.db.fetchone("SELECT COUNT(*) AS n FROM submissions"))["n"] == 0
+    assert await ctx.app.state.store.list("submissions/") == before  # uploaded files cleaned up
+
+
+def _stale(orig):
+    async def row(*args):
+        r = await orig(*args)
+        return {**dict(r), "suspended_at": None} if r is not None else r
+    return row
+
+
+async def test_publish_cas_refuses_a_suspended_owner_when_the_precheck_is_stale(ctx, monkeypatch):
+    token = await ctx.login("alex")
+    sub = (await ctx.submit(token)).json()
+    await ctx.wait(token, sub["id"])  # in_review
+    pub = ctx.app.state.publisher
+    async with ctx.admin() as a:
+        await a.post("/v1/admin/users/alex/suspend", json={"reason": "x"})
+    monkeypatch.setattr(pub, "_row", _stale(pub._row))
+    assert not await pub.publish(sub["id"], "system:trusted")
+    assert (await ctx.app.state.db.fetchone("SELECT status FROM submissions"))["status"] == "in_review"
+    assert await ctx.app.state.store.list("public/alex/") == []  # media copied before the CAS is removed again
+    assert await _public_ids(ctx) == []
+
+
+async def test_unhide_cas_refuses_a_suspended_owner_when_the_precheck_is_stale(ctx, monkeypatch):
+    _, sub_id, h, s = await _published(ctx)
+    pub = ctx.app.state.publisher
+    async with ctx.admin() as a:
+        await a.post(f"/v1/admin/users/{h}/suspend", json={"reason": "x"})
+    monkeypatch.setattr(pub, "_piece_row", _stale(pub._piece_row))
+    assert not await pub.unhide(h, s, "admin")
+    assert (await ctx.app.state.db.fetchone("SELECT hidden FROM submissions WHERE id = ?", (sub_id,)))["hidden"] == 1
+    assert await ctx.app.state.store.list(f"public/{h}/") == []
+    assert await _public_ids(ctx) == []
+
+
 # ---------------------------------------------------------------- Instagram
 
 
