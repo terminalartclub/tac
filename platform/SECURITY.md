@@ -168,7 +168,7 @@ docker run --rm --name tac-render-<random> --network none --read-only --tmpfs /t
 - **CORS:** `Access-Control-Allow-Origin: <origin>` + `Allow-Credentials: true` is sent only when Origin is in `TAC_SITE_ORIGINS`, and only on `/v1/*` site paths. Never on `/v1/admin*` or `/v1/render-io/*`. `community.json` and `/media` stay `*` without credentials.
 - **Login rate limits:** dev form 10 per 10 min per IP (salted hash). GitHub redirect 20 per 10 min per IP.
 - **Profile fields** (`display_name` ≤ 40, `bio` ≤ 280, `link` https only, ≤ 200, no userinfo, no whitespace):
-  - Control, zero-width and bidi-override characters are stripped; unknown keys are refused.
+  - C0/C1 control, zero-width, bidi mark/override/isolate, invisible-operator, BOM and tag characters (`me._CTRL`) are stripped from `display_name` and `bio`; a `link` containing any of them is refused (never rewritten). Unknown keys are refused.
   - They are stored as typed. The admin HTML escapes them (tested with `<script>`).
   - `community.json` carries them as JSON strings in `artist`. The site must render them as text, never as HTML, and give the link `rel="nofollow noopener ugc"`.
 - **Unpublish:**

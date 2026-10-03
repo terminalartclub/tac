@@ -13,8 +13,12 @@ from .web import ApiError
 
 router = APIRouter()
 
-# control chars, zero-width and bidi-override characters (spoofing); newlines handled per field
-_CTRL = re.compile("[\\x00-\\x08\\x0b-\\x1f\\x7f\\u200b-\\u200f\\u202a-\\u202e\\u2066-\\u2069]")
+# C0/C1 controls, zero-width, bidi marks/overrides/isolates, invisible operators, BOM and tag chars
+# (spoofing); \t and \n are handled per field
+_CTRL = re.compile(
+    "[\\x00-\\x08\\x0b-\\x1f\\x7f-\\x9f\\u00ad\\u061c\\u180e\\u200b-\\u200f\\u2028-\\u202e"
+    "\\u2060-\\u2064\\u2066-\\u2069\\ufeff\\U000e0000-\\U000e007f]"
+)
 
 
 def _clean(v: str, allow_newlines: bool) -> str:
@@ -59,7 +63,7 @@ class ProfileIn(BaseModel):
         if v is None or v.strip() == "":
             return "" if v is not None else None
         v = v.strip()
-        if len(v) > 200 or any(c.isspace() or ord(c) < 0x20 or ord(c) == 0x7F for c in v):
+        if len(v) > 200 or any(c.isspace() for c in v) or _CTRL.search(v):  # reject, never silently rewrite a URL
             raise ValueError("link must be a single https URL of at most 200 characters")
         parts = urlsplit(v)
         if parts.scheme != "https" or not parts.hostname or "." not in parts.hostname or "@" in parts.netloc:

@@ -192,6 +192,21 @@ async def test_profile_validation_and_escaping(ctx):
                                           "link": "https://example.com/a?b=<c>"}
 
 
+INVISIBLES = ["\u202e", "\u202d", "\u2066", "\u2069", "\u061c", "\u200b", "\u200d", "\u2060", "\ufeff",
+              "\u00ad", "\u180e", "\u2028", "\x85", "\U000e0041"]
+
+
+@pytest.mark.parametrize("ch", INVISIBLES, ids=[f"U+{ord(c):04X}" for c in INVISIBLES])
+async def test_profile_strips_bidi_and_zero_width(ctx, ch):
+    token = await ctx.login("alex")
+    async with ctx.client(authorization=f"Bearer {token}") as b:
+        r = await b.patch("/v1/me", json={"display_name": f"al{ch}ex", "bio": f"hi{ch}\nthere{ch}"})
+        assert r.status_code == 200 and r.json()["display_name"] == "alex" and r.json()["bio"] == "hi\nthere"
+        for link in (f"https://example.com/{ch}gnp.exe", f"https://exa{ch}mple.com/"):
+            assert (await b.patch("/v1/me", json={"link": link})).status_code == 400, link
+        assert (await b.get("/v1/me")).json()["link"] == ""
+
+
 async def test_artist_block_absent_without_profile(ctx):
     token = await ctx.login("alex")
     await published(ctx, token)
