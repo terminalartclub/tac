@@ -222,3 +222,16 @@ async def test_submit_400_without_rights_confirmed(ctx, value):
     assert ok.status_code == 202
     stored = json.loads((await ctx.app.state.db.fetchone("SELECT meta_json FROM submissions"))["meta_json"])
     assert stored["rights_confirmed"] is True  # the attestation is kept with the piece
+
+
+@pytest.mark.parametrize("cookie", ["нонс", "été", "\U0001f600"])
+async def test_non_ascii_nonce_cookie_is_a_400_not_a_500(tmp_path, monkeypatch, cookie):
+    async with make_ctx(tmp_path, worker_enabled=False, auth_mode="github", github_client_id="cid") as ctx:
+        async with ctx.client() as c:
+            _, step = await _gh_device_callback(ctx, c, monkeypatch)
+            token = token_of(step)
+        # raw UTF-8 bytes in the Cookie header: httpx's jar refuses non-ASCII, a hostile client won't
+        async with ctx.client() as other:
+            r = await other.post("/device/github/terms", data={"token": token, "agree": "1"},
+                                 headers={"cookie": f"{terms.NONCE_COOKIE}={cookie}".encode()})
+            assert r.status_code == 400 and "expired" in r.text

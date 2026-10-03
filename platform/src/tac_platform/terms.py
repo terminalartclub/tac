@@ -92,9 +92,11 @@ def read_pending(secret: str, kind: str, token: str, request: Request) -> tuple[
         return None
     t_kind, uid, extra_b64, exp, nonce = parts
     cookie = request.cookies.get(NONCE_COOKIE) or ""
-    if t_kind != kind or not exp.isdigit() or int(exp) < time.time() or not hmac.compare_digest(nonce, cookie):
+    # bytes on both sides: compare_digest raises TypeError on non-ASCII str (a hostile cookie -> 500)
+    if t_kind != kind or not (exp.isascii() and exp.isdigit()) or int(exp) < time.time() \
+            or not hmac.compare_digest(nonce.encode(), cookie.encode()):
         return None
-    if not uid.isdigit():
+    if not (uid.isascii() and uid.isdigit()):
         return None
     try:
         extra = base64.urlsafe_b64decode(extra_b64 + "=" * (-len(extra_b64) % 4)).decode()
