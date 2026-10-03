@@ -315,6 +315,17 @@ def test_mine_wraps_to_terminal_width(platform: Platform, monkeypatch: pytest.Mo
     ("http://[::1]:8790", "http://[::1]:8790/device", True),
     ("http://localhost:8790", "http://localhost:8790/device", True),
     ("http://127.0.0.1:8790", "http://localhost:8790/device", False),  # host must equal the API host
+    # review findings: these all parsed as tac.example before
+    ("https://tac.example", "https://evil.com\\@tac.example/login", False),  # backslash: browsers open evil.com
+    ("https://tac.example", "https://u@tac.example/x", False),  # userinfo
+    ("https://tac.example", "https://u:p@tac.example/x", False),
+    ("https://tac.example", "https://tac.example:9999/x", False),  # non-default port
+    ("http://127.0.0.1:8790", "http://127.0.0.1:9999/device", False),  # loopback port mismatch
+    ("http://127.0.0.1:8790", "http://127.0.0.1/device", False),  # implicit :80 != 8790
+    ("https://tac.example", "https://tac.example/de vice", False),  # whitespace
+    ("https://tac.example", "https://tac.example/x\x1b]0;t\x07", False),  # control chars
+    ("https://tac.example", "https://tac.example:443/device?code=AB-12", True),  # default port normalised
+    ("https://tac.example", "https://TAC.example/device", True),  # host compared case-insensitively
 ])
 def test_open_browser_only_opens_https_pages_on_api_host(monkeypatch: pytest.MonkeyPatch, capsys,
                                                          api: str, url: str, ok: bool) -> None:
@@ -322,7 +333,9 @@ def test_open_browser_only_opens_https_pages_on_api_host(monkeypatch: pytest.Mon
     monkeypatch.setattr(tacctl, "_launch", launched.append)
     monkeypatch.setenv("TAC_API", api)
     assert tacctl.open_browser(url) is ok
-    assert launched == ([url] if ok else [])
+    assert launched == ([tacctl.browser_target(url)] if ok else [])
+    if ok:  # what gets opened is rebuilt from the API origin, never the server's string
+        assert launched[0].startswith(api.rstrip("/") + "/") and "@" not in launched[0].split("/")[2]
     if not ok:
         assert "not opening" in capsys.readouterr().out
 
@@ -423,3 +436,15 @@ def test_gallery_regexes_match_platform() -> None:
     for name in ("HANDLE_RE", "SLUG_RE"):
         pattern = re.search(rf'^{name} = re\.compile\(r"(.+)"\)$', models, re.M).group(1)
         assert getattr(tacctl, name).pattern == pattern
+
+
+def test_open_browser_rebuilds_url_from_api_origin(monkeypatch: pytest.MonkeyPatch) -> None:
+    launched: list[str] = []
+    monkeypatch.setattr(tacctl, "_launch", launched.append)
+    monkeypatch.setenv("TAC_API", "https://tac.example")
+    assert tacctl.open_browser("https://TAC.example:443/device?code=AB-12#frag") is True
+    assert launched == ["https://tac.example/device?code=AB-12"]  # API origin + path + query; no fragment
+    assert tacctl.browser_target("https://tac.example/a\"b<c>") == "https://tac.example/a%22b%3Cc%3E"
+    monkeypatch.setenv("TAC_API", "https://u@tac.example")
+    with pytest.raises(tacctl.ApiError):
+        tacctl.api_base()  # userinfo in TAC_API is refused too

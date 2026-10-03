@@ -36,7 +36,7 @@ import uuid
 import webbrowser
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 LIB = Path(__file__).resolve().parent
 PLUGIN = LIB.parent
@@ -81,7 +81,7 @@ def checked_base(url: str) -> str:
         host = u.hostname
     except ValueError:
         host = None
-    if host and (u.scheme == "https" or (u.scheme == "http" and is_loopback(host))):
+    if host and "@" not in u.netloc and (u.scheme == "https" or (u.scheme == "http" and is_loopback(host))):
         return url.rstrip("/")
     raise ApiError(0, f"refusing API base {safe(url)!r}: use https (plain http only for localhost)")
 
@@ -186,17 +186,39 @@ def pending_path() -> Path:
     return config_dir() / "login-pending.json"
 
 
-def browser_url_ok(url: str) -> bool:
-    """Only a page on the API's own host: https, or http when that host is loopback. A server-sent
-    file://, smb:// or custom-scheme URL handed to `open`/`xdg-open` would launch a local handler."""
+_URL_JUNK = re.compile(r"[\\\s\x00-\x1f\x7f-\x9f]")  # backslash, whitespace, C0/DEL/C1
+_DEFAULT_PORT = {"https": 443, "http": 80}
+
+
+def _origin(u: Any) -> tuple[str, str, int]:
+    """(scheme, host, port) with the default port filled in; ValueError on a bad port."""
+    return u.scheme, (u.hostname or "").lower(), u.port or _DEFAULT_PORT.get(u.scheme, -1)
+
+
+def browser_target(url: str) -> str | None:
+    """The URL to hand to `open`/`xdg-open` for a server-sent link, or None to refuse.
+
+    Never the server's string itself: it is parsed, refused on a backslash, whitespace, control
+    characters or userinfo (`https://evil.com\\@tac.example/` opens evil.com in browsers), and must
+    match the API's scheme, host and port (default ports normalised). What gets opened is then
+    rebuilt as the API origin + the parsed path + ?query, percent-encoded, so it is always ours.
+    A file://, smb:// or custom-scheme URL never matches the API's origin.
+    """
+    if not isinstance(url, str) or _URL_JUNK.search(url):
+        return None
     try:
         u, api = urlsplit(url), urlsplit(api_base())
-        host = u.hostname
-        if not host or host != api.hostname:
-            return False
+        if u.username is not None or u.password is not None or "@" in u.netloc:
+            return None
+        if not u.hostname or _origin(u) != _origin(api):
+            return None
     except (ValueError, ApiError):
-        return False
-    return u.scheme == "https" or (u.scheme == "http" and is_loopback(host))
+        return None
+    if u.path and not u.path.startswith("/"):
+        return None
+    path = quote(u.path or "/", safe="/%-._~!$&'()*+,;=:@")
+    query = quote(u.query, safe="/%-._~!$&'()*+,;=:@?")
+    return f"{api.scheme}://{api.netloc}{path}" + (f"?{query}" if query else "")
 
 
 def _launch(target: str) -> None:
@@ -208,11 +230,13 @@ def _launch(target: str) -> None:
 
 
 def open_browser(url: str) -> bool:
-    """Open a server-supplied URL in the browser; refuse (and just print it) unless browser_url_ok."""
-    if not browser_url_ok(url):
+    """Open a server-supplied URL in the browser; refuse (and just print it) unless browser_target
+    accepts it. The opened URL is the rebuilt one, never the server's string."""
+    target = browser_target(url)
+    if target is None:
         print(f"not opening {safe(url)!r}: only https pages on the TAC API host are opened")
         return False
-    _launch(url)
+    _launch(target)
     return True
 
 
