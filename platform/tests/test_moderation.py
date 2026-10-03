@@ -218,3 +218,44 @@ async def test_house_artist_migration_on_old_db(tmp_path):
         assert row["house_artist"] == 0
     finally:
         await db.close()
+
+
+
+async def test_admin_buttons_carry_values_as_data_not_code(ctx):
+    """Even values that bypassed the validators (written straight to the DB) can't become script."""
+    import html as htmlmod
+    import re as remod
+
+    token = await ctx.login("alex")
+    sub = (await ctx.submit(token)).json()
+    await ctx.wait(token, sub["id"])
+    evil_ig = "x');alert(1);//\"><img src=x onerror=alert(2)>"
+    await ctx.app.state.db.execute("UPDATE users SET instagram = ?, instagram_confirmed = 0 WHERE handle = 'alex'",
+                                   (evil_ig,))
+    async with ctx.admin() as a:
+        page = (await a.get("/admin")).text
+    assert "onclick=" not in page and "<img src=x" not in page  # no inline handlers, no injected tag
+    assert "&lt;img src=x onerror=alert(2)&gt;" in page  # the value shows only as escaped text
+    buttons = remod.findall(r"<button type=button([^>]*)>", page)
+    assert buttons, page
+    acts = {}
+    for attrs in buttons:
+        act = htmlmod.unescape(remod.search(r"data-act='([^']*)'", attrs).group(1))
+        body = remod.search(r"data-body='([^']*)'", attrs)
+        acts[act] = json.loads(htmlmod.unescape(body.group(1))) if body else None
+        assert act.startswith("/v1/admin/") and "'" not in act and '"' not in act
+    sid = sub["id"]
+    assert acts[f"/v1/admin/submissions/{sid}/approve"] is None
+    assert acts["/v1/admin/users/alex/trust"] == {"trusted": True}
+    assert acts["/v1/admin/users/alex/house"] == {"house": True}
+    assert acts["/v1/admin/users/alex/instagram-confirm"] == {"instagram": evil_ig}  # exact value, as data
+    assert f"data-act='/v1/admin/submissions/{sid}/reject' data-reason='reason-{sid}'" in page
+    assert "document.addEventListener('click'" in page
+
+
+async def test_admin_button_paths_percent_encode_segments(ctx):
+    from tac_platform.admin import _button, _seg
+
+    assert _seg("a/b?c#d") == "a%2Fb%3Fc%23d"
+    html_ = _button("x", f"/v1/admin/users/{_seg('a/../../x')}/house", {"house": True})
+    assert "data-act='/v1/admin/users/a%2F..%2F..%2Fx/house'" in html_

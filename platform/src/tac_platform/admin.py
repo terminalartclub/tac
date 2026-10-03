@@ -4,6 +4,7 @@ import hmac
 import html
 import json
 import re
+from urllib.parse import quote
 
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
@@ -229,6 +230,9 @@ async def house(handle: str, body: HouseIn, request: Request) -> dict:
 
 e = html.escape
 
+# Buttons carry their action as data- attributes (html-escaped text, never code): data-act = the POST
+# path, data-body = a JSON object, data-reason = the id of a reason input. One delegated listener reads
+# them, so no value is ever interpolated into JavaScript and safety doesn't rest on the input validators.
 JS = """
 async function act(url, body) {
   const r = await fetch(url, {method: 'POST', headers: {'content-type': 'application/json', 'x-tac-admin-csrf': '1'},
@@ -236,8 +240,29 @@ async function act(url, body) {
   if (!r.ok) { alert(url + ' -> ' + r.status + ' ' + await r.text()); return; }
   location.reload();
 }
-function withReason(url, id) { act(url, {reason: document.getElementById(id).value || 'rejected by moderator'}); }
+document.addEventListener('click', (ev) => {
+  const b = ev.target.closest('button[data-act]');
+  if (!b) return;
+  const body = b.dataset.body ? JSON.parse(b.dataset.body) : {};
+  if (b.dataset.reason) body.reason = document.getElementById(b.dataset.reason).value || 'rejected by moderator';
+  act(b.dataset.act, body);
+});
 """
+
+
+def _seg(v: str) -> str:
+    """One URL path segment, percent-encoded (a '/' or '?' in a value can't change the route)."""
+    return quote(str(v), safe="")
+
+
+def _button(label: str, path: str, body: dict | None = None, reason_id: str | None = None, cls: str = "") -> str:
+    attrs = f" class={cls}" if cls else ""
+    attrs += f" data-act='{e(path, quote=True)}'"
+    if body is not None:
+        attrs += f" data-body='{e(json.dumps(body), quote=True)}'"
+    if reason_id is not None:
+        attrs += f" data-reason='{e(reason_id, quote=True)}'"
+    return f"<button type=button{attrs}>{e(label)}</button>"
 
 
 def _ig_button(it: dict) -> str:
@@ -245,15 +270,14 @@ def _ig_button(it: dict) -> str:
     change by the user after this page loaded makes the confirm a 409 instead of confirming the new one."""
     if not it["instagram"] or it["instagram_confirmed"]:
         return ""
-    h, ig = e(it["handle"]), e(it["instagram"])  # ig is [A-Za-z0-9._] by validation; escaped anyway
-    return (f"<button onclick=\"act('/v1/admin/users/{h}/instagram-confirm',{{instagram:'{ig}'}})\">"
-            f"confirm ig @{ig}</button>")
+    return _button(f"confirm ig @{it['instagram']}", f"/v1/admin/users/{_seg(it['handle'])}/instagram-confirm",
+                   {"instagram": it["instagram"]})
 
 
 def _house_button(it: dict) -> str:
-    h, on = e(it["handle"]), it["house_artist"]
-    return (f"<button onclick=\"act('/v1/admin/users/{h}/house',{{house:{'false' if on else 'true'}}})\">"
-            f"{'Unmark' if on else 'Mark'} {h} house artist</button>")
+    on = it["house_artist"]
+    return _button(f"{'Unmark' if on else 'Mark'} {it['handle']} house artist",
+                   f"/v1/admin/users/{_seg(it['handle'])}/house", {"house": not on})
 
 
 def _kv(d: dict) -> str:
@@ -274,20 +298,22 @@ async def _card(request: Request, it: dict, mode: str) -> str:
     reports = "".join(f"<li>{e(r['reason'])} <span class=muted>{e(r['created_at'])}</span></li>" for r in it["reports"])
     rid = f"reason-{sid}"
     h, s = e(it["handle"]), e(it["slug"])
+    sub_path = f"/v1/admin/submissions/{_seg(sid)}"
+    piece_path = f"/v1/admin/pieces/{_seg(it['handle'])}/{_seg(it['slug'])}"
     if mode == "review":
         actions = (
-            f"<button class=primary onclick=\"act('/v1/admin/submissions/{e(sid)}/approve')\">Approve</button>"
-            f"<input type=text id='{e(rid)}' placeholder='reject reason'>"
-            f"<button class=bad onclick=\"withReason('/v1/admin/submissions/{e(sid)}/reject','{e(rid)}')\">Reject</button>"
-            f"<button onclick=\"act('/v1/admin/users/{h}/trust',{{trusted:{'false' if it['trusted'] else 'true'}}})\">"
-            f"{'Untrust' if it['trusted'] else 'Trust'} {h}</button>"
+            _button("Approve", f"{sub_path}/approve", cls="primary")
+            + f"<input type=text id='{e(rid)}' placeholder='reject reason'>"
+            + _button("Reject", f"{sub_path}/reject", reason_id=rid, cls="bad")
+            + _button(f"{'Untrust' if it['trusted'] else 'Trust'} {it['handle']}",
+                      f"/v1/admin/users/{_seg(it['handle'])}/trust", {"trusted": not it["trusted"]})
             + _house_button(it) + _ig_button(it)
         )
     else:
-        unhide = f"<button class=primary onclick=\"act('/v1/admin/pieces/{h}/{s}/unhide')\">Unhide</button>" if mode == "hidden" else ""
+        unhide = _button("Unhide", f"{piece_path}/unhide", cls="primary") if mode == "hidden" else ""
         actions = (
             f"{unhide}{_house_button(it)}{_ig_button(it)}<input type=text id='{e(rid)}' placeholder='delete reason'>"
-            f"<button class=bad onclick=\"withReason('/v1/admin/pieces/{h}/{s}/delete','{e(rid)}')\">Delete</button>"
+            + _button("Delete", f"{piece_path}/delete", reason_id=rid, cls="bad")
         )
     return (
         "<div class=card><div class=item><div>"
