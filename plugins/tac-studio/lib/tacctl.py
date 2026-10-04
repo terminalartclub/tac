@@ -642,9 +642,10 @@ def cmd_direct(a: argparse.Namespace) -> int:
 # ── style: the person's standing taste (~/.config/tac/style.md) ────────────
 
 STYLE_TEMPLATE = """<!--
-Your standing taste for /tac:create. Claude reads this at the start of every run.
-A per-run idea or note wins when they conflict. TAC's DNA rules (no franchise IP,
-real-world scale, near-black ground, seamless loop...) always win.
+Your standing taste for /tac:create. Claude reads this at the start of every run and
+works it into TAC's house style. To override the house style on a piece, insist in a
+note. The hard rules (no franchise IP, real-world scale, near-black ground, seamless
+loop, a renderable length) always hold.
 Write plainly; delete these comments. The first line is quoted in each piece's notes.
 -->
 I like: 

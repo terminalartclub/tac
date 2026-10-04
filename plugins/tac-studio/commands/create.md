@@ -19,7 +19,7 @@ Arguments from the user (may be empty): $ARGUMENTS
    standing taste: apply it as the skill says ("Standing style"). Absent → ignore.
 4. **Seed.** Whatever remains after the flags is the human's seed. Empty → no seed: pick the concept yourself.
    Otherwise, once you've named the piece, log it verbatim with `tacctl direct <name> seed "…"` (see "Human
-   steering" in the skill) and interpret it within the DNA. If it's a number, use it as `random.seed`
+   steering" in the skill) and interpret it within the house style (DNA.md, "Precedence"). If it's a number, use it as `random.seed`
    when choosing among your 3 concepts.
 5. Once named, run `tacctl start <name>` (add `--sketch` for a sketch) to create `./tac-work/<name>/` and record the size,
    then `tacctl style --log <name>`, which does nothing if there's no style file.

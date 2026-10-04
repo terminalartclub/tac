@@ -1,23 +1,59 @@
 # TAC visual DNA (condensed)
 
-Condensed from Terminal Art Club's `docs/visual-dna.md`. Every piece is checked against it.
-The test: shown 3–4 TAC pieces, a stranger can pick a new one out of a lineup of 5 terminal
+Condensed from Terminal Art Club's `docs/visual-dna.md`. Two layers:
+
+- **Hard rules**: every piece, always. Nobody's direction bends them.
+- **House style**: the TAC look. It is the default for every piece, and you interpret every seed and
+  note within it. The person overrides it on their own piece only by insisting (see Precedence).
+
+## Precedence
+
+hard rules > what the person insisted on > house style.
+
+- A seed, a note or the standing style file is read **within** house style. If it pulls against house
+  style, you may name that once, in one line, with how you'll resolve it inside house style ("a
+  near-black room; the fruit's colour only where the light falls"). Then make it. Don't argue the
+  point or ask permission.
+- **Insisting** means they push back or repeat the ask after you named the conflict ("no, I want full
+  colour", "ignore the palette", "every fruit in full colour"), or they leave a `tacctl direct … note`
+  that contradicts house style. Then comply fully on their piece, log their actual words with
+  `tacctl direct <name> note "<their words>"`, and don't raise it again. Craft still applies: carry
+  out their taste well (strong light, a clear focal point), not half-heartedly.
+- If an insisted ask breaks a hard rule, say which rule in one line and make the nearest thing that keeps it.
+- Nobody directing (no seed, no notes, no style file) → the full house look, unchanged.
+
+## Hard rules
+
+- **No franchise IP or brands.** No living or in-copyright artists, no named copyrighted
+  compositions, in the title, the description or the imagery.
+- **Near-black ground** (~`#08080f`). Never pure black, never grey.
+- **Seamless loop.** The last frame flows into the first (SKILL.md, "Seamless loops").
+- **Real-world scale.** Decide the scene's physical size first and size everything from it; cut what
+  can't read at true scale rather than inflating it into a cartoon.
+- **Renderable.** The platform renders each piece on one CPU and stops it at 280 s. Keep loop 20–60 s and
+  frames (loop s × fps) ≤ 900: a 60 s loop at 10–15 fps passes; 24–30 fps only for loops ≤ 30 s. One frame
+  builds in well under 50 ms.
+- **No strobe** or rapid full-frame flashing (photosensitivity).
+- **The submission lint** (SKILL.md, "Script contract") is technical and always applies.
+
+# House style: the default
+
+The lineup test: shown 3–4 TAC pieces, a stranger can pick a new one out of a lineup of 5 terminal
 animations, with no caption and no watermark.
 
 ## palette
-- Near-black ground (~`#08080f`). Never pure black, never grey.
 - **One dominant accent**: amber, teal, rust, pink, phosphor green or deep blue. Add at most one supporting hue.
 - High dynamic range inside a narrow hue family: deep shadows up to bright highlights.
 - No rainbows, default neon or more than 3 strong hues. The exception is a piece *about* neon, where neon is the subject and not the style.
 
 ## motion and pacing
 - Slow drifts, parallax, breathing. The eye relaxes; it doesn't have to track.
-- Loop 20–60 s and seamless. 10–15 fps for atmospheric pieces, 24–30 fps for cinematic ones.
+- 10–15 fps for atmospheric pieces, 24–30 fps for short cinematic ones (within the render budget above).
 - At any moment 80% of the frame is still or drifting slowly, and ≤20% carries subtle animation.
 - Layered timescales: a slow drift, a medium pulse and a rare event (about once a loop).
 - Rest beats: every 15–30 s, a moment of near-stillness.
 - No climax, no reveal, no narrative. The piece is a place, not a story.
-- Never strobe, glitch, chaos or high-frequency change.
+- No glitch, chaos or high-frequency change.
 
 ## density and glyphs
 - Density reads as texture (ink on paper), not noise (TV static).
@@ -42,9 +78,8 @@ animations, with no caption and no watermark.
 
 ## titles
 - Lowercase. One word is ideal, two at most (hyphenated). Evocative over descriptive: `derelict`, not `abandoned-spaceship-bridge`.
-- No franchise IP, no living or in-copyright artists, no named copyrighted compositions, in the title, the description or the imagery.
 
-## reject even if technically good
+## reject even if technically good (when nobody insisted otherwise)
 - A pure tech demo with no atmosphere.
 - Anything jittery or attention-demanding, or anything that wouldn't survive an hour on loop.
 - Cheerful, bright or daylight-dominant pieces.

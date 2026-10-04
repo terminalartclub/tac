@@ -16,8 +16,9 @@ Tools (bundled with this plugin; they work from any directory and need `uv` on P
 
 ## Ground truth to read first
 
-1. `${CLAUDE_PLUGIN_ROOT}/skills/tac-studio/DNA.md`: **the signature. Every piece runs against it.**
-   It also lists the catalog. Don't remake one.
+1. `${CLAUDE_PLUGIN_ROOT}/skills/tac-studio/DNA.md`: **hard rules** every piece keeps, the **house style**
+   every piece starts from, and the **precedence** between them and the person's taste. It also lists the
+   catalog. Don't remake one.
 2. Your own earlier pieces in `./tac-work/`, if any. Don't repeat yourself either.
 
 ## Script contract (claude-panel compatible)
@@ -85,9 +86,8 @@ for frame in range(N):
 
 At the start of every run, run `"${CLAUDE_PLUGIN_ROOT}/bin/tacctl" style --print`. It prints nothing
 when the person has no `~/.config/tac/style.md`. If it prints anything, treat that as their lasting
-taste (palette, subjects, things to avoid) when sketching concepts and critiquing.
-- A per-run seed or note beats the style file when they conflict.
-- DNA.md's rules beat both: no franchise IP, real-world scale, near-black ground, seamless loop.
+taste (palette, subjects, things to avoid) when sketching concepts and critiquing. Like a seed, it is
+read within house style; DNA.md, "Precedence", is the one rule for every conflict.
 - Once the piece is named, run `tacctl style --log <name>`. It records the file's first line under
   `## direction`. A style file alone doesn't change `human_role`, which stays `none`.
 
@@ -106,9 +106,9 @@ concept question below, and only in an interactive session.
 - **Per-iteration line**: after each render, show one short line, e.g.
   `iter-3 · tac-work/<name>/iter-3/sheet.png · motion 4.1% · seam CLEAN · void 66%`. Don't ask questions.
 - **Notes any time**: if the user says something ("too busy", "warmer", "add rain"), log it with
-  `tacctl direct <name> note "<their words>" --iter K` (K = the next iteration). Fold it into that
-  iteration's critique, as a constraint you judge with your eyes, not a script to obey blindly. With no
-  notes, carry on with your own critique.
+  `tacctl direct <name> note "<their words>" --iter K` (K = the next iteration) and apply it in that
+  iteration. A note that contradicts house style is the person insisting (DNA.md, "Precedence"): apply it
+  fully on their piece and don't argue it. With no notes, carry on with your own critique.
 - Only `tacctl direct` writes the `## direction` section of notes.md, and only with the human's actual
   words. Never paraphrase your own ideas into it. `human_role` (`none` / `seeded` / `directed`) is
   computed from that log at submission. The gallery credits it: "directed by @handle", "from an idea
@@ -130,8 +130,8 @@ Work in `./tac-work/<name>/` (relative to the project directory; create it). Nev
 
 Stats are a hint; the pixels decide:
 - `seam` → `JUMP` means the cut is visible. Fix it, unless seam.png proves it's twinkle noise.
-- `motion median` ≈ 0% → it reads as a still image; >20% → probably noisy or chaotic (DNA: 80% of the frame calm).
-- `void` → near-black share. The DNA wants negative space; under ~30% usually means clutter.
+- `motion median` ≈ 0% → it reads as a still image; >20% → probably noisy or chaotic (house style: 80% of the frame calm).
+- `void` → near-black share. House style wants negative space; under ~30% usually means clutter.
 
 **Sketch** (`/tac:create --sketch`, recorded as `size: sketch` by `tacctl start <name> --sketch`): at
 most 3 iterations, the same quality rules and the same self-review. Pick a concept small enough to land
@@ -145,7 +145,7 @@ merely runs. If the concept is still weak after 3 rounds, change the concept, no
 Answer each in notes.md under `## self-review`, with evidence from the frames:
 1. **First frame**: does t=0 stop a thumb on a phone? Is the subject readable in 200 ms?
 2. **One subject**, a clear focal hierarchy, negative space as volume.
-3. **Palette**: near-black ground, one dominant accent (+≤1 support).
+3. **Palette**: near-black ground (hard), and one dominant accent (+≤1 support), or what the person insisted on.
 4. **Motion**: layered timescales (slow drift / medium pulse / rare event), calm, physical.
 5. **Seam** invisible, at both 80×66 and 80×81.
 6. **TAC-ness**: would it sit in the catalog? Is a specific time of night implied?
