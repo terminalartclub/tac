@@ -2,6 +2,7 @@
 
 import hmac
 import json
+import math
 import re
 import secrets
 import sqlite3
@@ -46,6 +47,32 @@ async def _read_capped(upload: UploadFile, cap: int, what: str) -> bytes:
     return data
 
 
+# What counts toward submissions_per_day: the user's submissions in the last 24 h, except those rejected
+# because the platform failed (render budget, backend, tooling: pipeline Rejected(platform=True)). Check
+# failures, piece crashes, automod and moderator rejections all count. Params: (user_id, since).
+COUNTED = "user_id = ? AND created_at > ? AND platform_fault = 0"
+
+
+def _span(seconds: float) -> str:
+    """3 h 12 m · 45 m · under a minute. Minutes round UP: never promise a slot before it opens."""
+    if seconds < 60:
+        return "under a minute"
+    m = math.ceil(seconds / 60)
+    return f"{m // 60} h {m % 60} m" if m >= 60 else f"{m} m"
+
+
+async def rate_limited(db, user_id: int, since: str, limit: int) -> ApiError:
+    """The 429, saying when the next slot opens: the (n - limit + 1)-th oldest counted submission ages out."""
+    rows = await db.fetchall(f"SELECT created_at FROM submissions WHERE {COUNTED} ORDER BY created_at",
+                             (user_id, since))
+    retry = 60.0
+    if len(rows) >= limit:
+        frees = datetime.fromisoformat(rows[len(rows) - limit]["created_at"]) + timedelta(days=1)
+        retry = max(0.0, (frees - datetime.now(UTC)).total_seconds())
+    return ApiError(429, "rate_limited", retry_after_s=int(retry) + 1,
+                    detail=f"{limit} submissions per 24 h; next slot in {_span(retry)}")
+
+
 def _sign_preview(secret: str, sub_id: str, exp: int) -> str:
     return hmac.new(secret.encode(), f"preview|{sub_id}|{exp}".encode(), "sha256").hexdigest()[:32]
 
@@ -62,11 +89,9 @@ async def create_submission(request: Request):
 
     since = (datetime.now(UTC) - timedelta(days=1)).isoformat(timespec="seconds")
     limit = st.settings.submissions_per_day
-    recent = await st.db.fetchone(
-        "SELECT COUNT(*) AS n FROM submissions WHERE user_id = ? AND created_at > ?", (user["id"], since)
-    )
+    recent = await st.db.fetchone(f"SELECT COUNT(*) AS n FROM submissions WHERE {COUNTED}", (user["id"], since))
     if recent["n"] >= limit:  # fast path; the INSERT below re-checks atomically
-        raise ApiError(429, "rate_limited", detail=f"{limit} submissions per 24 h")
+        raise await rate_limited(st.db, user["id"], since, limit)
 
     # max_part_size bounds non-file fields only (Starlette); the per-field caps are checked in _accept.
     form = await request.form(max_files=MAX_PROCESS + 2, max_fields=8, max_part_size=MAX_PNG)
@@ -146,7 +171,7 @@ async def _accept(request: Request, user: dict, form, since: str, limit: int) ->
             inserted = await st.db.execute(
                 "INSERT INTO submissions (id, user_id, slug, title, meta_json, status, created_at, updated_at)"
                 " SELECT ?, ?, ?, ?, ?, 'queued', ?, ?"
-                " WHERE (SELECT COUNT(*) FROM submissions WHERE user_id = ? AND created_at > ?) < ?" + USER_ACTIVE,
+                f" WHERE (SELECT COUNT(*) FROM submissions WHERE {COUNTED}) < ?" + USER_ACTIVE,
                 (sub_id, user["id"], slug, meta.title, meta.model_dump_json(), now, now,
                  user["id"], since, limit, user["id"]),
             )
@@ -157,7 +182,7 @@ async def _accept(request: Request, user: dict, form, since: str, limit: int) ->
         await st.store.delete_prefix(prefix)
         if await is_suspended(st.db, user["id"]):  # suspended after current_user passed
             raise suspended_error()
-        raise ApiError(429, "rate_limited", detail=f"{limit} submissions per 24 h")
+        raise await rate_limited(st.db, user["id"], since, limit)
     async with st.db.tx() as tx:
         await tx.audit(f"user:{user['handle']}", "submit", sub_id, None, "queued", slug)
     st.pipeline.wake()

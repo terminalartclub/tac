@@ -51,8 +51,12 @@ MAX_RENDER_FILE = 25 * 1024**2
 
 
 class Rejected(Exception):
-    def __init__(self, reasons: list[str]) -> None:
+    """platform=True: our side failed (render budget, backend, tooling), not the piece. Such a rejection is
+    flagged platform_fault and doesn't count toward the submitter's daily limit."""
+
+    def __init__(self, reasons: list[str], platform: bool = False) -> None:
         self.reasons = reasons
+        self.platform = platform
 
 
 def _collect_render(out_dir: Path) -> tuple[dict, dict[str, bytes], list[bytes]]:
@@ -60,13 +64,13 @@ def _collect_render(out_dir: Path) -> tuple[dict, dict[str, bytes], list[bytes]]
     files = sorted(str(p.relative_to(out_dir)) for p in out_dir.rglob("*") if p.is_file() and not p.is_symlink())
     missing = RENDER_FILES - set(files)
     if missing:
-        raise Rejected([f"render produced no {', '.join(sorted(missing))}"])
+        raise Rejected([f"render produced no {', '.join(sorted(missing))}"], platform=True)
     try:
         stats = json.loads((out_dir / "stats.json").read_text())
     except ValueError:
         stats = None
     if not isinstance(stats, dict):
-        raise Rejected(["render produced invalid stats.json"])
+        raise Rejected(["render produced invalid stats.json"], platform=True)
     process = [f for f in files if PROCESS_RE.match(f)][:4]
     for name in [*RENDER_FILES, *process]:
         if (out_dir / name).stat().st_size > MAX_RENDER_FILE:
@@ -158,10 +162,11 @@ class Pipeline:
         try:
             await self._process(sub_id, tmp)
         except Rejected as r:
-            await self._finish(sub_id, "rejected", r.reasons)
+            await self._finish(sub_id, "rejected", r.reasons, platform=r.platform)
         except Exception as exc:  # noqa: BLE001 - never leave a row stuck in 'rendering'
             log.exception("pipeline crashed on %s", sub_id)
-            await self._finish(sub_id, "rejected", [f"pipeline error ({exc.__class__.__name__}); please resubmit"])
+            await self._finish(sub_id, "rejected", [f"pipeline error ({exc.__class__.__name__}); please resubmit"],
+                               platform=True)
         finally:
             await asyncio.to_thread(shutil.rmtree, tmp, True)
 
@@ -191,10 +196,10 @@ class Pipeline:
         if job.isolation is not None:  # Fly: the in-VM probe, run before any untrusted code (DEPLOY.md smoke test)
             log.info("pipeline %s: isolation %s", sub_id, json.dumps(job.isolation, ensure_ascii=True, sort_keys=True))
         if job.timed_out:
-            raise Rejected([f"render timed out after {self.settings.render_timeout_s:.0f} s"])
+            raise Rejected([f"render timed out after {self.settings.render_timeout_s:.0f} s"], platform=True)
         if job.backend_error:
             log.error("render backend failed for %s: %s", sub_id, job.backend_error)
-            raise Rejected(["render backend unavailable; please resubmit later"])
+            raise Rejected(["render backend unavailable; please resubmit later"], platform=True)
         res = job.check
         try:
             verdict = json.loads(res.stdout)
@@ -202,20 +207,20 @@ class Pipeline:
             verdict = None
         if res.timed_out or not isinstance(verdict, dict) or res.returncode not in (0, 1):
             log.error("check_piece failed rc=%s stderr=%s", res.returncode, _tail(res.stderr))
-            raise Rejected([f"static check could not run (exit {res.returncode}); please resubmit"])
+            raise Rejected([f"static check could not run (exit {res.returncode}); please resubmit"], platform=True)
         if res.returncode != 0 or not verdict.get("ok"):
             raise Rejected([str(r)[:300] for r in verdict.get("reasons") or ["static check failed"]])
 
         res = job.render
         if res is None:
-            raise Rejected(["render did not run"])
+            raise Rejected(["render did not run"], platform=True)
         if res.timed_out:
-            raise Rejected([f"render timed out after {self.settings.render_timeout_s:.0f} s"])
+            raise Rejected([f"render timed out after {self.settings.render_timeout_s:.0f} s"], platform=True)
         if res.returncode == 125 and self.settings.renderer == "docker":
-            raise Rejected(["render backend unavailable; please resubmit later"])
+            raise Rejected(["render backend unavailable; please resubmit later"], platform=True)
         if res.returncode == 124:  # render_piece.py's own --timeout (render_piece_timeout_s) fired
             raise Rejected([f"render did not finish within {self.settings.render_piece_timeout_s:.0f} s on the render "
-                            "machine; please resubmit"])
+                            "machine; please resubmit"], platform=True)
         if res.returncode != 0:
             raise Rejected([f"render failed (exit {res.returncode}): {_tail(res.stderr) or 'no output'}"])
         stats, process_n = await self._store_render(sub_id, out_dir)
@@ -279,14 +284,16 @@ class Pipeline:
             await self.store.put(f"{prefix}/process/{i:02d}.webp", data)
         return stats, len(process)
 
-    async def _finish(self, sub_id: str, status: str, reasons: list[str]) -> None:
+    async def _finish(self, sub_id: str, status: str, reasons: list[str], platform: bool = False) -> None:
         async with self.db.tx() as tx:
             ok = await tx.execute(
-                "UPDATE submissions SET status = ?, reasons_json = ?, updated_at = ? WHERE id = ? AND status = 'rendering'",
-                (status, json.dumps(reasons), now_iso(), sub_id),
+                "UPDATE submissions SET status = ?, reasons_json = ?, platform_fault = ?, updated_at = ?"
+                " WHERE id = ? AND status = 'rendering'",
+                (status, json.dumps(reasons), int(platform), now_iso(), sub_id),
             )
             if ok:
-                await tx.audit("system", "pipeline_result", sub_id, "rendering", status, "; ".join(reasons) or None)
+                await tx.audit("system", "pipeline_result", sub_id, "rendering", status,
+                               ("; ".join(reasons) + (" [platform fault]" if platform else "")) or None)
         if ok:
             # reasons can carry piece-derived text (check output, render stderr): JSON-escaped, so a newline
             # or ESC in a reason can't forge or break log lines

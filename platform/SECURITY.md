@@ -290,7 +290,7 @@ docker run --rm --name tac-render-<random> --network none --read-only --tmpfs /t
 
 | limit | key | mechanism |
 |---|---|---|
-| 3 submissions / 24 h | user | one `INSERT … SELECT … WHERE count < 3` statement, so it holds under concurrency |
+| 5 submissions / 24 h (`TAC_SUBMISSIONS_PER_DAY`) | user | one `INSERT … SELECT … WHERE count < 5` statement, so it holds under concurrency. Rejections where the platform failed (render budget, backend, tooling: `platform_fault = 1`) don't count; check failures and other rejections do |
 | 5 reports / h | salted IP hash | `rate_events` table, atomic insert-if-under |
 | 3 distinct reporters hides a piece | salted IP hash, `UNIQUE(submission, reporter)` | one person can't hide a piece alone without 3 IPs |
 | 30 device codes / h, 10 device-form posts / 10 min | salted IP hash | same |

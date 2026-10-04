@@ -95,7 +95,7 @@ class Settings:
     terms_version: int = 1  # mirrors TERMS_VERSION in the site's legal.js; bump = everyone re-accepts
     trust_proxy: bool = False  # honour Fly-Client-IP / X-Forwarded-For
     worker_enabled: bool = True
-    submissions_per_day: int = 3
+    submissions_per_day: int = 5  # per rolling 24 h; platform-fault rejections don't count
     reports_per_hour: int = 5
     reports_to_hide: int = 3
     extra: dict = field(default_factory=dict)
@@ -126,6 +126,9 @@ class Settings:
             raise RuntimeError("TAC_FLY_RENDER_CPUS must be 1-16 and TAC_FLY_RENDER_MEMORY_MB 256-32768")
         if not (self.render_timeout_s > 0):  # also rejects NaN
             raise RuntimeError(f"TAC_RENDER_TIMEOUT_S must be a number > 0, got {self.render_timeout_s!r}")
+        if isinstance(self.submissions_per_day, bool) or not isinstance(self.submissions_per_day, int) \
+                or self.submissions_per_day < 1:
+            raise RuntimeError(f"TAC_SUBMISSIONS_PER_DAY must be an integer >= 1, got {self.submissions_per_day!r}")
         if not self.site_origins and env == "dev":
             object.__setattr__(self, "site_origins", DEV_SITE_ORIGINS)
 
@@ -199,6 +202,7 @@ class Settings:
             tools_dir=Path(_env("TAC_TOOLS_DIR", str(REPO_DIR / "tools"))),
             tools_python=_env("TAC_TOOLS_PYTHON", sys.executable),
             render_timeout_s=float(_env("TAC_RENDER_TIMEOUT_S", "300")),
+            submissions_per_day=int(_env("TAC_SUBMISSIONS_PER_DAY", "5")),
             render_concurrency=int(_env("TAC_RENDER_CONCURRENCY", "1")),
             themes_file=Path(_env("TAC_THEMES_FILE", str(PLATFORM_DIR / "themes.json"))),
             automod_model=_env("TAC_AUTOMOD_MODEL", "claude-sonnet-5-5"),

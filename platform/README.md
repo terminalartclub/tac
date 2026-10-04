@@ -284,7 +284,11 @@ decision. `audit_log` keeps the durable record.
 - Process images: ≤ 4 PNGs, ≤ 600 KB each (magic bytes checked).
 - `notes` ≤ 64 KB.
 - Whole request ≤ 3 MB, enforced on Content-Length and on the streamed bytes. Other routes are capped at 64 KB.
-- 3 submissions per handle per rolling 24 h. The limit check and the insert are one SQL statement.
+- 5 submissions per handle per rolling 24 h (`TAC_SUBMISSIONS_PER_DAY`). The limit check and the insert are one SQL
+  statement. A submission rejected because the platform failed (render did not finish in the budget, render backend
+  down, check could not run, pipeline error: `submissions.platform_fault = 1`) doesn't count; a check failure, a
+  piece that crashes, automod and moderator rejections do. The 429 says when the next slot opens
+  (`"5 submissions per 24 h; next slot in 3 h 12 m"`, plus `retry_after_s`).
 - Render: 240 s wall clock, 180 s CPU, 3 GB address space, 256 fds, 200 MB max file size. Each render output must be ≤ 25 MB.
 
 ## Environment
@@ -306,6 +310,7 @@ decision. `audit_log` keeps the durable record.
 | `TAC_ADMIN_TOKEN` | unset | admin disabled (403) when unset |
 | `TAC_TOOLS_DIR` | `<repo>/tools` | where `check_piece.py` / `render_piece.py` live |
 | `TAC_TOOLS_PYTHON` | this venv's python | interpreter for the tools (needs rich, Pillow, fonttools) |
+| `TAC_SUBMISSIONS_PER_DAY` | `5` | per handle per rolling 24 h; platform-fault rejections don't count |
 | `TAC_RENDER_TIMEOUT_S` | `300` | wall clock per render: each backend kills render_piece.py after this; render_piece.py's own `--timeout` is 20 s less (280), so it fires first with "render did not finish within 280 s" |
 | `TAC_RENDER_CONCURRENCY` | `1` | parallel renders (each is ~1 CPU-bound core) |
 | `TAC_THEMES_FILE` | `platform/themes.json` | `{"2026-W40": {"title", "blurb"}}`, upserted at startup |

@@ -78,6 +78,7 @@ CREATE TABLE IF NOT EXISTS submissions (
     created_at   TEXT NOT NULL,
     updated_at   TEXT NOT NULL,
     published_at TEXT,
+    platform_fault INTEGER NOT NULL DEFAULT 0,  -- rejected because OUR side failed: not counted in the daily limit
     ig_posted_at TEXT,  -- admin-set: we posted it on Instagram (a takedown must also remove it there)
     UNIQUE (user_id, slug)
 );
@@ -203,8 +204,11 @@ class Database:
         for col in ("suspended_at", "suspended_reason"):
             if col not in cols:
                 await self.conn.execute(f"ALTER TABLE users ADD COLUMN {col} TEXT")
-        if "ig_posted_at" not in {r["name"] for r in await self.fetchall("PRAGMA table_info(submissions)")}:
+        sub_cols = {r["name"] for r in await self.fetchall("PRAGMA table_info(submissions)")}
+        if "ig_posted_at" not in sub_cols:
             await self.conn.execute("ALTER TABLE submissions ADD COLUMN ig_posted_at TEXT")
+        if "platform_fault" not in sub_cols:
+            await self.conn.execute("ALTER TABLE submissions ADD COLUMN platform_fault INTEGER NOT NULL DEFAULT 0")
         if "id" not in {r["name"] for r in await self.fetchall("PRAGMA table_info(blocked_identities)")}:
             # first shape keyed by the hash: rebuild with a surrogate id (can't ALTER in a PRIMARY KEY).
             # tx(): a failure rolls the whole rebuild back (executescript would leave the transaction open).

@@ -158,10 +158,62 @@ async def test_limits(tmp_path):
         assert r.status_code == 413  # > 3 MB total
         assert (await ctx.submit("bad-token")).status_code == 401
 
-        codes = [(await ctx.submit(token)).status_code for _ in range(4)]
-        assert codes == [202, 202, 202, 429]
+        codes = [(await ctx.submit(token)).status_code for _ in range(6)]
+        assert codes == [202] * 5 + [429]  # default TAC_SUBMISSIONS_PER_DAY = 5
         files_left = await ctx.app.state.store.list("submissions")
-        assert len({k.split("/")[1] for k in files_left}) == 3  # the 429 left nothing behind
+        assert len({k.split("/")[1] for k in files_left}) == 5  # the 429 left nothing behind
+
+
+async def test_platform_fault_rejections_dont_count_toward_the_daily_limit(tmp_path):
+    async with make_ctx(tmp_path, submissions_per_day=2, render_timeout_s=2.0) as ctx:
+        token = await ctx.login("alex")
+        for i in range(3):  # three render timeouts on the render machine: our fault, none count
+            sub = (await ctx.submit(token, piece=b"# TEST:render-inner-timeout\n", meta={**META, "title": f"t{i}"})).json()
+            assert (await ctx.wait(token, sub["id"]))["status"] == "rejected"
+        crash = (await ctx.submit(token, piece=b"# TEST:render-fail\n", meta={**META, "title": "crash"})).json()
+        assert (await ctx.wait(token, crash["id"]))["status"] == "rejected"  # the piece crashed: counts
+        ok = await ctx.submit(token, meta={**META, "title": "ok"})
+        assert ok.status_code == 202  # 2nd counted
+        r = await ctx.submit(token, meta={**META, "title": "one too many"})
+        assert r.status_code == 429
+        rows = await ctx.app.state.db.fetchall("SELECT title, platform_fault FROM submissions ORDER BY created_at, title")
+        assert {x["title"]: x["platform_fault"] for x in rows} == {"t0": 1, "t1": 1, "t2": 1, "crash": 0, "ok": 0}
+
+
+async def test_check_failures_count_toward_the_daily_limit(tmp_path):
+    async with make_ctx(tmp_path, submissions_per_day=2) as ctx:
+        token = await ctx.login("alex")
+        for i in range(2):  # the static check rejects the piece itself
+            sub = (await ctx.submit(token, piece=b"import socket\n", meta={**META, "title": f"b{i}"})).json()
+            st = await ctx.wait(token, sub["id"])
+            assert st["status"] == "rejected" and st["reasons"] == ["banned import: socket"]
+        assert (await ctx.submit(token, meta={**META, "title": "third"})).status_code == 429
+
+
+async def test_rate_limit_says_when_the_next_slot_opens(tmp_path):
+    from datetime import UTC, datetime, timedelta
+
+    async with make_ctx(tmp_path, submissions_per_day=2, worker_enabled=False) as ctx:
+        token = await ctx.login("alex")
+        for i in range(2):
+            assert (await ctx.submit(token, meta={**META, "title": f"s{i}"})).status_code == 202
+        now = datetime.now(UTC)
+        db = ctx.app.state.db
+        for title, ago in (("s0", timedelta(hours=20, minutes=48)), ("s1", timedelta(hours=1))):
+            await db.execute("UPDATE submissions SET created_at = ? WHERE title = ?",
+                             ((now - ago).isoformat(timespec="seconds"), title))
+        r = await ctx.submit(token, meta={**META, "title": "s2"})
+        body = r.json()
+        assert r.status_code == 429 and body["error"] == "rate_limited"
+        assert body["detail"] == "2 submissions per 24 h; next slot in 3 h 12 m"  # s0 ages out 24 h after it
+        assert 3 * 3600 + 11 * 60 <= body["retry_after_s"] <= 3 * 3600 + 13 * 60
+        await db.execute("UPDATE submissions SET created_at = ? WHERE title = 's0'",
+                         ((now - timedelta(hours=23, minutes=59, seconds=30)).isoformat(timespec="seconds"),))
+        assert (await ctx.submit(token, meta={**META, "title": "s2"})).json()["detail"].endswith(
+            "next slot in under a minute")
+        await db.execute("UPDATE submissions SET created_at = ? WHERE title = 's0'",
+                         ((now - timedelta(hours=23, minutes=15)).isoformat(timespec="seconds"),))
+        assert (await ctx.submit(token, meta={**META, "title": "s2"})).json()["detail"].endswith("next slot in 45 m")
 
 
 async def test_owner_only(ctx):
