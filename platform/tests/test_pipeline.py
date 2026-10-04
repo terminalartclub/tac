@@ -1,3 +1,4 @@
+import asyncio
 import json
 
 import httpx
@@ -461,9 +462,16 @@ async def test_pipeline_logs_trusted_auto_publish(tmp_path, caplog):
         await ctx.app.state.db.execute("UPDATE users SET trusted = 1 WHERE handle = 'alex'")
         sub = (await ctx.submit(token)).json()
         await ctx.wait(token, sub["id"], until=("published",))
+        # the row turns published inside publish(); the worker logs right after it returns. Leaving the
+        # context stops the worker, so wait for the line here (it raced: 1 failure in ~10 full runs)
+        want = f"pipeline {sub['id']}: auto-published (trusted, clean automod)"
+        for _ in range(100):
+            if any(r.getMessage() == want for r in caplog.records):
+                break
+            await asyncio.sleep(0.02)
     msgs = [r.getMessage() for r in caplog.records if r.name == "tac.pipeline"]
     assert f"pipeline {sub['id']}: final status in_review" in msgs
-    assert f"pipeline {sub['id']}: auto-published (trusted, clean automod)" in msgs
+    assert want in msgs
 
 
 
