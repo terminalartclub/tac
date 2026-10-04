@@ -165,7 +165,8 @@ When done, tell the user: `/tac:play <name>` to watch it, and `/tac:submit <name
 
 ## Out of bounds
 
-- Never screencapture or open windows. `tac play` is for the human only, in their own terminal.
+- Never screencapture, and never open windows while you iterate. `/tac:play` (`tacctl play`) opens a terminal
+  window for the human when they ask to watch a piece; `tac play` itself needs a real terminal.
 - Never edit files outside `./tac-work/` without asking.
 - Never kill processes by pattern.
 - One command per Bash call: no `;`, `&&`, pipes or `echo $?` (the exit status is reported anyway).

@@ -22,7 +22,7 @@ claude plugin install tac@terminalartclub
 |---|---|
 | `/tac:login` | Device-code login to the TAC platform in your browser. The token goes in `~/.config/tac/credentials.json` (mode 600). It never touches your Claude credentials. |
 | `/tac:create [--sketch] [idea]` | Claude sketches 3 concepts, iterates on the virtual screen (renders, looks, critiques) and finishes `<name>.py` + `notes.md`. |
-| `/tac:play <name>` | Prints the `tac play …` command to watch it live in your terminal, and opens `tac-work/index.html`, a local review page. |
+| `/tac:play [name]` | Opens a new terminal window playing the piece live (iTerm2 or Terminal on macOS, your terminal emulator on Linux; Ctrl-C stops it). Over SSH or without a display it prints the `tac play …` command to paste instead. No name lists your pieces. It also builds the local review page `tac-work/index.html` and prints its path (`--page` opens it). |
 | `/tac:submit <name>` | Assembles `tac-work/<name>/submission/`, lints it locally (rejects never leave your machine), asks you to confirm you have the right to share it and that it copies no one else's characters, brands or logos, then uploads it and polls until the platform has rendered and reviewed it. |
 | `/tac:mine` | Your submitted pieces: status, total and 7-day views, a 28-day sparkline, the critique, and the reasons for any rejection. View totals are public on the site (anonymous, one per IP per piece per day). Unpublishing or deleting your account happens on the web only (terminalart.club/me). |
 | `/tac:logout` | Deletes the token. |

@@ -962,21 +962,53 @@ def cmd_gallery(a: argparse.Namespace) -> int:
 # ── play / review ──────────────────────────────────────────────────────────
 
 
+def list_pieces(root: Path) -> list[str]:
+    """Piece names under the work root (directories with a piece file), newest first."""
+    if not root.is_dir():
+        return []
+    found = [d for d in root.iterdir() if d.is_dir() and SLUG_RE.match(d.name) and piece_source(d, d.name)]
+    return [d.name for d in sorted(found, key=lambda d: d.stat().st_mtime, reverse=True)]
+
+
 def cmd_play(a: argparse.Namespace) -> int:
     import review
+    import termwin
 
-    wd = work_root() / a.name
+    root = work_root()
+    if not a.name:
+        names = list_pieces(root)
+        if not names:
+            return die(f"no pieces in {root}/ yet — make one with /tac:create")
+        print(f"pieces in {root}/ (newest first): " + ", ".join(names))
+        print("play one: tacctl play <name>")
+        return 0
+    if not SLUG_RE.match(a.name):  # also keeps the name out of every path and AppleScript string
+        return die("a piece name is lowercase letters, digits and single hyphens (e.g. kettle, last-light)")
+    wd = root / a.name
     src = piece_source(wd, a.name) if wd.is_dir() else None
     if src is None:
         return die(f"no piece in {wd}/")
-    tac = PLUGIN / "bin" / "tac"
-    print("watch it live — paste into a terminal (Ctrl-C quits):")
-    print(f"  {shlex.quote(str(tac))} play {shlex.quote(str(src.resolve()))}")
+    src = src.resolve()
+    if not src.is_relative_to(root.resolve()):  # a symlink out of the work root: not the person's piece
+        return die(f"{wd}/ points outside {root}/; not playing it")
+    argv = termwin.play_argv(PLUGIN / "bin" / "tac", src)
+    opened, why = (None, "--no-window") if a.no_window else termwin.open_play_window(argv)
+    if opened:
+        print(f"playing {a.name} in a new {opened.app} window. Ctrl-C there stops it.")
+        if opened.size and opened.size != (termwin.COLS, termwin.ROWS):
+            c, r = opened.size
+            print(f"the window is {c}x{r}, not {termwin.COLS}x{termwin.ROWS} (the screen is too small at this font "
+                  f"size): the piece fills what's there. For the reel framing, shrink the font and play again.")
+    else:
+        if not a.no_window:
+            print(f"couldn't open a terminal window ({safe(why)}).")
+        print("watch it live — paste into a terminal (Ctrl-C quits):")
+        print(f"  {shlex.join(argv)}")
     if a.no_page:
         return 0
-    page = review.build(work_root(), render=not a.no_render, only=a.name)
-    print(f"review page: file://{page.resolve()}")
-    if not a.no_browser:
+    page = review.build(root, render=not a.no_render, only=a.name)
+    print(f"review page (all your pieces): file://{page.resolve()}")
+    if a.page:
         open_local(page)
     return 0
 
@@ -1025,11 +1057,13 @@ def main(argv: list[str] | None = None) -> int:
     st = sp.add_parser("status")
     st.add_argument("id")
     sp.add_parser("gallery", help="curated pieces (house artists, club picks) as handle/slug lines, nothing else")
-    pl = sp.add_parser("play")
-    pl.add_argument("name")
-    pl.add_argument("--no-page", action="store_true")
+    pl = sp.add_parser("play", help="play a piece in a new terminal window; no name lists your pieces")
+    pl.add_argument("name", nargs="?")
+    pl.add_argument("--no-window", action="store_true", help="just print the command to paste")
+    pl.add_argument("--page", action="store_true", help="also open the review page in the browser")
+    pl.add_argument("--no-page", action="store_true", help="don't build the review page")
     pl.add_argument("--no-render", action="store_true", help="don't render missing previews")
-    pl.add_argument("--no-browser", action="store_true")
+    pl.add_argument("--no-browser", action="store_true", help=argparse.SUPPRESS)  # pre-0.1.1: now the default
     a = ap.parse_args(argv)
     try:
         return {"login": cmd_login, "logout": cmd_logout, "whoami": cmd_whoami, "prepare": cmd_prepare,

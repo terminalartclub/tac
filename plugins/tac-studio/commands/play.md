@@ -1,15 +1,20 @@
 ---
-description: Watch a piece — the live terminal command plus a local review page
-argument-hint: "<name>"
+description: Watch a piece live in a new terminal window (no name lists your pieces)
+argument-hint: "[name]"
 ---
 
-Run, from the current directory (Bash timeout 600000 ms: it renders a preview the first time, ~30 s):
+Run (Bash timeout 600000 ms: the first time it also renders previews for the review page, ~30 s):
 
 ```
 "${CLAUDE_PLUGIN_ROOT}/bin/tacctl" play $ARGUMENTS
 ```
 
-It prints a `tac play …` command and builds/opens `tac-work/index.html` (all your pieces, with
-previews and stats). You can't run `tac play` yourself — it needs a real terminal. Show the user the
-printed command verbatim so they can paste it into their own terminal (Ctrl-C quits), and give them
-the review page path. If no name was given, list the directories in `./tac-work/` and ask which one.
+- It opens a **new terminal window** playing the piece (iTerm2 or Terminal on macOS; the usual emulators on
+  Linux). Tell the user "playing <name> in a new terminal window. Ctrl-C there stops it", plus any line it
+  printed about the window size.
+- If it couldn't open a window (SSH, no display, automation not allowed), it prints a `tac play …` command
+  instead. Show that command verbatim for the user to paste into their own terminal. You can't run `tac
+  play` yourself: it needs a real terminal.
+- No name given: it lists the pieces (newest first). Ask which one, then run it again with that name.
+- Don't send the user to the browser. The review page path it prints is optional; it opens the page only
+  with `--page`, when the user asks for it.
