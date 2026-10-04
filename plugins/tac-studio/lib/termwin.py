@@ -85,9 +85,11 @@ def _size(out: str) -> tuple[int, int] | None:
 
 def linux_argv(term: str, argv: list[str], cols: int = COLS, rows: int = ROWS, marker: str | None = None) -> list[str]:
     """How each emulator takes a command (and a size where it has a flag for one). The command runs
-    through `sh -c` with the argv as positional parameters, never interpolated; it first touches `marker`
-    (proof the command started) and waits for Enter after it exits so an error stays readable."""
-    hold = ["sh", "-c", ': > "$0"; "$@"; printf "\\n[done: press Enter to close] "; read _', marker or "/dev/null", *argv]
+    through `sh -c` with the argv as positional parameters, never interpolated; it first creates the
+    `marker` DIRECTORY (proof the command started; mkdir fails on an existing name and never follows a
+    planted symlink, unlike `: >`), then waits for Enter after the piece exits so an error stays readable."""
+    hold = ["sh", "-c", 'mkdir "$0" 2>/dev/null; "$@"; printf "\\n[done: press Enter to close] "; read _',
+            marker or "/nonexistent/tac-marker", *argv]
     base = Path(term).name
     if base in ("xfce4-terminal", "mate-terminal", "terminator"):  # their -e takes ONE string: use -x (rest = argv)
         return [term, "-x", *hold]
@@ -152,7 +154,8 @@ def open_play_window(
     if env.get("TERMINAL"):
         candidates.append(env["TERMINAL"])
     candidates += [t for t in LINUX_TERMINALS if t not in candidates]
-    marker_dir = Path(tempfile.mkdtemp(prefix="tac-play-"))
+    marker_dir = Path(tempfile.mkdtemp(prefix="tac-play-"))  # 0700: nobody else can plant a link in it
+    unconfirmed = 0  # launches whose shell hasn't been seen starting (it may still run later)
     try:
         for term in candidates:
             path = which(term)
@@ -164,6 +167,7 @@ def open_play_window(
                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
             except OSError:
                 continue
+            unconfirmed += 1
             try:
                 rc = p.wait(timeout=1.5)  # most launchers return 0 at once or keep running; non-zero = failed
             except subprocess.TimeoutExpired:
@@ -171,10 +175,15 @@ def open_play_window(
             if rc != 0:
                 continue
             waited = 0.0
-            while not marker.exists() and waited < LAUNCH_CONFIRM_S:
+            while not marker.is_dir() and waited < LAUNCH_CONFIRM_S:
                 sleep(0.1)
                 waited += 0.1
-            return Opened(Path(term).name, None, confirmed=marker.exists()), ""
+            confirmed = marker.is_dir()
+            unconfirmed -= confirmed
+            return Opened(Path(term).name, None, confirmed=confirmed), ""
     finally:
-        shutil.rmtree(marker_dir, ignore_errors=True)
+        # A launched-but-unconfirmed shell may still run `mkdir "$0"` later: keep the private dir (a few bytes
+        # in the user's own temp dir) so its path can't be re-created by someone else in a shared /tmp.
+        if unconfirmed == 0:
+            shutil.rmtree(marker_dir, ignore_errors=True)
     return None, "no terminal emulator found ($TERMINAL, x-terminal-emulator, gnome-terminal, konsole, kitty, alacritty, wezterm)"

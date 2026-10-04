@@ -44,11 +44,13 @@ code { font: 400 12px "Roboto Mono", monospace; background: var(--faint); paddin
 
 def _render_preview(wd: Path, src: Path) -> Path | None:
     """tac-work/<name>/preview/preview.webp, re-rendered when the source is newer."""
-    out = wd / "preview"
+    import tacctl
+
+    out = tacctl.inside(wd, "preview")
     webp = out / "preview.webp"
     if webp.exists() and webp.stat().st_mtime >= src.stat().st_mtime:
         return webp
-    stage = wd / ".play"
+    stage = tacctl.inside(wd, ".play")
     stage.mkdir(exist_ok=True)
     shutil.copyfile(src, stage / "piece.py")
     r = subprocess.run([sys.executable, str(LIB / "render_piece.py"), str(stage), "--out", str(out)])
@@ -131,6 +133,6 @@ def build(root: Path, *, render: bool = True, only: str | None = None, dirs: lis
 <script>document.getElementById('focus')?.scrollIntoView({{block: 'center'}});</script>
 </body></html>"""
     root.mkdir(parents=True, exist_ok=True)
-    out = root / "index.html"
+    out = tacctl.inside(root, "index.html")
     out.write_text(page, encoding="utf-8")
     return out

@@ -103,7 +103,9 @@ def session_base(creds: dict[str, Any]) -> str:
     return api_base() if os.environ.get("TAC_API") else checked_base(str(creds.get("api") or DEFAULT_API))
 
 
-NAME_RULE = "a piece name is lowercase letters, digits and single hyphens, e.g. kettle or last-light"
+NAME_RULE = ("a piece name is lowercase letters, digits and single hyphens, e.g. kettle or last-light "
+             "(not tac-work or submission)")
+RESERVED_NAMES = frozenset({"tac-work", "submission"})  # a root's own name; the folder prepare rebuilds
 _BOTH_NOTED: set[str] = set()
 
 
@@ -111,9 +113,29 @@ class BadName(ValueError):
     pass
 
 
+class Unsafe(BadName):
+    """A piece folder, or a file tacctl writes in one, that resolves outside where it should (a symlink)."""
+
+
 def valid_name(name: Any) -> bool:
     """fullmatch, never match: SLUG_RE's `$` would accept a trailing newline."""
-    return isinstance(name, str) and SLUG_RE.fullmatch(name) is not None
+    return isinstance(name, str) and SLUG_RE.fullmatch(name) is not None and name not in RESERVED_NAMES
+
+
+def _within(p: Path, base: Path) -> bool:
+    try:
+        return p.resolve().is_relative_to(base.resolve())
+    except (OSError, RuntimeError):  # a symlink loop
+        return False
+
+
+def inside(wd: Path, *parts: str) -> Path:
+    """wd/parts, for a file or folder tacctl is about to write: refused (Unsafe) when it is a symlink or
+    resolves outside wd. A cloned repo's tac-work/ can hold symlinks; a write must never follow one out."""
+    p = wd.joinpath(*parts)
+    if p.is_symlink() or not _within(p, wd):
+        raise Unsafe(f"{p} is a symlink or points outside {wd}; refusing to write through it")
+    return p
 
 
 def home_root() -> Path:
@@ -128,13 +150,10 @@ def local_root() -> Path | None:
     if os.environ.get("TAC_WORK"):
         return None
     local = Path("tac-work").absolute()
-    if not local.is_dir():
+    if local.is_symlink() or not local.is_dir():  # a symlinked ./tac-work (e.g. in a cloned repo): not searched
         return None
-    try:
-        if local.resolve() == home_root().resolve():
-            return None
-    except OSError:
-        pass
+    if _within(local, home_root()):  # it IS ~/tac-work, or a piece folder inside it (cwd under ~/tac-work)
+        return None
     return local
 
 
@@ -165,13 +184,16 @@ def piece_dir(name: Any) -> Path:
         raise BadName(NAME_RULE)
     home = home_root() / name
     local = local_root()
+    wd = home
     if local is not None and (local / name).is_dir():
         if home.is_dir() and name not in _BOTH_NOTED:
             _BOTH_NOTED.add(name)
             print(f"note: {name} is in both {local / name} and {home}; using the one in ./tac-work",
                   file=sys.stderr)
-        return local / name
-    return home
+        wd = local / name
+    if (wd.is_symlink() or wd.exists()) and (not _within(wd, wd.parent) or wd.resolve() == wd.parent.resolve()):
+        raise Unsafe(f"{wd} points outside {wd.parent}; not using it (a symlinked piece folder)")
+    return wd
 
 
 def all_piece_dirs() -> list[Path]:
@@ -484,7 +506,7 @@ def record_session(name: str) -> None:
     sid = os.environ.get("TAC_SESSION_ID", "")
     if not SESSION_ID_RE.fullmatch(sid):
         return
-    path = piece_dir(name) / SESSIONS_FILE
+    path = inside(piece_dir(name), SESSIONS_FILE)
     latest = max(((r["at"], other.name) for other in all_piece_dirs()
                   for r in read_sessions(other) if r["session"] == sid), default=None)
     if latest is not None and latest[1] == name:
@@ -592,7 +614,7 @@ def prepare(name: str, *, model: str | None, handle: str | None, tokens: int | N
     src = piece_source(wd, name)
     if src is None:
         raise SystemExit(f"error: no {name}.py (or iter-*.py) in {wd}/")
-    sub = wd / "submission"
+    sub = inside(wd, "submission")  # never rmtree through a symlink (shutil would raise; worse, it once didn't)
     if sub.exists():
         shutil.rmtree(sub)
     (sub / "process").mkdir(parents=True)
@@ -602,7 +624,7 @@ def prepare(name: str, *, model: str | None, handle: str | None, tokens: int | N
         shutil.copyfile(wd / "notes.md", sub / "notes.md")
 
     # meta: tac-work/<name>/meta.yaml is the user's copy; fill only what is missing.
-    user_meta_path = wd / "meta.yaml"
+    user_meta_path = inside(wd, "meta.yaml")
     m: dict[str, Any] = metamod.loads_yaml(user_meta_path.read_text()) if user_meta_path.exists() else {}
     creds = load_creds() or {}
     n_iter = count_iterations(wd)
@@ -684,7 +706,7 @@ def cmd_start(a: argparse.Namespace) -> int:
     wd = piece_dir(a.name)
     wd.mkdir(parents=True, exist_ok=True)
     record_session(a.name)
-    path = wd / "meta.yaml"
+    path = inside(wd, "meta.yaml")
     m = metamod.loads_yaml(path.read_text()) if path.exists() else {}
     m["size"] = "sketch" if a.sketch else "full"
     path.write_text(metamod.dumps_yaml(m), encoding="utf-8")
@@ -699,7 +721,7 @@ def append_direction(name: str, line: str) -> str:
     """Append one line to tac-work/<name>/notes.md under `## direction`; returns the new text."""
     wd = piece_dir(name)
     wd.mkdir(parents=True, exist_ok=True)
-    path = wd / "notes.md"
+    path = inside(wd, "notes.md")
     text = path.read_text(encoding="utf-8") if path.exists() else f"# {name} — notes\n"
     sec = notesmod.direction_section(text)
     if not sec and not re.search(r"^##\s+direction\s*$", text, re.M | re.I):
@@ -858,7 +880,7 @@ def cmd_submit(a: argparse.Namespace) -> int:
     print(f"uploaded: submission {safe(resp['id'])} ({safe(resp.get('status'))})")
     record = {"id": resp["id"], "api": base, "url": resp.get("url"), "piece_url": resp.get("piece_url"),
               "submitted": time.time()}
-    (piece_dir(a.name) / ".submission.json").write_text(json.dumps(record, indent=2))
+    inside(piece_dir(a.name), ".submission.json").write_text(json.dumps(record, indent=2))
     wait_s = a.wait_seconds if a.wait_seconds is not None else (300.0 if a.wait else None)
     if wait_s is None:  # the default: return now; rendering (~1-2 min) and review happen on the platform
         print(uploaded_line(trusted_link(resp.get("piece_url"), base)))

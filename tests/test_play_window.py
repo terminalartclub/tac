@@ -121,7 +121,7 @@ class FakePopen:
         self.calls.append(argv)
         rc = self.rcs.get(Path(argv[0]).name, 0)
         if self.start_marker:  # simulate the window's sh touching its marker (the path follows the script)
-            Path(argv[argv.index("sh") + 3]).touch()
+            Path(argv[argv.index("sh") + 3]).mkdir()
 
         class P:
             def wait(self, timeout=None):
