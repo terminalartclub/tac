@@ -100,13 +100,13 @@ async def my_pieces(request: Request) -> dict:
     st = request.app.state
     user = await current_user(request)
     rows = await st.db.fetchall(
-        "SELECT id, slug, title, status, hidden, created_at, critique, reasons_json FROM submissions"
+        "SELECT id, slug, title, status, hidden, created_at, critique, reasons_json, platform_fault FROM submissions"
         " WHERE user_id = ? ORDER BY created_at DESC",
         (user["id"],),
     )
     views = await views_summary(st.db, [r["id"] for r in rows])
-    base = st.settings.public_base_url
-    # Contract pinned with the plugin (tac-studio f5bacdf): exactly these keys. views_28d is
+    base, site = st.settings.public_base_url, st.settings.site_url
+    # Contract pinned with the plugin (tac-studio f5bacdf; platform_fault + piece_url added for 0.1.1): exactly these keys. views_28d is
     # oldest -> newest, last entry = today (UTC). "hidden" = published but hidden by reports.
     return {
         "pieces": [
@@ -119,6 +119,11 @@ async def my_pieces(request: Request) -> dict:
                 "url": f"{base}/v1/submissions/{r['id']}",  # status URL (no site piece-page route yet)
                 "critique": r["critique"],
                 "reasons": json.loads(r["reasons_json"]),
+                # rejected because the platform failed (render budget, backend): not counted in the daily limit
+                "platform_fault": bool(r["platform_fault"]),
+                # the public piece page, once it's on the wall (null otherwise, or without TAC_SITE_URL)
+                "piece_url": f"{site}/@{user['handle']}/{r['slug']}"
+                if site and r["status"] == "published" and not r["hidden"] else None,
             }
             for r in rows
         ],

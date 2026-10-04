@@ -181,6 +181,23 @@ async def test_platform_fault_rejections_dont_count_toward_the_daily_limit(tmp_p
         assert {x["title"]: x["platform_fault"] for x in rows} == {"t0": 1, "t1": 1, "t2": 1, "crash": 0, "ok": 0}
 
 
+async def test_me_pieces_exposes_platform_fault_and_the_piece_page(tmp_path):
+    async with make_ctx(tmp_path, render_timeout_s=2.0, site_url="http://localhost:5181") as ctx:
+        token = await ctx.login("alex")
+        slow = (await ctx.submit(token, piece=b"# TEST:render-inner-timeout\n", meta={**META, "title": "slow"})).json()
+        good = (await ctx.submit(token, meta={**META, "title": "good"})).json()
+        await ctx.wait(token, slow["id"])
+        await ctx.wait(token, good["id"])
+        async with ctx.admin() as a:
+            assert (await a.post(f"/v1/admin/submissions/{good['id']}/approve")).status_code == 200
+        async with ctx.client(authorization=f"Bearer {token}") as c:
+            pieces = {p["slug"]: p for p in (await c.get("/v1/me/pieces")).json()["pieces"]}
+        assert (pieces["slow"]["status"], pieces["slow"]["platform_fault"], pieces["slow"]["piece_url"]) == (
+            "rejected", True, None)
+        assert (pieces["good"]["status"], pieces["good"]["platform_fault"]) == ("published", False)
+        assert pieces["good"]["piece_url"] == "http://localhost:5181/@alex/good"
+
+
 async def test_check_failures_count_toward_the_daily_limit(tmp_path):
     async with make_ctx(tmp_path, submissions_per_day=2) as ctx:
         token = await ctx.login("alex")

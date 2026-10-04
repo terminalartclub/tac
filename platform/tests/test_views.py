@@ -124,7 +124,9 @@ async def test_me_pieces_contract_shape(ctx):
     assert set(body) == {"pieces"}
     (p,) = body["pieces"]
     assert set(p) == {"id", "slug", "title", "status", "views_total", "views_7d", "views_28d", "url",
-                      "critique", "reasons"}
+                      "critique", "reasons", "platform_fault", "piece_url"}
+    assert p["platform_fault"] is False
+    assert p["piece_url"] is None or p["piece_url"].endswith(f"/@{h}/{s}")
     assert p["critique"] is None or isinstance(p["critique"], str)
     assert isinstance(p["reasons"], list) and all(isinstance(x, str) for x in p["reasons"])
     assert p["id"] == f"{h}/{s}" and p["slug"] == s and isinstance(p["title"], str)

@@ -793,11 +793,10 @@ def cmd_submit(a: argparse.Namespace) -> int:
     record = {"id": resp["id"], "api": base, "url": resp.get("url"), "piece_url": resp.get("piece_url"),
               "submitted": time.time()}
     (work_root() / a.name / ".submission.json").write_text(json.dumps(record, indent=2))
-    share = share_url(resp, base)
-    if a.no_wait:
-        print_status(resp, base)
-        print(submitted_line(share))
+    if a.wait is None:  # the default: return now; rendering (~1-2 min) and review happen on the platform
+        print(uploaded_line(trusted_link(resp.get("piece_url"), base)))
         return 0
+    share = share_url(resp, base)
     try:
         final = poll(base, resp["id"], creds["access_token"], a.wait)
     except ApiError as e:
@@ -856,6 +855,12 @@ def share_url(resp: dict[str, Any], base: str) -> str | None:
 
 
 SUBMITTED_NO_LINK = "submitted — see /tac:mine for its status"
+UPLOADED = "Uploaded. Rendering on our servers (~1–2 min), then a person reviews it. /tac:mine shows its status"
+
+
+def uploaded_line(piece_url: str | None) -> str:
+    """The default submit's last line. piece_url only when trusted_link accepted it."""
+    return UPLOADED + (f"; it'll be at {piece_url} once approved." if piece_url else ".")
 
 
 def submitted_line(url: str | None) -> str:
@@ -892,6 +897,15 @@ def sparkline(series: list[Any]) -> str:
     return "".join(SPARK[min(len(SPARK) - 1, round(v / top * (len(SPARK) - 1)))] for v in vals)
 
 
+STATUS_LABELS = {"queued": "rendering", "rendering": "rendering", "in_review": "waiting for review",
+                 "published": "published", "hidden": "hidden (reported)", "rejected": "rejected"}
+PLATFORM_FAULT_NOTE = "not counted against your daily limit: our side failed, not your piece. Resubmit when you like."
+
+
+def status_label(status: Any) -> str:
+    return STATUS_LABELS.get(status, safe(status or "?")) if isinstance(status, str) or status is None else "?"
+
+
 def cmd_mine(a: argparse.Namespace) -> int:
     creds = load_creds()
     if not creds:
@@ -917,9 +931,15 @@ def cmd_mine(a: argparse.Namespace) -> int:
             notes_.append(("critique", str(p["critique"])))
         if p.get("status") == "rejected":
             notes_ += [("reason", str(r)) for r in (p.get("reasons") or [])]
+            if p.get("platform_fault") is True:
+                notes_.append(("info", PLATFORM_FAULT_NOTE))
+        if p.get("status") == "published":
+            link = trusted_link(p.get("piece_url"), base)
+            if link:
+                notes_.append(("info", link))
         extra.append(notes_)
         series = next((p[k] for k in ("views_28d", "series_28d", "series") if isinstance(p.get(k), list)), [])
-        rows.append((safe(p.get("title") or p.get("slug") or p.get("id")), safe(p.get("status") or "?"),
+        rows.append((safe(p.get("title") or p.get("slug") or p.get("id")), status_label(p.get("status")),
                      safe(p.get("views_total") if p.get("views_total") is not None else "–"),
                      safe(p.get("views_7d") if p.get("views_7d") is not None else "–"), sparkline(series)))
     w = [max(len(r[i]) for r in rows) for i in range(4)]
@@ -930,7 +950,7 @@ def cmd_mine(a: argparse.Namespace) -> int:
     for r, notes_ in zip(rows, extra):
         print(fmt.format(*r))
         for kind, text in notes_:
-            first, rest = ("    ", "    ") if kind == "critique" else ("    ✗ ", "      ")
+            first, rest = ("    ✗ ", "      ") if kind == "reason" else ("    ", "    ")
             line = textwrap.fill(" ".join(safe(text).split()), width=width, initial_indent=first, subsequent_indent=rest)
             print(f"\x1b[2m{line}\x1b[0m" if dim else line)
     print("manage or unpublish at terminalart.club/me")
@@ -1058,8 +1078,10 @@ def main(argv: list[str] | None = None) -> int:
             p.add_argument("--confirm-rights", action="store_true",
                            help="the user confirmed: they have the right to share this, and it copies no one "
                                 "else's characters, brands or logos")
-            p.add_argument("--no-wait", action="store_true")
-            p.add_argument("--wait", type=float, default=300, help="seconds to poll status (default 300)")
+            p.add_argument("--wait", type=float, nargs="?", const=300.0, default=None, metavar="N",
+                           help="poll until rendered and reviewed, up to N seconds (default 300); without it, "
+                                "submit returns right after the upload")
+            p.add_argument("--no-wait", action="store_true", help=argparse.SUPPRESS)  # pre-0.1.1: now the default
     ft = sp.add_parser("fit", help="does a run fit the spare weekly window? exit 3 = no")
     ft.add_argument("--sketch", action="store_true")
     sp.add_parser("root", help="print the work folder that holds your pieces (absolute)")

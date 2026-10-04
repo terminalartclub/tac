@@ -75,7 +75,7 @@ TAC_E2E_URL=http://127.0.0.1:8790 TAC_E2E_ADMIN_TOKEN=t uv run pytest tests/test
 | POST | `/v1/pieces/{handle}/{slug}/report` | none | `{reason}`; 5/h per IP; 3 distinct IPs hide the piece |
 | POST | `/v1/pieces/{handle}/{slug}/view` | none | count a view; 204 always (see below) |
 | POST | `/v1/events` `{"name": "piece_share"\|"install_copy"\|"install_send"}` | none | per-day event counter; 204, or 400 for an unknown name |
-| GET | `/v1/me/pieces` | cookie or Bearer | own pieces: `{pieces: [{id: "handle/slug", slug, title, status (+ "hidden"), views_total, views_7d, views_28d[28 ints, oldest→newest, last = today UTC], url, critique, reasons}]}` (pinned with the plugin) |
+| GET | `/v1/me/pieces` | cookie or Bearer | own pieces: `{pieces: [{id: "handle/slug", slug, title, status (+ "hidden"), views_total, views_7d, views_28d[28 ints, oldest→newest, last = today UTC], url, critique, reasons, platform_fault (rejected because our side failed: not counted in the daily limit), piece_url (`TAC_SITE_URL/@handle/slug` once published and visible, else null)}]}` (pinned with the plugin) |
 | GET | `/admin`, `/admin/login?token=` | admin | HTML queue: in review, hidden, published, Instagram cleanup, suspended users, audit log |
 | GET | `/admin/takedowns` · `/v1/admin/takedowns` | admin | takedown log: the last 100 hide/unhide/delete/suspend/unsuspend actions with time, target, reason, actor (HTML, read-only · JSON) |
 | GET | `/v1/admin/queue?page=&find=` | admin | JSON version of the queue. Published is paged (50 per page, newest first, `published_page{page, per_page, total, find}`); `find` = handle, handle/slug, piece URL or title words. `/admin` takes the same `page`/`find` (find box + older/newer links) |

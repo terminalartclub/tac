@@ -141,8 +141,10 @@ def test_submit_requires_login(platform: Platform, work: Path, capsys) -> None:
 def test_submit_uploads_and_polls(platform: Platform, work: Path, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
     monkeypatch.setenv("TAC_SITE_URL", "https://terminalart.club")  # the fake API is on loopback
     tacctl.write_private(tacctl.cred_path(), {"api": "unused", "access_token": "tok-123", "handle": "alex"})
-    assert tacctl.main(["submit", "ember", "--model", "claude-opus-5-5", "--tokens", "1234", "--confirm-rights"]) == 0
+    assert tacctl.main(["submit", "ember", "--model", "claude-opus-5-5", "--tokens", "1234", "--confirm-rights",
+                        "--wait"]) == 0  # --wait: the pre-0.1.1 behaviour, polling until reviewed
     out = capsys.readouterr().out
+    assert platform.status_polls == 3
     assert "status: in_review" in out and "critique: calm" in out and "/v1/submissions/sub-1" in out
     assert out.splitlines()[-1] == ("Submitted. Once it passes review it's on the wall: "
                                     "https://terminalart.club/@alex/ember. Share the link. "
@@ -162,6 +164,83 @@ def test_submit_uploads_and_polls(platform: Platform, work: Path, monkeypatch: p
     assert all(b[:8] == b"\x89PNG\r\n\x1a\n" and len(b) <= 600_000 for _, b in pngs)
     assert meta["process_notes"] == ["too fast.", "the wave breathes at 0.5 Hz."]
     assert json.loads((work / ".submission.json").read_text())["id"] == "sub-1"
+
+
+def test_submit_returns_after_the_upload_by_default(platform: Platform, work: Path,
+                                                   monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    monkeypatch.setenv("TAC_SITE_URL", "https://terminalart.club")
+    tacctl.write_private(tacctl.cred_path(), {"access_token": "tok-123", "handle": "alex"})
+    assert tacctl.main(["submit", "ember", "--model", "claude-opus-5-5", "--confirm-rights"]) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert platform.status_polls == 0  # no polling: rendering (~1-2 min) and review happen on the platform
+    assert out[-2] == "uploaded: submission sub-1 (queued)"
+    assert out[-1] == ("Uploaded. Rendering on our servers (~1–2 min), then a person reviews it. /tac:mine shows "
+                       "its status; it'll be at https://terminalart.club/@alex/ember once approved.")
+    assert tacctl.main(["submit", "ember", "--model", "claude-opus-5-5", "--confirm-rights", "--no-wait"]) == 0
+    assert platform.status_polls == 0  # the old flag is still accepted
+
+
+def test_submit_wait_takes_an_optional_number(platform: Platform, work: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    tacctl.write_private(tacctl.cred_path(), {"access_token": "tok-123", "handle": "alex"})
+    seen = []
+    real = tacctl.poll
+    monkeypatch.setattr(tacctl, "poll", lambda base, sid, token, wait_s: seen.append(wait_s) or real(base, sid, token, wait_s))
+    assert tacctl.main(["submit", "ember", "--model", "claude-opus-5-5", "--confirm-rights", "--wait", "45"]) == 0
+    assert tacctl.main(["submit", "ember", "--model", "claude-opus-5-5", "--confirm-rights", "--wait"]) == 0
+    assert seen == [45.0, 300.0]
+
+
+@pytest.mark.parametrize("status,body,err", [
+    (429, {"error": "rate_limited", "detail": "5 submissions per 24 h; next slot in 3 h 12 m"}, "next slot in 3 h 12 m"),
+    (413, {"error": "too_large", "detail": "request over 3072 KB"}, "too_large"),
+    (401, {"error": "invalid_token"}, "run /tac:login again"),
+])
+def test_a_pre_upload_failure_is_still_immediate_and_loud(platform: Platform, work: Path,
+                                                         monkeypatch: pytest.MonkeyPatch, capsys, status, body, err) -> None:
+    tacctl.write_private(tacctl.cred_path(), {"access_token": "tok-123", "handle": "alex"})
+    monkeypatch.setattr(tacctl, "http", lambda *a, **k: (status, body))
+    assert tacctl.main(["submit", "ember", "--model", "claude-opus-5-5", "--confirm-rights"]) == 1
+    captured = capsys.readouterr()
+    assert err in captured.err and "Uploaded." not in captured.out
+    assert platform.status_polls == 0
+
+
+def test_mine_renders_every_status(platform: Platform, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    monkeypatch.setenv("TAC_SITE_URL", "https://terminalart.club")
+    tacctl.write_private(tacctl.cred_path(), {"access_token": "tok-123", "handle": "alex"})
+    zero = {"views_total": 0, "views_7d": 0, "views_28d": [0] * 28}
+    pieces = [
+        {"slug": "aa", "title": "aa", "status": "queued", **zero},
+        {"slug": "bb", "title": "bb", "status": "rendering", **zero},
+        {"slug": "cc", "title": "cc", "status": "in_review", **zero},
+        {"slug": "dd", "title": "dd", "status": "rejected", "reasons": ["render did not finish within 280 s"],
+         "platform_fault": True, **zero},
+        {"slug": "ee", "title": "ee", "status": "rejected", "reasons": ["banned import: socket"],
+         "platform_fault": False, **zero},
+        {"slug": "ff", "title": "ff", "status": "published", "piece_url": "https://terminalart.club/@alex/ff",
+         "views_total": 12, "views_7d": 3, "views_28d": [0] * 27 + [3]},
+        {"slug": "gg", "title": "gg", "status": "published", "piece_url": "https://evil.example/@alex/gg", **zero},
+    ]
+    monkeypatch.setattr(tacctl, "http", lambda *a, **k: (200, {"pieces": pieces}))
+    assert tacctl.main(["mine"]) == 0
+    out = capsys.readouterr().out
+    lines = out.splitlines()
+
+    def row(slug):
+        i = next(k for k, ln in enumerate(lines) if f"  {slug}  " in ln)
+        return lines[i], lines[i + 1:]
+
+    assert "rendering" in row("aa")[0] and "rendering" in row("bb")[0] and "queued" not in out
+    assert "waiting for review" in row("cc")[0]
+    dd, after_dd = row("dd")
+    assert "rejected" in dd and after_dd[0] == "    ✗ render did not finish within 280 s"
+    assert after_dd[1].startswith("    not counted against your daily limit")
+    ee, after_ee = row("ee")
+    assert after_ee[0] == "    ✗ banned import: socket" and "not counted" not in after_ee[1]
+    ff, after_ff = row("ff")
+    assert "published" in ff and "views: 12 · 3 last 7 days" in ff
+    assert after_ff[0] == "    https://terminalart.club/@alex/ff"
+    assert "evil.example" not in out  # an untrusted piece link is never printed
 
 
 def test_local_check_blocks_upload(platform: Platform, work: Path, capsys) -> None:
@@ -264,7 +343,7 @@ def test_mine_table_and_sparkline(platform: Platform, capsys) -> None:
     assert ember[7:9] == ["ember", "published"]
     assert ember[9] == "▁" * 20 + "▂▃▅█▅▃▂▁" and len(ember[9]) == 28
     assert out[2].startswith("  views:    0 ·  0 last 7 days  hush-2") and out[2].endswith("▁" * 28)
-    assert out[2].split()[7:9] == ["hush-2", "in_review"]
+    assert out[2].split()[7:11] == ["hush-2", "waiting", "for", "review"]
     glare = [ln for ln in out if "glare" in ln][0]
     assert glare.split()[7:9] == ["glare", "rejected"]
     body = out[out.index(glare) + 1:]
@@ -536,7 +615,11 @@ def test_submit_falls_back_to_status_url_for_untrusted_piece_url(platform: Platf
         return status, body
 
     monkeypatch.setattr(tacctl, "http", http)
-    assert tacctl.main(["submit", "ember", "--model", "claude-opus-5-5", "--no-wait", "--confirm-rights"]) == 0
+    assert tacctl.main(["submit", "ember", "--model", "claude-opus-5-5", "--confirm-rights"]) == 0
+    out = capsys.readouterr().out
+    assert "evil.example" not in out and "ignore" not in out
+    assert out.splitlines()[-1] == tacctl.UPLOADED + "."  # default: no untrusted link, no link at all
+    assert tacctl.main(["submit", "ember", "--model", "claude-opus-5-5", "--wait", "--confirm-rights"]) == 0
     out = capsys.readouterr().out
     assert "evil.example" not in out and "ignore" not in out
     assert out.splitlines()[-1].startswith("Submitted. Once it passes review it's on the wall: http://127.0.0.1:")
@@ -598,7 +681,7 @@ def test_submit_prints_fixed_line_when_no_link_is_trusted(platform: Platform, wo
         return status, body
 
     monkeypatch.setattr(tacctl, "http", http)
-    assert tacctl.main(["submit", "ember", "--model", "claude-opus-5-5", "--no-wait", "--confirm-rights"]) == 0
+    assert tacctl.main(["submit", "ember", "--model", "claude-opus-5-5", "--wait", "--confirm-rights"]) == 0
     out = capsys.readouterr().out
     assert out.splitlines()[-1] == "submitted — see /tac:mine for its status"
     assert "ignore" not in out and "evil.com" not in out
