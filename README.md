@@ -16,14 +16,15 @@ claude plugin marketplace add terminalartclub/tac   # or a local checkout: ./tac
 claude plugin install tac@terminalartclub
 ```
 
-**Make and share a piece** from any project directory. Work lands in `./tac-work/<name>/`.
+**Make and share a piece** from any directory. Work lands in `~/tac-work/<name>/`, one home for all your pieces
+(`tacctl root` prints it; a project that already has a `./tac-work/` keeps using it; `TAC_WORK` overrides both).
 
 | command | what it does |
 |---|---|
 | `/tac:login` | Device-code login to the TAC platform in your browser. The token goes in `~/.config/tac/credentials.json` (mode 600). It never touches your Claude credentials. |
 | `/tac:create [--sketch] [idea]` | Claude sketches 3 concepts, iterates on the virtual screen (renders, looks, critiques) and finishes `<name>.py` + `notes.md`. |
-| `/tac:play [name]` | Opens a new terminal window playing the piece live (iTerm2 or Terminal on macOS, your terminal emulator on Linux; Ctrl-C stops it). Over SSH or without a display it prints the `tac play …` command to paste instead. No name lists your pieces. It also builds the local review page `tac-work/index.html` and prints its path (`--page` opens it). |
-| `/tac:submit <name>` | Assembles `tac-work/<name>/submission/`, lints it locally (rejects never leave your machine), asks you to confirm you have the right to share it and that it copies no one else's characters, brands or logos, then uploads it and polls until the platform has rendered and reviewed it. |
+| `/tac:play [name]` | Opens a new terminal window playing the piece live (iTerm2 or Terminal on macOS, your terminal emulator on Linux; Ctrl-C stops it). Over SSH or without a display it prints the `tac play …` command to paste instead. No name lists your pieces. It also builds the local review page `~/tac-work/index.html` and prints its path (`--page` opens it). |
+| `/tac:submit <name>` | Assembles `~/tac-work/<name>/submission/`, lints it locally (rejects never leave your machine), asks you to confirm you have the right to share it and that it copies no one else's characters, brands or logos, then uploads it and polls until the platform has rendered and reviewed it. |
 | `/tac:mine` | Your submitted pieces: status, total and 7-day views, a 28-day sparkline, the critique, and the reasons for any rejection. View totals are public on the site (anonymous, one per IP per piece per day). Unpublishing or deleting your account happens on the web only (terminalart.club/me). |
 | `/tac:logout` | Deletes the token. |
 | `/tac:style` | Creates/opens `~/.config/tac/style.md` (optional standing taste; `tacctl style`). |
@@ -61,8 +62,9 @@ or `>>`), and runs one command per Bash call, so these rules cover a whole run:
 {
   "permissions": {
     "allow": [
-      "Edit(/tac-work/**)",
-      "Read(/tac-work/**)",
+      "Edit(~/tac-work/**)",
+      "Read(~/tac-work/**)",
+      "Bash(\"<PLUGIN_ROOT>/bin/tacctl\" root)",
       "Bash(\"<PLUGIN_ROOT>/bin/tac\" sheet *)",
       "Bash(\"<PLUGIN_ROOT>/bin/tac\" frame *)",
       "Bash(\"<PLUGIN_ROOT>/bin/tacctl\" fit *)",
@@ -76,12 +78,13 @@ or `>>`), and runs one command per Bash call, so these rules cover a whole run:
 ```
 
 - `<PLUGIN_ROOT>` is the installed plugin's absolute path, e.g.
-  `/Users/you/.claude/plugins/cache/terminalartclub/tac/0.1.0` (`ls ~/.claude/plugins/cache/terminalartclub/tac/`).
+  `/Users/you/.claude/plugins/cache/terminalartclub/tac/0.1.1` (`ls ~/.claude/plugins/cache/terminalartclub/tac/`).
   It contains the version, so update the rules after a plugin update.
 - Bash rules match the command text as written, including the quotes the skill puts around the binary.
 - File rules are `Edit(...)`, not `Write(...)`: Claude Code checks writes against `Edit` rules and never consults a
-  `Write(path)` rule. The leading `/` anchors the path at the project root, so it holds whatever the shell's cwd is;
-  `./tac-work/**` would follow the cwd.
+  `Write(path)` rule. `~/` anchors the path at your home folder, where pieces live since 0.1.1. A project that
+  still has its own `./tac-work/` needs `Edit(/tac-work/**)` and `Read(/tac-work/**)` instead (a leading `/`
+  anchors at the project root, whatever the shell's cwd is).
 - Leave `/tac:submit` and `/tac:login` out of headless runs: submitting needs a person to confirm the rights line.
 
 ### Optional: the spare-capacity nudge
@@ -124,7 +127,7 @@ A Max plan typically needs a much smaller value than Pro. Measure, don't guess.
 (`tokens_source: user`). Otherwise `--estimate-tokens` sums input + cache-write + output tokens from the
 Claude Code sessions that built the piece (`transcript-estimate`; cache reads excluded). A SessionStart hook
 exports the session id as `TAC_SESSION_ID`, and `tacctl start` / `tacctl direct` record it in
-`tac-work/<name>/.sessions`, once more each time a session comes back to the piece after working on another. Only
+`~/tac-work/<name>/.sessions`, once more each time a session comes back to the piece after working on another. Only
 those sessions' transcripts count, including their subagents. Each sighting opens a window that runs until the
 session's next sighting of another piece, and never past the piece's last file edit (+5 min). The first window also
 reaches back 10 min before the piece's start or first file, whichever is earlier, so the planning turns count, but

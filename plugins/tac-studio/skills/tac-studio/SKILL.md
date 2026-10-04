@@ -19,7 +19,12 @@ Tools (bundled with this plugin; they work from any directory and need `uv` on P
 1. `${CLAUDE_PLUGIN_ROOT}/skills/tac-studio/DNA.md`: **hard rules** every piece keeps, the **house style**
    every piece starts from, and the **precedence** between them and the person's taste. It also lists the
    catalog. Don't remake one.
-2. Your own earlier pieces in `./tac-work/`, if any. Don't repeat yourself either.
+2. Your own earlier pieces in the work folder, if any. Don't repeat yourself either.
+
+**The work folder.** Run `"${CLAUDE_PLUGIN_ROOT}/bin/tacctl" root` once at the start. It prints an absolute
+path: `~/tac-work` (one home for every piece, whatever directory you run in), or `./tac-work` when the
+project already has one, or `$TAC_WORK`. Below, `WORK` means that printed path. Use it in full in every
+command and file path.
 
 ## Script contract (claude-panel compatible)
 
@@ -71,7 +76,7 @@ for frame in range(N):
   5.5 m pool; a leaf is 13 × 7 cm) and size everything from it. If an object can't read at true scale,
   cut it. Don't inflate it into a cartoon (the 7 cm leaf rendered as a 14×4 px "cigar" got cut).
 - **iPhone canvas check.** The reel is 80×66, but phones show 80×81. Before you call it done, run
-  `tac sheet <piece>.py --rows 81 --out tac-work/<name>/iphone-check/` and confirm the composition
+  `tac sheet <piece>.py --rows 81 --out WORK/<name>/iphone-check/` and confirm the composition
   still holds: the subject is still placed with intent, and the extra rows are deliberate negative space.
 - **Cap every cache.** An unbounded `Style`/colour cache grew the GC gen-2 pauses from 54 ms to 135 ms and
   stuttered the live viewer. Bound it (e.g. clear it at 6000 entries). For setup heavier than ~200 ms,
@@ -79,7 +84,7 @@ for frame in range(N):
   (width, height, constants).
 - **Never kill processes by pattern** (`pkill -f`, `killall`). Other renders may be running with the
   same command line. Kill only a PID you started yourself.
-- **Private scratch files.** Keep every probe, harness and test image inside `tac-work/<name>/`. Shared
+- **Private scratch files.** Keep every probe, harness and test image inside `WORK/<name>/`. Shared
   scratch dirs get overwritten by parallel sessions.
 
 ## Standing style (optional)
@@ -104,7 +109,7 @@ concept question below, and only in an interactive session.
   - If they say "you choose", don't care, or the run is headless or non-interactive (`-p`, a background
     agent, nobody answering), choose yourself and log nothing. Never block on it.
 - **Per-iteration line**: after each render, show one short line, e.g.
-  `iter-3 · tac-work/<name>/iter-3/sheet.png · motion 4.1% · seam CLEAN · void 66%`. Don't ask questions.
+  `iter-3 · WORK/<name>/iter-3/sheet.png · motion 4.1% · seam CLEAN · void 66%`. Don't ask questions.
 - **Notes any time**: if the user says something ("too busy", "warmer", "add rain"), log it with
   `tacctl direct <name> note "<their words>" --iter K` (K = the next iteration) and apply it in that
   iteration. A note that contradicts house style is the person insisting (DNA.md, "Precedence"): apply it
@@ -116,14 +121,15 @@ concept question below, and only in an interactive session.
 
 ## The loop
 
-Work in `./tac-work/<name>/` (relative to the project directory; create it). Never `cd`. For each iteration K:
+Work only in `WORK/<name>/` (`tacctl start <name>` creates it and prints its path), by its absolute path.
+Never `cd`. For each iteration K:
 
-1. Write `tac-work/<name>/iter-K.py`.
-2. Render: `"${CLAUDE_PLUGIN_ROOT}/bin/tac" sheet tac-work/<name>/iter-K.py --out tac-work/<name>/iter-K/`
+1. Write `WORK/<name>/iter-K.py`.
+2. Render: `"${CLAUDE_PLUGIN_ROOT}/bin/tac" sheet WORK/<name>/iter-K.py --out WORK/<name>/iter-K/`
    prints the loop length plus motion, seam and void stats, and writes `sheet.png` (5 frames across the loop),
    `seam.png` (last frame | first frame) and full-res `frame-*.png`.
 3. **Read `sheet.png` and `seam.png`, and at least one full-res frame.** Actually look at them.
-4. Critique in `tac-work/<name>/notes.md` (append with the Edit tool, not a shell heredoc or `>>`) under `### iter-K`, with bullets
+4. Critique in `WORK/<name>/notes.md` (append with the Edit tool, not a shell heredoc or `>>`) under `### iter-K`, with bullets
    `- stats:`, `- works:`, `- biggest problem:` and `- next:`. Be as harsh as a gallery curator.
    (The submission tool quotes these bullets as captions on the process frames.)
 5. Fix the biggest problem. Repeat.
@@ -153,7 +159,7 @@ Answer each in notes.md under `## self-review`, with evidence from the frames:
 
 ## Deliverables
 
-In `tac-work/<name>/`:
+In `WORK/<name>/`:
 - `<name>.py`: the final piece (the best iteration, written with the Write tool, not `cp`)
 - `notes.md`: concept, iteration log, self-review, and a `## catalog description` section with one
   or two sentences in catalog voice (present tense, concrete, quiet)
@@ -167,6 +173,6 @@ When done, tell the user: `/tac:play <name>` to watch it, and `/tac:submit <name
 
 - Never screencapture, and never open windows while you iterate. `/tac:play` (`tacctl play`) opens a terminal
   window for the human when they ask to watch a piece; `tac play` itself needs a real terminal.
-- Never edit files outside `./tac-work/` without asking.
+- Never edit files outside `WORK/` without asking.
 - Never kill processes by pattern.
 - One command per Bash call: no `;`, `&&`, pipes or `echo $?` (the exit status is reported anyway).

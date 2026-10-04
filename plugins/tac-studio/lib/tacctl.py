@@ -13,7 +13,7 @@
     tacctl play <name>                 print the live `tac play` command, build + open the review page
     tacctl gallery                     curated pieces (house artists, club picks) as handle/slug lines
 
-Env: TAC_API (default https://api.terminalart.club; dev: http://127.0.0.1:8790), TAC_WORK (default ./tac-work), TAC_SITE_URL (optional:
+Env: TAC_API (default https://api.terminalart.club; dev: http://127.0.0.1:8790), TAC_WORK (default: ./tac-work if it exists here, else ~/tac-work), TAC_SITE_URL (optional:
 the gallery site's origin, for trusting piece links; default = the API host's last two labels).
 """
 
@@ -103,8 +103,29 @@ def session_base(creds: dict[str, Any]) -> str:
     return api_base() if os.environ.get("TAC_API") else checked_base(str(creds.get("api") or DEFAULT_API))
 
 
+_LOCAL_NOTE_SHOWN = False
+
+
 def work_root() -> Path:
-    return Path(os.environ.get("TAC_WORK", "tac-work"))
+    """Where pieces live, always absolute: $TAC_WORK; else ./tac-work when it already exists in the current
+    directory (pieces made before 0.1.1); else ~/tac-work, one home whichever directory Claude runs in.
+    Callers that write create it (mkdir parents=True)."""
+    global _LOCAL_NOTE_SHOWN
+    env = os.environ.get("TAC_WORK")
+    if env:
+        return Path(env).expanduser().absolute()
+    local = Path("tac-work")
+    if local.is_dir():
+        if not _LOCAL_NOTE_SHOWN:
+            _LOCAL_NOTE_SHOWN = True
+            print(f"using ./tac-work ({local.absolute()}): found in the current directory", file=sys.stderr)
+        return local.absolute()
+    return Path.home() / "tac-work"
+
+
+def cmd_root(a: argparse.Namespace) -> int:
+    print(work_root())
+    return 0
 
 
 def config_dir() -> Path:
@@ -1041,7 +1062,8 @@ def main(argv: list[str] | None = None) -> int:
             p.add_argument("--wait", type=float, default=300, help="seconds to poll status (default 300)")
     ft = sp.add_parser("fit", help="does a run fit the spare weekly window? exit 3 = no")
     ft.add_argument("--sketch", action="store_true")
-    sa = sp.add_parser("start", help="create tac-work/<name>/ and record the run size")
+    sp.add_parser("root", help="print the work folder that holds your pieces (absolute)")
+    sa = sp.add_parser("start", help="create <work folder>/<name>/ and record the run size")
     sa.add_argument("name")
     sa.add_argument("--sketch", action="store_true")
     sp.add_parser("mine", help="your pieces on the platform: status + private view counts")
@@ -1068,7 +1090,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return {"login": cmd_login, "logout": cmd_logout, "whoami": cmd_whoami, "prepare": cmd_prepare,
                 "submit": cmd_submit, "status": cmd_status, "play": cmd_play, "direct": cmd_direct, "style": cmd_style, "mine": cmd_mine,
-                "fit": cmd_fit, "start": cmd_start, "gallery": cmd_gallery}[a.cmd](a)
+                "fit": cmd_fit, "start": cmd_start, "gallery": cmd_gallery, "root": cmd_root}[a.cmd](a)
     except ApiError as e:
         return die(str(e))
 

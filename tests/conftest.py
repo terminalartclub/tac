@@ -16,6 +16,12 @@ PROD_HOSTS = ("api.terminalart.club", "terminalart.club")
 
 
 @pytest.fixture(autouse=True)
+def private_work_root(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Pieces default to ~/tac-work: never let a test touch the real one. Tests of the precedence unset this."""
+    monkeypatch.setenv("TAC_WORK", str(tmp_path / "tac-work"))
+
+
+@pytest.fixture(autouse=True)
 def no_prod_platform(monkeypatch: pytest.MonkeyPatch) -> None:
     """The plugin defaults to the public platform. Tests start from a clean env: TAC_API is a dead loopback
     port (subprocesses inherit it, so a launcher test can't reach prod either) and TAC_SITE_URL is unset. Any
