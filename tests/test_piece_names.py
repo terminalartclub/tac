@@ -63,5 +63,7 @@ def test_a_good_name_still_works_everywhere(sandbox, capsys):
 
 def test_piece_dir_is_the_only_join():
     src = (Path(tacctl.__file__)).read_text()
-    assert src.count("work_root() /") == 1  # inside piece_dir itself
+    assert "work_root() /" not in src and "home_root() / a." not in src  # no command joins a raw name itself
+    body = src[src.index("def piece_dir("):src.index("def all_piece_dirs(")]
+    assert body.index("if not valid_name(name):") < body.index("home_root() / name")  # validated first
     assert "SLUG_RE.match(" not in src  # fullmatch only: match() lets a trailing newline through

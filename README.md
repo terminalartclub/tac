@@ -16,8 +16,10 @@ claude plugin marketplace add terminalartclub/tac   # or a local checkout: ./tac
 claude plugin install tac@terminalartclub
 ```
 
-**Make and share a piece** from any directory. Work lands in `~/tac-work/<name>/`, one home for all your pieces
-(`tacctl root` prints it; a project that already has a `./tac-work/` keeps using it; `TAC_WORK` overrides both).
+**Make and share a piece** from any directory. New pieces go to `~/tac-work/<name>/`, one home for all of them.
+By name, `/tac:play`, `/tac:submit` and the rest look in `./tac-work/<name>` first when the current directory has
+one (older pieces), then in `~/tac-work/<name>`; a name in both uses `./tac-work` and says so. Listings show both,
+labelled. `TAC_WORK` replaces both. `tacctl root` prints `~/tac-work`; `tacctl root <name>` prints a piece's folder.
 
 | command | what it does |
 |---|---|
@@ -82,9 +84,9 @@ or `>>`), and runs one command per Bash call, so these rules cover a whole run:
   It contains the version, so update the rules after a plugin update.
 - Bash rules match the command text as written, including the quotes the skill puts around the binary.
 - File rules are `Edit(...)`, not `Write(...)`: Claude Code checks writes against `Edit` rules and never consults a
-  `Write(path)` rule. `~/` anchors the path at your home folder, where pieces live since 0.1.1. A project that
-  still has its own `./tac-work/` needs `Edit(/tac-work/**)` and `Read(/tac-work/**)` instead (a leading `/`
-  anchors at the project root, whatever the shell's cwd is).
+  `Write(path)` rule. `~/` anchors the path at your home folder, where new pieces go. To keep working on an
+  older piece in a project's own `./tac-work/`, add `Edit(/tac-work/**)` and `Read(/tac-work/**)` too (a leading
+  `/` anchors at the project root, whatever the shell's cwd is).
 - Leave `/tac:submit` and `/tac:login` out of headless runs: submitting needs a person to confirm the rights line.
 
 ### Optional: the spare-capacity nudge

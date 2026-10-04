@@ -72,14 +72,19 @@ def _stats_html(text: str) -> str:
     return e
 
 
+def _uri(p: Path) -> str:
+    """Absolute file:// URI (percent-encoded): the page can show pieces from ~/tac-work and ./tac-work alike."""
+    return html.escape(p.resolve().as_uri(), quote=True)
+
+
 def _card(wd: Path, src: Path, focus: bool, render: bool) -> str:
     name = wd.name
     notes = (wd / "notes.md").read_text(encoding="utf-8") if (wd / "notes.md").exists() else ""
     webp = _render_preview(wd, src) if render else (wd / "preview" / "preview.webp")
     if webp and webp.exists():
-        media = f'<img class="media" src="{name}/preview/preview.webp" alt="{html.escape(name)} preview">'
+        media = f'<img class="media" src="{_uri(webp)}" alt="{html.escape(name)} preview">'
     elif (wd / "reel.mp4").exists():
-        media = f'<video class="media" src="{name}/reel.mp4" muted loop autoplay playsinline></video>'
+        media = f'<video class="media" src="{_uri(wd / "reel.mp4")}" muted loop autoplay playsinline></video>'
     else:
         media = '<div class="still">no preview yet</div>'
     sub = wd / ".submission.json"
@@ -88,7 +93,7 @@ def _card(wd: Path, src: Path, focus: bool, render: bool) -> str:
         s = json.loads(sub.read_text())
         status = f'submitted · {html.escape(str(s.get("id")))}'
     n_iter = len(list(wd.glob("iter-*.py")))
-    links = [(f, f"{name}/{f}") for f in (src.name, "notes.md", "preview.gif", "reel.mp4") if (wd / f).exists()]
+    links = [(f, _uri(wd / f)) for f in (src.name, "notes.md", "preview.gif", "reel.mp4") if (wd / f).exists()]
     play = f"{LIB.parent / 'bin' / 'tac'} play {src.resolve()}"
     return f"""
 <article{' class="focus" id="focus"' if focus else ''}>
@@ -98,15 +103,18 @@ def _card(wd: Path, src: Path, focus: bool, render: bool) -> str:
   <p class="line">{html.escape(notesmod.catalog_description(notes))}</p>
   <pre>{_stats_html(_stats(wd))}</pre>
   <div class="meta">live in a terminal:</div><code>{html.escape(play)}</code>
-  <nav class="links">{''.join(f'<a href="{html.escape(h)}">{html.escape(t)}</a>' for t, h in links)}</nav>
+  <nav class="links">{''.join(f'<a href="{h}">{html.escape(t)}</a>' for t, h in links)}</nav>
 </article>"""
 
 
-def build(root: Path, *, render: bool = True, only: str | None = None) -> Path:
+def build(root: Path, *, render: bool = True, only: str | None = None, dirs: list[Path] | None = None) -> Path:
+    """Write root/index.html. `dirs`: the piece folders to show (tacctl passes both roots' pieces, one per
+    name); default: the folders under root. Links are absolute file:// URIs, so any folder works."""
     import tacctl
 
     cards = []
-    for wd in sorted(p for p in root.iterdir() if p.is_dir() and not p.name.startswith(".")):
+    for wd in sorted(dirs if dirs is not None else (p for p in root.iterdir() if p.is_dir() and not p.name.startswith(".")),
+                     key=lambda p: p.name):
         src = tacctl.piece_source(wd, wd.name)
         if src is None:
             continue
@@ -122,6 +130,7 @@ def build(root: Path, *, render: bool = True, only: str | None = None) -> Path:
 <main>{''.join(cards)}</main>
 <script>document.getElementById('focus')?.scrollIntoView({{block: 'center'}});</script>
 </body></html>"""
+    root.mkdir(parents=True, exist_ok=True)
     out = root / "index.html"
     out.write_text(page, encoding="utf-8")
     return out

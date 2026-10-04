@@ -189,7 +189,7 @@ def work(tmp_path, monkeypatch):
 
     monkeypatch.setattr(termwin, "open_play_window", fake_open)
     monkeypatch.setattr(tacctl, "open_local", lambda p: calls["local"].append(p))
-    monkeypatch.setattr(review, "build", lambda root, render, only: calls["build"].append(only) or root / "index.html")
+    monkeypatch.setattr(review, "build", lambda root, render, only, **kw: calls["build"].append(only) or root / "index.html")
     return root, calls
 
 

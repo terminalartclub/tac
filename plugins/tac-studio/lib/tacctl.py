@@ -103,8 +103,8 @@ def session_base(creds: dict[str, Any]) -> str:
     return api_base() if os.environ.get("TAC_API") else checked_base(str(creds.get("api") or DEFAULT_API))
 
 
-_LOCAL_NOTE_SHOWN = False
 NAME_RULE = "a piece name is lowercase letters, digits and single hyphens, e.g. kettle or last-light"
+_BOTH_NOTED: set[str] = set()
 
 
 class BadName(ValueError):
@@ -116,33 +116,82 @@ def valid_name(name: Any) -> bool:
     return isinstance(name, str) and SLUG_RE.fullmatch(name) is not None
 
 
-def piece_dir(name: Any) -> Path:
-    """work_root()/name for a valid piece name; BadName otherwise. The ONLY way a name becomes a path: no
-    `..`, `/`, absolute names, empty, unicode or newlines can reach the filesystem."""
-    if not valid_name(name):
-        raise BadName(NAME_RULE)
-    return work_root() / name
+def home_root() -> Path:
+    """Where new pieces go, always absolute: $TAC_WORK, else ~/tac-work (one home, whatever the cwd)."""
+    env = os.environ.get("TAC_WORK")
+    return Path(env).expanduser().absolute() if env else Path.home() / "tac-work"
+
+
+def local_root() -> Path | None:
+    """An existing ./tac-work in the current directory (pieces made before 0.1.1, or a project's own), also
+    searched by name. None with $TAC_WORK (then only that), when absent, or when it IS ~/tac-work (cwd = ~)."""
+    if os.environ.get("TAC_WORK"):
+        return None
+    local = Path("tac-work").absolute()
+    if not local.is_dir():
+        return None
+    try:
+        if local.resolve() == home_root().resolve():
+            return None
+    except OSError:
+        pass
+    return local
+
+
+def search_roots() -> list[Path]:
+    """Lookup order for an existing piece: ./tac-work (if any), then ~/tac-work."""
+    return [r for r in (local_root(), home_root()) if r is not None]
 
 
 def work_root() -> Path:
-    """Where pieces live, always absolute: $TAC_WORK; else ./tac-work when it already exists in the current
-    directory (pieces made before 0.1.1); else ~/tac-work, one home whichever directory Claude runs in.
-    Callers that write create it (mkdir parents=True)."""
-    global _LOCAL_NOTE_SHOWN
-    env = os.environ.get("TAC_WORK")
-    if env:
-        return Path(env).expanduser().absolute()
-    local = Path("tac-work")
-    if local.is_dir():
-        if not _LOCAL_NOTE_SHOWN:
-            _LOCAL_NOTE_SHOWN = True
-            print(f"using ./tac-work ({local.absolute()}): found in the current directory", file=sys.stderr)
-        return local.absolute()
-    return Path.home() / "tac-work"
+    """The root new pieces are created in (and the review page lives in): home_root()."""
+    return home_root()
+
+
+def root_label(root: Path) -> str:
+    if root == Path.home() / "tac-work":
+        return "~/tac-work"
+    if root == local_root():
+        return "./tac-work"
+    return str(root)
+
+
+def piece_dir(name: Any) -> Path:
+    """The folder for a piece name. The ONLY way a name becomes a path: the name must be a slug (no `..`, `/`,
+    absolute, empty, unicode or newline), else BadName. Lookup: $TAC_WORK/<name> when set; else
+    ./tac-work/<name> if that folder exists, else ~/tac-work/<name> (existing or not). So a piece that
+    doesn't exist yet always lands in ~/tac-work: nothing is created in ./tac-work just because it exists."""
+    if not valid_name(name):
+        raise BadName(NAME_RULE)
+    home = home_root() / name
+    local = local_root()
+    if local is not None and (local / name).is_dir():
+        if home.is_dir() and name not in _BOTH_NOTED:
+            _BOTH_NOTED.add(name)
+            print(f"note: {name} is in both {local / name} and {home}; using the one in ./tac-work",
+                  file=sys.stderr)
+        return local / name
+    return home
+
+
+def all_piece_dirs() -> list[Path]:
+    """Every piece folder across search_roots(), one per name (the one piece_dir() would pick)."""
+    seen: dict[str, Path] = {}
+    for root in search_roots():
+        if root.is_dir():
+            for d in sorted(root.iterdir()):
+                if d.is_dir() and valid_name(d.name) and d.name not in seen:
+                    seen[d.name] = d
+    return list(seen.values())
 
 
 def cmd_root(a: argparse.Namespace) -> int:
-    print(work_root())
+    if a.name is not None:
+        print(piece_dir(a.name))
+        return 0
+    print(home_root())
+    if (local := local_root()) is not None:
+        print(f"also searched by name: {local} (./tac-work in this directory)", file=sys.stderr)
     return 0
 
 
@@ -436,7 +485,7 @@ def record_session(name: str) -> None:
     if not SESSION_ID_RE.fullmatch(sid):
         return
     path = piece_dir(name) / SESSIONS_FILE
-    latest = max(((r["at"], other.name) for other in _piece_dirs(path.parent.parent)
+    latest = max(((r["at"], other.name) for other in all_piece_dirs()
                   for r in read_sessions(other) if r["session"] == sid), default=None)
     if latest is not None and latest[1] == name:
         return  # still on this piece in this session
@@ -460,10 +509,6 @@ def read_sessions(wd: Path) -> list[dict[str, Any]]:
                 and isinstance(r.get("at"), (int, float)) and not isinstance(r.get("at"), bool):
             out.append(r)
     return out
-
-
-def _piece_dirs(root: Path) -> list[Path]:
-    return [d for d in root.iterdir() if d.is_dir()] if root.is_dir() else []
 
 
 def _work_times(wd: Path) -> list[float]:
@@ -496,7 +541,8 @@ def tokens_from_transcripts(wd: Path) -> int | None:
     first_file = min(times)
     # every piece's sightings per session: a session's timeline of which piece it was working on
     timeline: dict[str, list[tuple[float, str]]] = {}
-    for other in _piece_dirs(wd.parent):
+    dirs = {d.name: d for d in all_piece_dirs()}  # a session may have worked on pieces in either root
+    for other in dirs.values():
         for r in read_sessions(other):
             timeline.setdefault(r["session"], []).append((r["at"], other.name))
     root = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude") / "projects"
@@ -509,7 +555,7 @@ def tokens_from_transcripts(wd: Path) -> int | None:
                 continue
             prev = max(((t, n) for t, n in ordered[:k] if n != wd.name), default=None)
             # the previous piece in this session owns time up to this sighting or its own last edit + slack
-            prev_end = float("-inf") if prev is None else min(at, _work_end(wd.parent / prev[1]) or prev[0])
+            prev_end = float("-inf") if prev is None else min(at, _work_end(dirs.get(prev[1], wd.parent / prev[1])) or prev[0])
             # the first sighting reaches back to just before the piece's first file (planning turns), but
             # never into the previous piece's window and never to the session's beginning
             lo = at if windows else max(min(at, first_file) - WORK_START_SLACK_S, prev_end)
@@ -1024,27 +1070,25 @@ def cmd_gallery(a: argparse.Namespace) -> int:
 # ── play / review ──────────────────────────────────────────────────────────
 
 
-def list_pieces(root: Path) -> list[str]:
-    """Piece names under the work root (directories with a piece file), newest first."""
-    if not root.is_dir():
-        return []
-    found = [d for d in root.iterdir() if d.is_dir() and valid_name(d.name) and piece_source(d, d.name)]
-    return [d.name for d in sorted(found, key=lambda d: d.stat().st_mtime, reverse=True)]
+def list_pieces() -> list[Path]:
+    """Piece folders (with a piece file) across both roots, one per name, newest first."""
+    found = [d for d in all_piece_dirs() if piece_source(d, d.name)]
+    return sorted(found, key=lambda d: d.stat().st_mtime, reverse=True)
 
 
 def cmd_play(a: argparse.Namespace) -> int:
     import review
     import termwin
 
-    root = work_root()
     if a.name is None:  # omitted: list. An explicit "" is a bad name, refused below
-        names = list_pieces(root)
-        if not names:
-            return die(f"no pieces in {root}/ yet — make one with /tac:create")
-        print(f"pieces in {root}/ (newest first): " + ", ".join(names))
+        found = list_pieces()
+        if not found:
+            return die(f"no pieces in {root_label(home_root())}/ yet — make one with /tac:create")
+        print("your pieces (newest first): " + ", ".join(f"{d.name} ({root_label(d.parent)})" for d in found))
         print("play one: tacctl play <name>")
         return 0
     wd = piece_dir(a.name)  # also keeps the name out of every path and AppleScript string
+    root = wd.parent
     src = piece_source(wd, a.name) if wd.is_dir() else None
     if src is None:
         return die(f"no piece in {wd}/")
@@ -1070,7 +1114,7 @@ def cmd_play(a: argparse.Namespace) -> int:
         print(f"  {shlex.join(argv)}")
     if a.no_page:
         return 0
-    page = review.build(root, render=not a.no_render, only=a.name)
+    page = review.build(home_root(), render=not a.no_render, only=a.name, dirs=list_pieces())
     print(f"review page (all your pieces): file://{page.resolve()}")
     if a.page:
         open_local(page)
@@ -1110,7 +1154,8 @@ def main(argv: list[str] | None = None) -> int:
             p.add_argument("--no-wait", action="store_true", help=argparse.SUPPRESS)  # pre-0.1.1: now the default
     ft = sp.add_parser("fit", help="does a run fit the spare weekly window? exit 3 = no")
     ft.add_argument("--sketch", action="store_true")
-    sp.add_parser("root", help="print the work folder that holds your pieces (absolute)")
+    rt = sp.add_parser("root", help="print ~/tac-work (where new pieces go), or with a name, that piece's folder")
+    rt.add_argument("name", nargs="?")
     sa = sp.add_parser("start", help="create <work folder>/<name>/ and record the run size")
     sa.add_argument("name")
     sa.add_argument("--sketch", action="store_true")

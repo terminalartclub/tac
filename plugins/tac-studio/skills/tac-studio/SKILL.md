@@ -21,10 +21,11 @@ Tools (bundled with this plugin; they work from any directory and need `uv` on P
    catalog. Don't remake one.
 2. Your own earlier pieces in the work folder, if any. Don't repeat yourself either.
 
-**The work folder.** Run `"${CLAUDE_PLUGIN_ROOT}/bin/tacctl" root` once at the start. It prints an absolute
-path: `~/tac-work` (one home for every piece, whatever directory you run in), or `./tac-work` when the
-project already has one, or `$TAC_WORK`. Below, `WORK` means that printed path. Use it in full in every
-command and file path.
+**The work folder.** Pieces live in `~/tac-work` (or an existing `./tac-work`): one home whatever directory
+you run in. New pieces always go to `~/tac-work` (or `$TAC_WORK` when set); an older piece may sit in a
+`./tac-work` in the current directory. `tacctl start <name>` prints the piece's folder; for a piece that
+already exists, `"${CLAUDE_PLUGIN_ROOT}/bin/tacctl" root <name>` prints it. Below, `WORK/<name>` means that
+printed absolute path. Use it in full in every command and file path.
 
 ## Script contract (claude-panel compatible)
 

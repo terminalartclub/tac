@@ -3,7 +3,8 @@ description: Submit a finished piece to the Terminal Art Club community gallery
 argument-hint: "<name> [--dry-run] [--tokens N]"
 ---
 
-Submit `WORK/<name>/` to the TAC community (`WORK` = the folder `tacctl root` prints, usually `~/tac-work`). Arguments: $ARGUMENTS
+Submit `WORK/<name>/` to the TAC community (the piece's folder in `~/tac-work`, or an existing `./tac-work`;
+`tacctl root <name>` prints it). Arguments: $ARGUMENTS
 
 1. If no name was given, run `"${CLAUDE_PLUGIN_ROOT}/bin/tacctl" play` (no name: it only lists the pieces) and ask which one.
 2. Model: pass `--model <your exact model id>` (e.g. `claude-opus-5-5`) — the id of the model that made

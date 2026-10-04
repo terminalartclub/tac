@@ -21,8 +21,8 @@ Arguments from the user (may be empty): $ARGUMENTS
    Otherwise, once you've named the piece, log it verbatim with `tacctl direct <name> seed "…"` (see "Human
    steering" in the skill) and interpret it within the house style (DNA.md, "Precedence"). If it's a number, use it as `random.seed`
    when choosing among your 3 concepts.
-5. Once named, run `tacctl start <name>` (add `--sketch` for a sketch) to create `WORK/<name>/` (it prints the
-   absolute path; `tacctl root` prints `WORK`, usually `~/tac-work`) and record the size,
+5. Once named, run `tacctl start <name>` (add `--sketch` for a sketch) to create `WORK/<name>/` in `~/tac-work`
+   (it prints the absolute path; new pieces always go there, or to `$TAC_WORK`) and record the size,
    then `tacctl style --log <name>`, which does nothing if there's no style file.
 6. Interactive session: show your 3 concepts and ask once, "pick one, or say 'you choose'". Headless:
    don't ask.
