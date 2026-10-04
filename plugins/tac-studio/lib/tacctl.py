@@ -104,6 +104,24 @@ def session_base(creds: dict[str, Any]) -> str:
 
 
 _LOCAL_NOTE_SHOWN = False
+NAME_RULE = "a piece name is lowercase letters, digits and single hyphens, e.g. kettle or last-light"
+
+
+class BadName(ValueError):
+    pass
+
+
+def valid_name(name: Any) -> bool:
+    """fullmatch, never match: SLUG_RE's `$` would accept a trailing newline."""
+    return isinstance(name, str) and SLUG_RE.fullmatch(name) is not None
+
+
+def piece_dir(name: Any) -> Path:
+    """work_root()/name for a valid piece name; BadName otherwise. The ONLY way a name becomes a path: no
+    `..`, `/`, absolute names, empty, unicode or newlines can reach the filesystem."""
+    if not valid_name(name):
+        raise BadName(NAME_RULE)
+    return work_root() / name
 
 
 def work_root() -> Path:
@@ -417,7 +435,7 @@ def record_session(name: str) -> None:
     sid = os.environ.get("TAC_SESSION_ID", "")
     if not SESSION_ID_RE.fullmatch(sid):
         return
-    path = work_root() / name / SESSIONS_FILE
+    path = piece_dir(name) / SESSIONS_FILE
     latest = max(((r["at"], other.name) for other in _piece_dirs(path.parent.parent)
                   for r in read_sessions(other) if r["session"] == sid), default=None)
     if latest is not None and latest[1] == name:
@@ -522,7 +540,7 @@ def tokens_from_transcripts(wd: Path) -> int | None:
 
 def prepare(name: str, *, model: str | None, handle: str | None, tokens: int | None,
             estimate_tokens: bool) -> tuple[Path, dict[str, Any], list[str]]:
-    wd = work_root() / name
+    wd = piece_dir(name)
     if not wd.is_dir():
         raise SystemExit(f"error: {wd}/ not found — make the piece with /tac:create first")
     src = piece_source(wd, name)
@@ -617,7 +635,7 @@ def cmd_fit(a: argparse.Namespace) -> int:
 
 
 def cmd_start(a: argparse.Namespace) -> int:
-    wd = work_root() / a.name
+    wd = piece_dir(a.name)
     wd.mkdir(parents=True, exist_ok=True)
     record_session(a.name)
     path = wd / "meta.yaml"
@@ -633,7 +651,7 @@ def cmd_start(a: argparse.Namespace) -> int:
 
 def append_direction(name: str, line: str) -> str:
     """Append one line to tac-work/<name>/notes.md under `## direction`; returns the new text."""
-    wd = work_root() / name
+    wd = piece_dir(name)
     wd.mkdir(parents=True, exist_ok=True)
     path = wd / "notes.md"
     text = path.read_text(encoding="utf-8") if path.exists() else f"# {name} — notes\n"
@@ -694,6 +712,8 @@ def style_first_line(text: str) -> str:
 
 
 def cmd_style(a: argparse.Namespace) -> int:
+    if a.log is not None:
+        piece_dir(a.log)  # refuse a bad name even when there is no style file to log
     if a.print or a.log:  # skill entry points; silent no-ops when the file is absent or empty
         text = style_text()
         if text and a.log:
@@ -792,13 +812,14 @@ def cmd_submit(a: argparse.Namespace) -> int:
     print(f"uploaded: submission {safe(resp['id'])} ({safe(resp.get('status'))})")
     record = {"id": resp["id"], "api": base, "url": resp.get("url"), "piece_url": resp.get("piece_url"),
               "submitted": time.time()}
-    (work_root() / a.name / ".submission.json").write_text(json.dumps(record, indent=2))
-    if a.wait is None:  # the default: return now; rendering (~1-2 min) and review happen on the platform
+    (piece_dir(a.name) / ".submission.json").write_text(json.dumps(record, indent=2))
+    wait_s = a.wait_seconds if a.wait_seconds is not None else (300.0 if a.wait else None)
+    if wait_s is None:  # the default: return now; rendering (~1-2 min) and review happen on the platform
         print(uploaded_line(trusted_link(resp.get("piece_url"), base)))
         return 0
     share = share_url(resp, base)
     try:
-        final = poll(base, resp["id"], creds["access_token"], a.wait)
+        final = poll(base, resp["id"], creds["access_token"], wait_s)
     except ApiError as e:
         return die(f"status poll failed: {e}")
     final.setdefault("url", resp.get("url"))
@@ -978,7 +999,7 @@ def gallery_ids(doc: Any) -> tuple[list[str], int]:
         if not curated(p):
             continue
         h, s = p.get("handle"), p.get("slug")
-        if isinstance(h, str) and isinstance(s, str) and HANDLE_RE.match(h) and SLUG_RE.match(s):
+        if isinstance(h, str) and isinstance(s, str) and HANDLE_RE.fullmatch(h) and SLUG_RE.fullmatch(s):
             if f"{h}/{s}" not in ids:
                 ids.append(f"{h}/{s}")
         else:
@@ -1007,7 +1028,7 @@ def list_pieces(root: Path) -> list[str]:
     """Piece names under the work root (directories with a piece file), newest first."""
     if not root.is_dir():
         return []
-    found = [d for d in root.iterdir() if d.is_dir() and SLUG_RE.match(d.name) and piece_source(d, d.name)]
+    found = [d for d in root.iterdir() if d.is_dir() and valid_name(d.name) and piece_source(d, d.name)]
     return [d.name for d in sorted(found, key=lambda d: d.stat().st_mtime, reverse=True)]
 
 
@@ -1016,16 +1037,14 @@ def cmd_play(a: argparse.Namespace) -> int:
     import termwin
 
     root = work_root()
-    if not a.name:
+    if a.name is None:  # omitted: list. An explicit "" is a bad name, refused below
         names = list_pieces(root)
         if not names:
             return die(f"no pieces in {root}/ yet — make one with /tac:create")
         print(f"pieces in {root}/ (newest first): " + ", ".join(names))
         print("play one: tacctl play <name>")
         return 0
-    if not SLUG_RE.match(a.name):  # also keeps the name out of every path and AppleScript string
-        return die("a piece name is lowercase letters, digits and single hyphens (e.g. kettle, last-light)")
-    wd = root / a.name
+    wd = piece_dir(a.name)  # also keeps the name out of every path and AppleScript string
     src = piece_source(wd, a.name) if wd.is_dir() else None
     if src is None:
         return die(f"no piece in {wd}/")
@@ -1034,7 +1053,11 @@ def cmd_play(a: argparse.Namespace) -> int:
         return die(f"{wd}/ points outside {root}/; not playing it")
     argv = termwin.play_argv(PLUGIN / "bin" / "tac", src)
     opened, why = (None, "--no-window") if a.no_window else termwin.open_play_window(argv)
-    if opened:
+    if opened and not opened.confirmed:
+        print(f"opened a {opened.app} window, but couldn't confirm the piece started in it. If it isn't playing "
+              "there, paste this into a terminal (Ctrl-C quits):")
+        print(f"  {shlex.join(argv)}")
+    elif opened:
         print(f"playing {a.name} in a new {opened.app} window. Ctrl-C there stops it.")
         if opened.size and opened.size != (termwin.COLS, termwin.ROWS):
             c, r = opened.size
@@ -1078,9 +1101,12 @@ def main(argv: list[str] | None = None) -> int:
             p.add_argument("--confirm-rights", action="store_true",
                            help="the user confirmed: they have the right to share this, and it copies no one "
                                 "else's characters, brands or logos")
-            p.add_argument("--wait", type=float, nargs="?", const=300.0, default=None, metavar="N",
-                           help="poll until rendered and reviewed, up to N seconds (default 300); without it, "
-                                "submit returns right after the upload")
+            # --wait never takes a value from the next word (`--wait ember` must not eat the name); a
+            # number goes in --wait-seconds N or --wait=N
+            p.add_argument("--wait", action="store_true",
+                           help="poll until rendered and reviewed; without it, submit returns right after the upload")
+            p.add_argument("--wait-seconds", type=float, default=None, metavar="N",
+                           help="with --wait: poll up to N seconds (default 300); implies --wait")
             p.add_argument("--no-wait", action="store_true", help=argparse.SUPPRESS)  # pre-0.1.1: now the default
     ft = sp.add_parser("fit", help="does a run fit the spare weekly window? exit 3 = no")
     ft.add_argument("--sketch", action="store_true")
@@ -1108,12 +1134,17 @@ def main(argv: list[str] | None = None) -> int:
     pl.add_argument("--no-page", action="store_true", help="don't build the review page")
     pl.add_argument("--no-render", action="store_true", help="don't render missing previews")
     pl.add_argument("--no-browser", action="store_true", help=argparse.SUPPRESS)  # pre-0.1.1: now the default
+    argv = list(sys.argv[1:] if argv is None else argv)
+    # --wait=N (0.1.1 spelling) → --wait --wait-seconds N; a bare --wait stays a flag
+    argv = [x for arg in argv for x in (["--wait", "--wait-seconds", arg[7:]] if arg.startswith("--wait=") else [arg])]
     a = ap.parse_args(argv)
     try:
         return {"login": cmd_login, "logout": cmd_logout, "whoami": cmd_whoami, "prepare": cmd_prepare,
                 "submit": cmd_submit, "status": cmd_status, "play": cmd_play, "direct": cmd_direct, "style": cmd_style, "mine": cmd_mine,
                 "fit": cmd_fit, "start": cmd_start, "gallery": cmd_gallery, "root": cmd_root}[a.cmd](a)
     except ApiError as e:
+        return die(str(e))
+    except BadName as e:
         return die(str(e))
 
 

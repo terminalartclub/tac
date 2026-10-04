@@ -1,13 +1,17 @@
 """Open a new terminal window that runs `tac play <piece>` (the person's own local piece only).
 
 Claude Code's Bash tool is not a TTY, so a piece can't animate there; a real terminal window can.
-Everything that touches the OS is injected (run, popen, which, exists), so tests never open a window.
+Everything that touches the OS is injected (run, popen, which, exists, sleep), so tests never open a window.
 
-macOS: iTerm2 when installed, else Terminal.app, both via osascript. The command reaches the window's
-shell as one AppleScript string literal (quote_applescript) holding a POSIX-quoted command line
-(shlex.join): no piece name or path can break out of either layer. Linux: $TERMINAL, then common
-emulators, launched with an argv (no shell string at all). Anything else, or no GUI: None, and the
-caller prints the paste command instead.
+Only conservative characters ever reach a terminal (SAFE_ARG: letters, digits, / . _ ~ + @ - and space).
+On macOS the command is TYPED into the window, so the person's login shell parses it: POSIX quoting
+(shlex.join) is not enough for fish or tcsh, where `\'` and `$(...)` read differently. Any other
+character means no window, and the caller prints the paste command instead.
+
+macOS: iTerm2 when installed, else Terminal.app, both via osascript; the command is one AppleScript string
+literal (quote_applescript). Linux: $TERMINAL, then common emulators, launched with an argv (no shell
+string) through each emulator's own "run this argv" flag. The launched `sh` touches a marker file first, so
+a window that opened but never ran the piece is reported as unconfirmed. Anything else, or no GUI: None.
 """
 
 from __future__ import annotations
@@ -18,12 +22,15 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
 COLS, ROWS = 80, 66  # the reel canvas every piece is composed for
-_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+SAFE_ARG = re.compile(r"[A-Za-z0-9/._~+@ -]+")
+LAUNCH_CONFIRM_S = 3.0
 LINUX_TERMINALS = ("x-terminal-emulator", "gnome-terminal", "konsole", "kitty", "alacritty", "wezterm")
 ITERM_PATHS = ("/Applications/iTerm.app", "~/Applications/iTerm.app")
 
@@ -32,6 +39,7 @@ ITERM_PATHS = ("/Applications/iTerm.app", "~/Applications/iTerm.app")
 class Opened:
     app: str  # "iTerm", "Terminal", or the Linux emulator's name
     size: tuple[int, int] | None  # the window's real (cols, rows) when the app reports it
+    confirmed: bool = True  # False: a window opened but the piece wasn't seen starting in it
 
 
 def play_argv(tac: Path, piece: Path) -> list[str]:
@@ -75,12 +83,16 @@ def _size(out: str) -> tuple[int, int] | None:
     return (int(m.group(1)), int(m.group(2))) if m else None
 
 
-def linux_argv(term: str, argv: list[str], cols: int = COLS, rows: int = ROWS) -> list[str]:
+def linux_argv(term: str, argv: list[str], cols: int = COLS, rows: int = ROWS, marker: str | None = None) -> list[str]:
     """How each emulator takes a command (and a size where it has a flag for one). The command runs
-    through `sh -c` with the argv as positional parameters, never interpolated, and waits for Enter
-    after it exits so an error stays readable."""
-    hold = ["sh", "-c", '"$0" "$@"; printf "\\n[done: press Enter to close] "; read _', *argv]
+    through `sh -c` with the argv as positional parameters, never interpolated; it first touches `marker`
+    (proof the command started) and waits for Enter after it exits so an error stays readable."""
+    hold = ["sh", "-c", ': > "$0"; "$@"; printf "\\n[done: press Enter to close] "; read _', marker or "/dev/null", *argv]
     base = Path(term).name
+    if base in ("xfce4-terminal", "mate-terminal", "terminator"):  # their -e takes ONE string: use -x (rest = argv)
+        return [term, "-x", *hold]
+    if base == "tilix":
+        return [term, "--", *hold]
     if base == "gnome-terminal":
         return [term, f"--geometry={int(cols)}x{int(rows)}", "--", *hold]
     if base == "kitty":
@@ -110,12 +122,14 @@ def open_play_window(
     exists: Callable[[str], bool] = lambda p: Path(p).expanduser().exists(),
     run: Callable[..., subprocess.CompletedProcess] = subprocess.run,
     popen: Callable[..., subprocess.Popen] = subprocess.Popen,
+    sleep: Callable[[float], None] = time.sleep,
     cols: int = COLS, rows: int = ROWS,
 ) -> tuple[Opened | None, str]:
     """(Opened, "") when a window is running the piece, else (None, why not)."""
     env = os.environ if env is None else env
-    if any(_CONTROL.search(a) for a in argv):
-        return None, "the piece path has control characters"
+    if not all(SAFE_ARG.fullmatch(a) for a in argv):
+        return None, ("the piece path has characters a terminal could misread (only letters, digits, "
+                      "space and / . _ ~ + @ - are used)")
     if (why := no_gui_reason(platform, env)) is not None:
         return None, why
     if platform == "darwin":
@@ -138,19 +152,29 @@ def open_play_window(
     if env.get("TERMINAL"):
         candidates.append(env["TERMINAL"])
     candidates += [t for t in LINUX_TERMINALS if t not in candidates]
-    for term in candidates:
-        path = which(term)
-        if not path:
-            continue
-        try:
-            p = popen(linux_argv(path, argv, cols, rows), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                      stderr=subprocess.DEVNULL, start_new_session=True)
-        except OSError:
-            continue
-        try:
-            rc = p.wait(timeout=1.5)  # most launchers return 0 at once or keep running; non-zero = failed
-        except subprocess.TimeoutExpired:
-            rc = 0
-        if rc == 0:
-            return Opened(Path(term).name, None), ""
+    marker_dir = Path(tempfile.mkdtemp(prefix="tac-play-"))
+    try:
+        for term in candidates:
+            path = which(term)
+            if not path:
+                continue
+            marker = marker_dir / f"started-{Path(term).name}"
+            try:
+                p = popen(linux_argv(path, argv, cols, rows, str(marker)), stdin=subprocess.DEVNULL,
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+            except OSError:
+                continue
+            try:
+                rc = p.wait(timeout=1.5)  # most launchers return 0 at once or keep running; non-zero = failed
+            except subprocess.TimeoutExpired:
+                rc = 0
+            if rc != 0:
+                continue
+            waited = 0.0
+            while not marker.exists() and waited < LAUNCH_CONFIRM_S:
+                sleep(0.1)
+                waited += 0.1
+            return Opened(Path(term).name, None, confirmed=marker.exists()), ""
+    finally:
+        shutil.rmtree(marker_dir, ignore_errors=True)
     return None, "no terminal emulator found ($TERMINAL, x-terminal-emulator, gnome-terminal, konsole, kitty, alacritty, wezterm)"

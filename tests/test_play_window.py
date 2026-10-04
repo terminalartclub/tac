@@ -31,6 +31,7 @@ def _unquote_applescript(lit: str) -> str:
 
 
 def test_command_quoting_survives_spaces_quotes_and_shell_metacharacters():
+    """Defence in depth: even for a path the SAFE_ARG gate would refuse, the two quoting layers hold."""
     argv = termwin.play_argv(Path("/plug ins/bin/tac"), Path(NASTY))
     cmd = shlex.join(argv)
     assert shlex.split(cmd) == argv  # the window's shell gets exactly these words, nothing expanded
@@ -90,20 +91,37 @@ def test_no_gui_means_the_paste_command(platform, env, reason):
     assert opened is None and reason in why and run.calls == []
 
 
-def test_control_characters_in_the_path_never_reach_osascript():
-    run = FakeRun([])
-    opened, why = termwin.open_play_window(["tac", "play", "/p\nrm.py"], exists=lambda p: True, run=run, **MAC)
-    assert opened is None and "control characters" in why and run.calls == []
+@pytest.mark.parametrize("path", [
+    "/p\nrm.py",                                  # control character
+    "/Users/a/tac work/x\\'$(touch pwned)'.py",  # fish: \' ends the quote, then $(...) runs
+    "/tmp/`id`.py", "/tmp/$HOME.py", "/tmp/a;b.py", "/tmp/a\"b.py", "/tmp/a'b.py", "/tmp/a*b.py",
+    "/Users/josé/tac-work/k/k.py",                # non-ASCII: refused rather than trusted to every shell
+])
+def test_unsafe_path_characters_never_reach_a_terminal(path):
+    run, popen = FakeRun([]), FakePopen({})
+    for platform, env in (("darwin", {}), ("linux", {"DISPLAY": ":0"})):
+        opened, why = termwin.open_play_window(["/plug/bin/tac", "play", path], platform=platform, env=env,
+                                               which=lambda n: f"/usr/bin/{n}", exists=lambda p: True,
+                                               run=run, popen=popen)
+        assert opened is None and "characters a terminal could misread" in why
+    assert run.calls == [] and popen.calls == []
+
+
+def test_ordinary_paths_pass_the_gate():
+    for path in ("/Users/alex/tac-work/kettle/kettle.py", "/home/a.b+c@d/tac work/last-light/last-light.py",
+                 "/Users/alex/.claude/plugins/cache/terminalartclub/tac/0.1.2/bin/tac"):
+        assert termwin.SAFE_ARG.fullmatch(path)
 
 
 class FakePopen:
-    def __init__(self, rcs):
-        self.rcs, self.calls = dict(rcs), []
+    def __init__(self, rcs, start_marker=True):
+        self.rcs, self.calls, self.start_marker = dict(rcs), [], start_marker
 
     def __call__(self, argv, **kw):
         self.calls.append(argv)
         rc = self.rcs.get(Path(argv[0]).name, 0)
-        outer = self
+        if self.start_marker:  # simulate the window's sh touching its marker (the path follows the script)
+            Path(argv[argv.index("sh") + 3]).touch()
 
         class P:
             def wait(self, timeout=None):
@@ -116,18 +134,30 @@ class FakePopen:
 def test_linux_tries_terminal_env_first_then_the_common_emulators():
     which = {"myterm": "/opt/myterm", "gnome-terminal": "/usr/bin/gnome-terminal"}.get
     popen = FakePopen({"myterm": 1, "gnome-terminal": None})  # $TERMINAL fails; gnome-terminal keeps running
-    opened, _ = termwin.open_play_window(["tac", "play", NASTY], platform="linux", env={"DISPLAY": ":0", "TERMINAL": "myterm"},
-                                         which=which, popen=popen)
-    assert opened == termwin.Opened("gnome-terminal", None)
+    piece = "/home/alex/tac work/kettle/kettle.py"
+    opened, _ = termwin.open_play_window(["tac", "play", piece], platform="linux", env={"DISPLAY": ":0", "TERMINAL": "myterm"},
+                                         which=which, popen=popen, sleep=lambda s: None)
+    assert opened == termwin.Opened("gnome-terminal", None, confirmed=True)
     first, second = popen.calls
     assert first[:2] == ["/opt/myterm", "-e"]
     assert second[:3] == ["/usr/bin/gnome-terminal", "--geometry=80x66", "--"]
     sh = second[3:]
-    assert sh[:2] == ["sh", "-c"] and sh[3:] == ["tac", "play", NASTY]  # argv as positional parameters
-    assert NASTY not in sh[2]  # the shell script itself never contains the path
+    assert sh[:2] == ["sh", "-c"] and sh[4:] == ["tac", "play", piece]  # marker, then argv as positional params
+    assert piece not in sh[2]  # the shell script itself never contains the path
+
+
+def test_linux_window_that_never_starts_the_piece_is_unconfirmed():
+    slept = []
+    opened, _ = termwin.open_play_window(["tac", "play", "/p.py"], platform="linux", env={"DISPLAY": ":0"},
+                                         which={"konsole": "/usr/bin/konsole"}.get,
+                                         popen=FakePopen({"konsole": None}, start_marker=False), sleep=slept.append)
+    assert opened == termwin.Opened("konsole", None, confirmed=False)
+    assert 2.5 <= sum(slept) <= 3.5  # waited ~LAUNCH_CONFIRM_S for the marker, no longer
 
 
 @pytest.mark.parametrize("term,head", [
+    ("xfce4-terminal", ["/x/xfce4-terminal", "-x", "sh"]), ("mate-terminal", ["/x/mate-terminal", "-x", "sh"]),
+    ("terminator", ["/x/terminator", "-x", "sh"]), ("tilix", ["/x/tilix", "--", "sh"]),
     ("kitty", ["/x/kitty", "-o", "initial_window_width=80c"]), ("wezterm", ["/x/wezterm", "start", "--"]),
     ("konsole", ["/x/konsole", "-e"]), ("alacritty", ["/x/alacritty", "-e"]), ("xterm", ["/x/xterm", "-geometry", "80x66"]),
 ])
@@ -184,13 +214,23 @@ def test_play_falls_back_to_the_paste_command(work, monkeypatch, capsys):
     assert shlex.split(line)[1:] == ["play", str((root / "kettle" / "kettle.py").resolve())]
 
 
+def test_play_unconfirmed_window_also_prints_the_paste_command(work, monkeypatch, capsys):
+    monkeypatch.setattr(termwin, "open_play_window",
+                        lambda argv: (termwin.Opened("konsole", None, confirmed=False), ""))
+    assert tacctl.main(["play", "kettle", "--no-page"]) == 0
+    out = capsys.readouterr().out
+    assert "couldn't confirm the piece started" in out and "playing kettle" not in out
+    assert shlex.split(out.splitlines()[-1].strip())[1] == "play"
+
+
 def test_play_reports_a_window_that_could_not_be_sized(work, monkeypatch, capsys):
     monkeypatch.setattr(termwin, "open_play_window", lambda argv: (termwin.Opened("iTerm", (80, 48)), ""))
     assert tacctl.main(["play", "kettle", "--no-page"]) == 0
     assert "the window is 80x48, not 80x66" in capsys.readouterr().out
 
 
-@pytest.mark.parametrize("bad", ["../kettle", "Kettle", "ket tle", 'ket"tle', "ket'tle", "a--b", "kettle/", "-"])
+@pytest.mark.parametrize("bad", ["../kettle", "Kettle", "ket tle", 'ket"tle', "ket'tle", "a--b", "kettle/", "-",
+                                 "kettle\n", "kéttle"])
 def test_play_refuses_anything_but_a_slug_name(work, bad, capsys):
     root, calls = work
     assert tacctl.main(["play", bad]) == 1

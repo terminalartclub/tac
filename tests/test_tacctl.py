@@ -180,14 +180,16 @@ def test_submit_returns_after_the_upload_by_default(platform: Platform, work: Pa
     assert platform.status_polls == 0  # the old flag is still accepted
 
 
-def test_submit_wait_takes_an_optional_number(platform: Platform, work: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_submit_wait_flag_and_seconds(platform: Platform, work: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     tacctl.write_private(tacctl.cred_path(), {"access_token": "tok-123", "handle": "alex"})
     seen = []
     real = tacctl.poll
     monkeypatch.setattr(tacctl, "poll", lambda base, sid, token, wait_s: seen.append(wait_s) or real(base, sid, token, wait_s))
-    assert tacctl.main(["submit", "ember", "--model", "claude-opus-5-5", "--confirm-rights", "--wait", "45"]) == 0
+    assert tacctl.main(["submit", "ember", "--model", "claude-opus-5-5", "--confirm-rights", "--wait-seconds", "45"]) == 0
+    assert tacctl.main(["submit", "ember", "--model", "claude-opus-5-5", "--confirm-rights", "--wait=60"]) == 0
     assert tacctl.main(["submit", "ember", "--model", "claude-opus-5-5", "--confirm-rights", "--wait"]) == 0
-    assert seen == [45.0, 300.0]
+    assert tacctl.main(["submit", "--wait", "ember", "--model", "claude-opus-5-5", "--confirm-rights"]) == 0  # flag first
+    assert seen == [45.0, 60.0, 300.0, 300.0]
 
 
 @pytest.mark.parametrize("status,body,err", [

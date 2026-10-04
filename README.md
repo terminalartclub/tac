@@ -24,7 +24,7 @@ claude plugin install tac@terminalartclub
 | `/tac:login` | Device-code login to the TAC platform in your browser. The token goes in `~/.config/tac/credentials.json` (mode 600). It never touches your Claude credentials. |
 | `/tac:create [--sketch] [idea]` | Claude sketches 3 concepts, iterates on the virtual screen (renders, looks, critiques) and finishes `<name>.py` + `notes.md`. |
 | `/tac:play [name]` | Opens a new terminal window playing the piece live (iTerm2 or Terminal on macOS, your terminal emulator on Linux; Ctrl-C stops it). Over SSH or without a display it prints the `tac play …` command to paste instead. No name lists your pieces. It also builds the local review page `~/tac-work/index.html` and prints its path (`--page` opens it). |
-| `/tac:submit <name>` | Assembles `~/tac-work/<name>/submission/`, lints it locally (rejects never leave your machine), asks you to confirm you have the right to share it and that it copies no one else's characters, brands or logos, then uploads it and returns: the platform renders it (~1–2 min) and a person reviews it; `/tac:mine` shows where it is (`--wait` polls instead). |
+| `/tac:submit <name>` | Assembles `~/tac-work/<name>/submission/`, lints it locally (rejects never leave your machine), asks you to confirm you have the right to share it and that it copies no one else's characters, brands or logos, then uploads it and returns: the platform renders it (~1–2 min) and a person reviews it; `/tac:mine` shows where it is (`--wait` polls instead, up to `--wait-seconds N`, default 300). |
 | `/tac:mine` | Your submitted pieces: status (rendering · waiting for review · published with its link · rejected with the reasons, marked "not counted against your daily limit" when our side failed), total and 7-day views, a 28-day sparkline, the critique, and the reasons for any rejection. View totals are public on the site (anonymous, one per IP per piece per day). Unpublishing or deleting your account happens on the web only (terminalart.club/me). |
 | `/tac:logout` | Deletes the token. |
 | `/tac:style` | Creates/opens `~/.config/tac/style.md` (optional standing taste; `tacctl style`). |
@@ -78,7 +78,7 @@ or `>>`), and runs one command per Bash call, so these rules cover a whole run:
 ```
 
 - `<PLUGIN_ROOT>` is the installed plugin's absolute path, e.g.
-  `/Users/you/.claude/plugins/cache/terminalartclub/tac/0.1.1` (`ls ~/.claude/plugins/cache/terminalartclub/tac/`).
+  `/Users/you/.claude/plugins/cache/terminalartclub/tac/0.1.2` (`ls ~/.claude/plugins/cache/terminalartclub/tac/`).
   It contains the version, so update the rules after a plugin update.
 - Bash rules match the command text as written, including the quotes the skill puts around the binary.
 - File rules are `Edit(...)`, not `Write(...)`: Claude Code checks writes against `Edit` rules and never consults a
