@@ -2,7 +2,8 @@
 
 python render_piece.py <piece_dir> --out <dir> -> preview.webp, og.jpg, stats.json, process/*.webp.
 Draws a synthetic 12-frame animation instead of running the piece. A piece containing
-"TEST:render-fail" exits 3; "TEST:render-hang" sleeps forever (for timeout tests).
+"TEST:render-fail" exits 3; "TEST:render-hang" sleeps forever (for timeout tests); "TEST:render-inner-timeout" sleeps for the
+--timeout it was given and exits 124 like the real one.
 """
 
 import json
@@ -21,6 +22,11 @@ def main() -> int:
         return 3
     if "TEST:render-hang" in src:
         time.sleep(3600)
+    if "TEST:render-inner-timeout" in src:
+        timeout = float(sys.argv[sys.argv.index("--timeout") + 1])
+        time.sleep(timeout)
+        print(f"error: render exceeded {timeout:.0f}s wall clock", file=sys.stderr)
+        return 124
     frames = []
     for i in range(12):
         im = Image.new("RGB", (160, 132), (8, 8, 15))

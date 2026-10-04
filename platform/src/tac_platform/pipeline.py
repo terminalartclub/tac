@@ -213,6 +213,9 @@ class Pipeline:
             raise Rejected([f"render timed out after {self.settings.render_timeout_s:.0f} s"])
         if res.returncode == 125 and self.settings.renderer == "docker":
             raise Rejected(["render backend unavailable; please resubmit later"])
+        if res.returncode == 124:  # render_piece.py's own --timeout (render_piece_timeout_s) fired
+            raise Rejected([f"render did not finish within {self.settings.render_piece_timeout_s:.0f} s on the render "
+                            "machine; please resubmit"])
         if res.returncode != 0:
             raise Rejected([f"render failed (exit {res.returncode}): {_tail(res.stderr) or 'no output'}"])
         stats, process_n = await self._store_render(sub_id, out_dir)

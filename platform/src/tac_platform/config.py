@@ -39,6 +39,14 @@ def _is_loopback_host(host: str) -> bool:
         return False
 
 
+# The render step's budget (render_timeout_s) is the OUTER limit each backend enforces on render_piece.py.
+# render_piece.py gets an INNER --timeout this much shorter, so it fires first (exit 124 with a clear
+# message) instead of the process/container/VM being killed with nothing to say: covers interpreter start,
+# container start, and in a Fly VM the gap before the result upload.
+RENDER_PIECE_MARGIN_S = 20.0
+FLY_CPU_KINDS = ("shared", "performance")
+
+
 @dataclass(frozen=True)
 class Settings:
     data_dir: Path = PLATFORM_DIR / "data"
@@ -53,6 +61,11 @@ class Settings:
     fly_render_app: str = "tac-render"
     fly_render_image: str = ""  # registry.fly.io/tac-render:<tag>
     fly_render_region: str = ""
+    # Render VM guest. The render is single-threaded and CPU-bound for 1-2 min; shared CPUs are throttled to
+    # a fraction of a core under sustained load (a 37 s Mac render hit 120 s on shared-cpu-1x). DEPLOY.md: cost.
+    fly_render_cpu_kind: str = "performance"
+    fly_render_cpus: int = 1
+    fly_render_memory_mb: int = 2048
     auth_mode: str = "dev"  # "dev" | "github"
     github_client_id: str = ""
     github_client_secret: str = ""
@@ -60,7 +73,7 @@ class Settings:
 
     tools_dir: Path = REPO_DIR / "tools"
     tools_python: str = sys.executable
-    render_timeout_s: float = 240.0
+    render_timeout_s: float = 300.0
     check_timeout_s: float = 60.0
     render_concurrency: int = 1
     themes_file: Path = PLATFORM_DIR / "themes.json"
@@ -105,6 +118,14 @@ class Settings:
             raise RuntimeError(f"TAC_AUTH={self.auth_mode!r} is not one of {sorted(AUTH_MODES)}; refusing to start")
         object.__setattr__(self, "env", env)
         object.__setattr__(self, "auth_mode", auth)
+        kind = str(self.fly_render_cpu_kind).strip().lower()
+        if kind not in FLY_CPU_KINDS:
+            raise RuntimeError(f"TAC_FLY_RENDER_CPU_KIND={self.fly_render_cpu_kind!r} is not one of {list(FLY_CPU_KINDS)}")
+        object.__setattr__(self, "fly_render_cpu_kind", kind)
+        if not (1 <= int(self.fly_render_cpus) <= 16) or not (256 <= int(self.fly_render_memory_mb) <= 32768):
+            raise RuntimeError("TAC_FLY_RENDER_CPUS must be 1-16 and TAC_FLY_RENDER_MEMORY_MB 256-32768")
+        if not (self.render_timeout_s > 0):  # also rejects NaN
+            raise RuntimeError(f"TAC_RENDER_TIMEOUT_S must be a number > 0, got {self.render_timeout_s!r}")
         if not self.site_origins and env == "dev":
             object.__setattr__(self, "site_origins", DEV_SITE_ORIGINS)
 
@@ -145,6 +166,12 @@ class Settings:
                 )
 
     @property
+    def render_piece_timeout_s(self) -> float:
+        """render_piece.py's own --timeout: the render budget minus RENDER_PIECE_MARGIN_S, or a quarter of it
+        for tiny test budgets (fires first either way)."""
+        return self.render_timeout_s - min(RENDER_PIECE_MARGIN_S, self.render_timeout_s / 4)
+
+    @property
     def sqlite_path(self) -> Path:
         return self.db_path or self.data_dir / "tac.sqlite3"
 
@@ -162,13 +189,16 @@ class Settings:
             fly_render_app=_env("TAC_FLY_RENDER_APP", "tac-render"),
             fly_render_image=_env("TAC_FLY_RENDER_IMAGE", ""),
             fly_render_region=_env("TAC_FLY_RENDER_REGION", ""),
+            fly_render_cpu_kind=_env("TAC_FLY_RENDER_CPU_KIND", "performance"),
+            fly_render_cpus=int(_env("TAC_FLY_RENDER_CPUS", "1")),
+            fly_render_memory_mb=int(_env("TAC_FLY_RENDER_MEMORY_MB", "2048")),
             auth_mode=_env("TAC_AUTH", "dev"),
             github_client_id=_env("TAC_GITHUB_CLIENT_ID", ""),
             github_client_secret=_env("TAC_GITHUB_CLIENT_SECRET", ""),
             admin_token=_env("TAC_ADMIN_TOKEN", ""),
             tools_dir=Path(_env("TAC_TOOLS_DIR", str(REPO_DIR / "tools"))),
             tools_python=_env("TAC_TOOLS_PYTHON", sys.executable),
-            render_timeout_s=float(_env("TAC_RENDER_TIMEOUT_S", "240")),
+            render_timeout_s=float(_env("TAC_RENDER_TIMEOUT_S", "300")),
             render_concurrency=int(_env("TAC_RENDER_CONCURRENCY", "1")),
             themes_file=Path(_env("TAC_THEMES_FILE", str(PLATFORM_DIR / "themes.json"))),
             automod_model=_env("TAC_AUTOMOD_MODEL", "claude-sonnet-5-5"),

@@ -65,7 +65,8 @@ class LocalRenderer(StepwiseRenderer):
         return await run_limited(argv, work, self.s.check_timeout_s)
 
     async def render(self, piece_dir: Path, out_dir: Path, work: Path) -> RunResult:
-        argv = [self.s.tools_python, str(self.s.tools_dir / "render_piece.py"), str(piece_dir), "--out", str(out_dir)]
+        argv = [self.s.tools_python, str(self.s.tools_dir / "render_piece.py"), str(piece_dir), "--out", str(out_dir),
+                "--timeout", f"{self.s.render_piece_timeout_s:g}"]
         return await run_limited(argv, work, self.s.render_timeout_s)
 
 
@@ -163,7 +164,8 @@ class DockerRenderer(StepwiseRenderer):
 
     async def render(self, piece_dir: Path, out_dir: Path, work: Path) -> RunResult:
         return await self._run(
-            ["python", "/app/render_piece.py", "/in", "--out", "/out"], piece_dir, out_dir, self.s.render_timeout_s
+            ["python", "/app/render_piece.py", "/in", "--out", "/out", "--timeout", f"{self.s.render_piece_timeout_s:g}"],
+            piece_dir, out_dir, self.s.render_timeout_s
         )
 
 

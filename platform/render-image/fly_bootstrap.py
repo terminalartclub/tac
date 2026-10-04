@@ -132,7 +132,10 @@ def upload(url: str, data: bytes) -> None:
 def main() -> int:
     in_url, out_url = os.environ["TAC_IN_URL"], os.environ["TAC_OUT_URL"]
     check_t = float(os.environ.get("TAC_CHECK_TIMEOUT", "60"))
-    render_t = float(os.environ.get("TAC_RENDER_TIMEOUT", "240"))
+    render_t = float(os.environ.get("TAC_RENDER_TIMEOUT", "300"))  # outer: kill render_piece.py after this
+    # inner: render_piece.py's own --timeout, a margin earlier, so it exits 124 with a message instead of being
+    # killed silently (an API that predates TAC_RENDER_PIECE_TIMEOUT: derive it)
+    piece_t = float(os.environ.get("TAC_RENDER_PIECE_TIMEOUT", render_t - min(20.0, render_t / 4)))
     result: dict = {"check": None, "render": None, "error": None}
     try:
         fetch_input(in_url)
@@ -146,7 +149,8 @@ def main() -> int:
             result["check"] = run_isolated([sys.executable, "/app/check_piece.py", str(IN)], check_t)
             if result["check"]["returncode"] == 0:
                 result["render"] = run_isolated(
-                    [sys.executable, "/app/render_piece.py", str(IN), "--out", str(OUT)], render_t
+                    [sys.executable, "/app/render_piece.py", str(IN), "--out", str(OUT), "--timeout", f"{piece_t:g}"],
+                    render_t
                 )
     except Exception as e:  # noqa: BLE001 - report, don't crash silently
         result["error"] = f"bootstrap: {type(e).__name__}: {e}"[:500]

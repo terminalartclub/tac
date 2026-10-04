@@ -299,13 +299,14 @@ decision. `audit_log` keeps the durable record.
 | `TAC_RENDERER` | `local` | `local` = `run_limited` subprocess (not a sandbox; dev only); `docker` = one isolated container per check/render; `fly-machine` = one throwaway Fly Machine per job (prod) |
 | `TAC_RENDER_IMAGE` | `tac-render:local` | image for `docker`; build with `render-image/build.sh` |
 | `TAC_FLY_RENDER_APP` / `TAC_FLY_RENDER_IMAGE` / `TAC_FLY_RENDER_REGION` | `tac-render` / unset / unset | `fly-machine` backend: app, `registry.fly.io/tac-render:<tag>`, region |
+| `TAC_FLY_RENDER_CPU_KIND` / `TAC_FLY_RENDER_CPUS` / `TAC_FLY_RENDER_MEMORY_MB` | `performance` / `1` / `2048` | render VM guest (DEPLOY.md, Cost); fallback `shared` / `2` |
 | `FLY_API_TOKEN` | unset | `fly-machine` only: deploy token scoped to the tac-render app (see DEPLOY.md) |
 | `TAC_AUTH` | `dev` | `dev` (handle form; loopback `TAC_HOST` and base URL only) or `github` (OAuth; see TODOs in `auth.py`); any other value refuses to start |
 | `TAC_GITHUB_CLIENT_ID` / `TAC_GITHUB_CLIENT_SECRET` | | required with `TAC_AUTH=github`: startup refuses without both, naming the missing secret |
 | `TAC_ADMIN_TOKEN` | unset | admin disabled (403) when unset |
 | `TAC_TOOLS_DIR` | `<repo>/tools` | where `check_piece.py` / `render_piece.py` live |
 | `TAC_TOOLS_PYTHON` | this venv's python | interpreter for the tools (needs rich, Pillow, fonttools) |
-| `TAC_RENDER_TIMEOUT_S` | `240` | wall clock per render |
+| `TAC_RENDER_TIMEOUT_S` | `300` | wall clock per render: each backend kills render_piece.py after this; render_piece.py's own `--timeout` is 20 s less (280), so it fires first with "render did not finish within 280 s" |
 | `TAC_RENDER_CONCURRENCY` | `1` | parallel renders (each is ~1 CPU-bound core) |
 | `TAC_THEMES_FILE` | `platform/themes.json` | `{"2026-W40": {"title", "blurb"}}`, upserted at startup |
 | `ANTHROPIC_API_KEY` | unset | enables automod; never passed to renders |

@@ -85,6 +85,15 @@ async def test_render_failure_and_timeout(tmp_path):
         assert st["status"] == "rejected" and st["reasons"] == ["render timed out after 2 s"]
 
 
+async def test_render_piece_own_timeout_is_reported_clearly(tmp_path):
+    async with make_ctx(tmp_path, render_timeout_s=2.0) as ctx:  # inner --timeout = 1.5 s, outer kill = 2 s
+        token = await ctx.login("alex")
+        sub = (await ctx.submit(token, piece=b"# TEST:render-inner-timeout\n")).json()
+        st = await ctx.wait(token, sub["id"])
+        assert st["status"] == "rejected"
+        assert st["reasons"] == ["render did not finish within 2 s on the render machine; please resubmit"]
+
+
 async def test_automod_unsafe_rejects(tmp_path):
     client = fake_claude(UNSAFE)
     async with make_ctx(tmp_path, automod_client=client) as ctx:

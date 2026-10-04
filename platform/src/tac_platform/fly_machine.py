@@ -36,6 +36,7 @@ log = logging.getLogger("tac.fly")
 
 API = "https://api.machines.dev"
 WAIT_STEP_S = 60  # the wait endpoint blocks at most 60 s per call
+FLY_OVERHEAD_S = 120  # VM boot + image fetch on a cold host + tarball fetch/upload, on top of check + render
 MAX_OUT_TAR = 64 * 1024 * 1024
 MAX_IN_TAR = 8 * 1024 * 1024
 PRESIGN_TTL_S = 600
@@ -79,12 +80,15 @@ def _run_result(d: dict | None) -> RunResult | None:
 
 class FlyMachineRenderer:
     def __init__(self, settings: Settings, store: MediaStore, transport: httpx.AsyncBaseTransport | None = None,
-                 api_base: str = API, wait_total_s: float = 300.0) -> None:
+                 api_base: str = API, wait_total_s: float | None = None) -> None:
         self.s = settings
         self.store = store
         self.transport = transport
         self.api_base = api_base
-        self.wait_total_s = wait_total_s
+        # The whole VM: boot, fetch, isolation probe, check, render, upload. Larger than the in-VM steps' sum,
+        # so render_piece's own timeout (then the bootstrap's) fires first and reports, before we give up.
+        self.wait_total_s = wait_total_s if wait_total_s is not None else (
+            settings.check_timeout_s + settings.render_timeout_s + FLY_OVERHEAD_S)
 
     def _client(self) -> httpx.AsyncClient:
         token = os.environ.get("FLY_API_TOKEN", "")
@@ -111,14 +115,16 @@ class FlyMachineRenderer:
                 "image": self.s.fly_render_image,
                 "auto_destroy": True,
                 "restart": {"policy": "no"},
-                "guest": {"cpu_kind": "shared", "cpus": 1, "memory_mb": 2048},
+                "guest": {"cpu_kind": self.s.fly_render_cpu_kind, "cpus": self.s.fly_render_cpus,
+                          "memory_mb": self.s.fly_render_memory_mb},
                 "init": {"exec": ["/usr/local/bin/python", "/app/fly_bootstrap.py"]},
                 # no secrets: two presigned URLs (one object each, 10 min) and timeouts
                 "env": {
                     "TAC_IN_URL": in_url,
                     "TAC_OUT_URL": out_url,
                     "TAC_CHECK_TIMEOUT": str(int(self.s.check_timeout_s)),
-                    "TAC_RENDER_TIMEOUT": str(int(self.s.render_timeout_s)),
+                    "TAC_RENDER_TIMEOUT": str(int(self.s.render_timeout_s)),  # outer: kill render_piece.py
+                    "TAC_RENDER_PIECE_TIMEOUT": str(int(self.s.render_piece_timeout_s)),  # inner: its --timeout
                 },
                 "services": [],  # nothing listens; no public IP is allocated to the tac-render app
                 "dns": {"skip_registration": True},

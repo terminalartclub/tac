@@ -28,10 +28,12 @@ Endpoints are from the Machines API OpenAPI spec (`https://docs.fly.io/api/machi
 tar piece_dir ─▶ store.put render-io/<job>/in.tar.gz ─▶ presign GET in, PUT out (10 min each)
   ─▶ POST https://api.machines.dev/v1/apps/tac-render/machines
        {name, skip_service_registration: true, config: {image, auto_destroy: true, restart: {policy: "no"},
-        guest: {cpu_kind: "shared", cpus: 1, memory_mb: 2048}, init: {exec: [python, /app/fly_bootstrap.py]},
-        env: {TAC_IN_URL, TAC_OUT_URL, TAC_CHECK_TIMEOUT, TAC_RENDER_TIMEOUT}, services: [],
+        guest: {cpu_kind: "performance", cpus: 1, memory_mb: 2048}  (TAC_FLY_RENDER_CPU_KIND/_CPUS/_MEMORY_MB),
+        init: {exec: [python, /app/fly_bootstrap.py]},
+        env: {TAC_IN_URL, TAC_OUT_URL, TAC_CHECK_TIMEOUT, TAC_RENDER_TIMEOUT (300),
+              TAC_RENDER_PIECE_TIMEOUT (280: render_piece.py --timeout, fires first)}, services: [],
         dns: {skip_registration: true}, metadata: {tac_job}}}
-  ─▶ GET …/machines/<id>/wait?state=stopped&instance_id=…&timeout≤60, looped up to 300 s (408 → keep waiting, 404 → auto-destroyed = stopped)
+  ─▶ GET …/machines/<id>/wait?state=stopped&instance_id=…&timeout≤60, looped up to check + render + 120 s (480 s by default; 408 → keep waiting, 404 → auto-destroyed = stopped)
   ─▶ store.get out.tar.gz ─▶ safe extract (tarfile "data" filter, out/* regular files ≤ 25 MB, result.json)
   ─▶ finally, on every path incl. cancel: DELETE …/machines/<id>?force=true ; delete render-io/<job>/
 ```
@@ -91,9 +93,10 @@ fly deploy -a tac-api
 
 ## Cost
 
-Rates verified from docs.fly.io/about/pricing:
-- shared-cpu-1x 512 MB: $3.69/mo
-- shared-cpu-1x 2 GB: $13.39/mo
+Rates verified from docs.fly.io/about/pricing (iad, 2026-10-04):
+- shared-cpu-1x 512 MB: $3.69/mo; shared-cpu-1x 1 GB: $6.70/mo
+- shared-cpu-2x 2 GB: $13.39/mo (an earlier version of this table mislabelled it shared-cpu-1x 2 GB)
+- performance-1x 2 GB: $33.00/mo = $0.0452/h = $0.0000126/s
 - volumes: $0.15/GB-mo
 - egress: $0.02/GB (North America / Europe)
 
@@ -103,12 +106,20 @@ Machines bill per second while running.
 |---|---|---|
 | tac-api Machine | shared-cpu-1x 512 MB, always on | 3.69 |
 | tac-api volume | 1 GB | 0.15 |
-| render Machines | shared-cpu-1x 2 GB = $13.39/730 h = $0.0183/h. ~40 s per job incl. boot means ~$0.0002 per render | 0.20 per 1,000 renders |
+| render Machines | performance-1x 2 GB at $0.0000126/s. A job is boot + check + render: ~80 s (a 60 s render) to ~150 s (130 s) → **$0.0010–0.0019 per render** | 1.0–1.9 per 1,000 renders |
 | egress | gallery media. 300 pieces × ~0.9 MB preview × 50 views = ~13.5 GB | ~0.27 |
-| **Fly total** | 1,000 renders/mo | **~$4.3** |
+| **Fly total** | 1,000 renders/mo | **~$5.1–6.0** |
 | automod (Anthropic, not Fly) | Sonnet 5.5, effort low, thinking off, ≤ 300 output tokens: est. ~$0.010–0.014 per submission | ~10–14 per 1,000; hard-capped by `TAC_AUTOMOD_BUDGET_USD` (default 10) |
 
 - Registry storage and image pulls are not in the verified price list above. Check them on the pricing page.
+- Why performance, not shared: the render is one CPU-bound thread for 1-2 min, and a shared vCPU is throttled to
+  a fraction of a core under sustained load. A 600-frame piece that renders in 37 s on an M-series Mac took
+  129.8 s on shared-cpu-1x (3.5x) and hit the old 120 s limit. Shared-cpu-1x would be ~$0.0003 per render but
+  that slow; performance-1x costs ~5x more per second and should finish the same piece in ~50-70 s.
+- If `performance` is refused for the tac-render org or region (the first render fails with a Machines API
+  error naming the guest), fall back with `fly secrets`/`[env]`: `TAC_FLY_RENDER_CPU_KIND=shared
+  TAC_FLY_RENDER_CPUS=2` (shared-cpu-2x 2 GB, $13.39/mo = $0.0000051/s, ~$0.0008 per 150 s job). A second
+  shared vCPU doesn't speed up one thread, but it doubles the burst quota before throttling.
 - Automod is capped at `TAC_AUTOMOD_BUDGET_USD` a month; past it, pieces go to human review (README, Automod budget).
 
 ## Not built (by decision)

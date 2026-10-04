@@ -138,11 +138,13 @@ async def test_happy_path_create_wait_destroy(tmp_path, monkeypatch):
         await cm.__aexit__(None, None, None)
     cfg = api.created["config"]
     assert cfg["auto_destroy"] is True and cfg["restart"] == {"policy": "no"}
-    assert cfg["guest"] == {"cpu_kind": "shared", "cpus": 1, "memory_mb": 2048}
+    assert cfg["guest"] == {"cpu_kind": "performance", "cpus": 1, "memory_mb": 2048}  # dedicated core by default
     assert cfg["services"] == [] and cfg["dns"] == {"skip_registration": True}
     assert cfg["image"] == "registry.fly.io/tac-render:test"
     assert cfg["init"]["exec"] == ["/usr/local/bin/python", "/app/fly_bootstrap.py"]
-    assert set(cfg["env"]) == {"TAC_IN_URL", "TAC_OUT_URL", "TAC_CHECK_TIMEOUT", "TAC_RENDER_TIMEOUT"}
+    assert set(cfg["env"]) == {"TAC_IN_URL", "TAC_OUT_URL", "TAC_CHECK_TIMEOUT", "TAC_RENDER_TIMEOUT",
+                               "TAC_RENDER_PIECE_TIMEOUT"}
+    assert (cfg["env"]["TAC_RENDER_TIMEOUT"], cfg["env"]["TAC_RENDER_PIECE_TIMEOUT"]) == ("300", "280")
     blob = json.dumps(api.created)
     assert TOKEN not in blob and "sk-must-not-leak" not in blob and "test-admin-token" not in blob
     assert api.auth == {f"Bearer {TOKEN}"}
