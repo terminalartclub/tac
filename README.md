@@ -9,7 +9,7 @@ install plugin → /tac:login (once) → /tac:create → /tac:play → /tac:subm
 
 ## For contributors
 
-**Install.** Requirements: **uv** (`brew install uv`, or [docs.astral.sh/uv](https://docs.astral.sh/uv/getting-started/installation/)), **Python 3.10+** (uv fetches one when the machine's is older), Claude Code; `ffmpeg` only if you want mp4 reels. Without uv every `/tac:` command stops with one line saying so.
+**Install.** Requirements: **uv** (`brew install uv`, or [docs.astral.sh/uv](https://docs.astral.sh/uv/getting-started/installation/)), **Python 3.10+** (uv fetches one when the machine's is older), Claude Code; `ffmpeg` only if you want mp4 reels. Without uv every `/tac:` command stops with one line saying so. The plugin runs uv with `--isolated --no-config`, so it ignores any `.venv` and any uv config file (`uv.toml`, `[tool.uv]`, your own `~/.config/uv/uv.toml`); to use a package mirror, set it in the environment instead (`UV_INDEX_URL`, `UV_DEFAULT_INDEX`).
 
 ```bash
 claude plugin marketplace add terminalartclub/tac   # or a local checkout: ./tac-community
