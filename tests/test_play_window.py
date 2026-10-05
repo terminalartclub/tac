@@ -276,7 +276,7 @@ def test_iterm_splits_right_of_the_session_that_ran_it():
     opened, why = termwin.open_play_window(["tac", "play", "/p.py"], env=ITERM_ENV, run=run, **MACI)
     assert opened == termwin.Opened("iTerm", (60, 50), where="pane") and why == ""
     script = run.calls[0][2]
-    assert f'if (unique id of s) is "{UUID}" then' in script  # that session, not whichever window is current
+    assert f'if (unique id of session k of tab j of window i) is "{UUID}" then' in script  # that session
     assert "split vertically with default profile" in script and "create window" not in script
     assert f"write text {termwin.quote_applescript(termwin.beside_command(['tac', 'play', '/p.py']))}" in script
     assert "tell s1 to close" in script  # typing failed: the new pane is closed, not left empty
@@ -436,3 +436,57 @@ def test_the_hold_holds_only_on_a_real_failure(shell, rc, held, tmp_path):
     assert ("press Enter to close" in r.stdout) is held
     if held:
         assert f"(exit {rc})" in r.stdout
+
+
+ITERM_SPLIT_SNAPSHOT = """tell application "iTerm"
+  set s0 to missing value
+  set w0 to missing value
+  try
+    repeat with i from 1 to (count of windows)
+      repeat with j from 1 to (count of tabs of window i)
+        repeat with k from 1 to (count of sessions of tab j of window i)
+          try
+            if (unique id of session k of tab j of window i) is "0A1B2C3D-4E5F-6A7B-8C9D-0E1F2A3B4C5D" then
+              set s0 to session k of tab j of window i
+              set w0 to window i
+            end if
+          end try
+        end repeat
+      end repeat
+    end repeat
+  end try
+  if s0 is missing value then
+    try
+      set w0 to current window
+      set s0 to current session of w0
+    end try
+  end if
+  if s0 is missing value then error "no iTerm2 window to open a pane in" number -1728
+  tell s0
+    set s1 to (split vertically with default profile)
+  end tell
+  try
+    tell s1
+      write text "exec sh -c '\\"$0\\" \\"$@\\"; s=$?; if [ $s -ne 0 ] && [ $s -ne 130 ]; then echo; printf \\"[tac play stopped with an error (exit %s): press Enter to close] \\" $s; read _; fi' tac play /p.py"
+      return ((columns as text) & "x" & (rows as text))
+    end tell
+  on error e number n
+    tell s1 to close
+    error e number n
+  end try
+end tell"""
+
+
+def test_iterm_split_script_snapshot():
+    """The exact script, after iTerm2 3.7.3 refused `contents of item 1 of every window` (-1728) live: index loops,
+    every read in a try, no `contents of`, the current session when the id isn't found."""
+    script = termwin.iterm_beside_script(termwin.beside_command(["tac", "play", "/p.py"]), "split", UUID)
+    assert script == ITERM_SPLIT_SNAPSHOT
+    assert "contents of" not in script and " in windows" not in script
+
+
+def test_iterm_tab_script_uses_the_same_lookup():
+    script = termwin.iterm_beside_script(termwin.beside_command(["tac", "play", "/p.py"]), "tab", UUID)
+    lookup = "\n".join(termwin.iterm_lookup_lines(UUID))
+    assert lookup in script and "contents of" not in script
+    assert "  tell w0\n    set t1 to (create tab with default profile)\n  end tell" in script

@@ -96,31 +96,48 @@ def iterm_session(env: Mapping[str, str]) -> str | None:
     return m.group(1).upper() if m else None
 
 
-def iterm_beside_script(line: str, where: str, session: str | None) -> str:
-    """A split to the right of `session` (else the current session of the current window), or a new tab in its
-    window, typing `line` (beside_command) into the new session's own shell (its PATH, so uv is found). If the
-    typing fails, the new session is closed: no empty pane is left behind. iTerm2 adds a new tab at the end of the window's tabs (no position in its API) and
-    sizes a split by halving the session (setting columns/rows would resize the whole window: not done)."""
-    lines = ['tell application "iTerm"', "  set s0 to missing value", "  set w0 to missing value"]
+def iterm_lookup_lines(session: str | None) -> list[str]:
+    """Find the session that ran tacctl (s0) and its window (w0). Index loops, each read in its own try: iTerm2
+    3.7.3 refuses `contents of` a `repeat with w in windows` item (-1728, seen live), and a window or session
+    that goes away mid-loop must not fail the lookup. Not found (or no id): the current session of the current
+    window. No window at all: an error, and the caller opens a new window instead."""
+    lines = ["  set s0 to missing value", "  set w0 to missing value"]
     if session:
         lines += [
-            "  repeat with w in windows",
-            "    repeat with t in tabs of w",
-            "      repeat with s in sessions of t",
-            f"        if (unique id of s) is {quote_applescript(session)} then",
-            "          set s0 to contents of s",
-            "          set w0 to contents of w",
-            "        end if",
+            "  try",
+            "    repeat with i from 1 to (count of windows)",
+            "      repeat with j from 1 to (count of tabs of window i)",
+            "        repeat with k from 1 to (count of sessions of tab j of window i)",
+            "          try",
+            f"            if (unique id of session k of tab j of window i) is {quote_applescript(session)} then",
+            "              set s0 to session k of tab j of window i",
+            "              set w0 to window i",
+            "            end if",
+            "          end try",
+            "        end repeat",
             "      end repeat",
             "    end repeat",
-            "  end repeat",
+            "  end try",
         ]
     lines += [
         "  if s0 is missing value then",
-        "    set w0 to current window",
-        "    set s0 to current session of w0",
+        "    try",
+        "      set w0 to current window",
+        "      set s0 to current session of w0",
+        "    end try",
         "  end if",
+        '  if s0 is missing value then error "no iTerm2 window to open a pane in" number -1728',
     ]
+    return lines
+
+
+def iterm_beside_script(line: str, where: str, session: str | None) -> str:
+    """A split to the right of `session` (else the current session of the current window), or a new tab in its
+    window, typing `line` (beside_command) into the new session's own shell (its PATH, so uv is found). If the
+    typing fails, the new session is closed: no empty pane is left behind. iTerm2 adds a new tab at the end of
+    the window's tabs (no position in its API) and sizes a split by halving the session (setting columns/rows
+    would resize the whole window: not done)."""
+    lines = ['tell application "iTerm"'] + iterm_lookup_lines(session)
     if where == "split":
         lines += ["  tell s0", "    set s1 to (split vertically with default profile)", "  end tell"]
     else:
