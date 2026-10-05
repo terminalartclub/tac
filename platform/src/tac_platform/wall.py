@@ -1,7 +1,10 @@
 """The wall, for `/tac:wall`: this week's pieces as pre-rendered terminal frames. Data only, never code.
 
-  GET /v1/wall.json[?picks=1]           the playlist: this ISO week's published pieces, newest first, that have
-                                        frames; none this week (or ?picks=1) -> the picks
+  GET /v1/wall.json[?picks=1]           the playlist, newest first, only pieces with frames: this ISO week's
+                                        ("week"); under TOP_UP_BELOW of them -> topped up with the RECENT newest
+                                        from before this week ("week+recent"); none this week -> the picks
+                                        ("picks"); no picks either -> the RECENT newest ("recent"). ?picks=1 ->
+                                        the picks only (empty if there are none)
   GET /v1/pieces/{handle}/{slug}/frames the piece's frames.cells.gz (wallframes.py), as the render VM made it
 
 Both read-only, rate-limited per client, with a strong ETag (304 on If-None-Match). Takedowns stick: the frames
@@ -26,6 +29,8 @@ router = APIRouter()
 HANDLE_RE = re.compile(r"[a-z0-9-]{2,24}")
 SLUG_RE = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 MAX_ENTRIES = 200
+RECENT = 20  # the fallback / top-up: newest visible pieces from before this week
+TOP_UP_BELOW = 5  # a week with fewer pieces than this is topped up with RECENT
 PLAYLIST_PER_HOUR = 120
 FRAMES_PER_HOUR = 600
 PLAYLIST_CACHE = "public, max-age=300, stale-while-revalidate=600"
@@ -59,14 +64,24 @@ VISIBLE = ("s.status = 'published' AND s.hidden = 0 AND u.suspended_at IS NULL A
 
 async def playlist(request: Request, picks: bool) -> dict:
     db = request.app.state.db
+    now = datetime.now(UTC)
+    since = week_start(now)  # once per request: the week and "before the week" never overlap, even at midnight
     cols = ("SELECT u.handle, s.slug, s.title, s.meta_json, s.frames_json FROM submissions s"
             " JOIN users u ON u.id = s.user_id WHERE " + VISIBLE)
-    week = []
-    if not picks:
-        week = await db.fetchall(cols + " AND s.published_at >= ? ORDER BY s.published_at DESC, s.rowid DESC LIMIT ?",
-                                 (week_start(), MAX_ENTRIES))
-    rows, source = (week, "week") if week else (
-        await db.fetchall(cols + " AND s.pick = 1 ORDER BY s.published_at DESC, s.rowid DESC LIMIT ?", (MAX_ENTRIES,)), "picks")
+    newest = " ORDER BY s.published_at DESC, s.rowid DESC LIMIT ?"
+    if picks:
+        rows, source = await db.fetchall(cols + " AND s.pick = 1" + newest, (MAX_ENTRIES,)), "picks"
+    else:
+        rows = await db.fetchall(cols + " AND s.published_at >= ?" + newest, (since, MAX_ENTRIES))
+        source = "week"
+        if not rows:
+            rows = await db.fetchall(cols + " AND s.pick = 1" + newest, (MAX_ENTRIES,))
+            source = "picks"
+        if (source == "week" and len(rows) < TOP_UP_BELOW) or not rows:
+            # before this week: disjoint from the week's rows by construction, so nothing to dedupe
+            recent = await db.fetchall(cols + " AND s.published_at < ?" + newest, (since, RECENT))
+            if recent:
+                rows, source = rows + recent, ("week+recent" if rows else "recent")
     pieces = []
     for r in rows:
         meta, frames = json.loads(r["meta_json"]), json.loads(r["frames_json"])
@@ -76,7 +91,7 @@ async def playlist(request: Request, picks: bool) -> dict:
             "frames": {k: frames[k] for k in ("bytes", "cols", "rows", "fps", "frames", "loop_ms")},
             "etag": '"' + frames["sha256"][:32] + '"',
         })
-    iso = datetime.now(UTC).isocalendar()
+    iso = now.isocalendar()
     return {"week": f"{iso[0]}-W{iso[1]:02d}", "source": source, "pieces": pieces}
 
 

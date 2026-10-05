@@ -99,9 +99,119 @@ async def test_no_pieces_this_week_means_the_picks(ctx):
         assert wall["source"] == "picks" and [p["slug"] for p in wall["pieces"]] == [s1]
     await db.execute("UPDATE submissions SET published_at = ? WHERE id = ?", (week_start(), sub_new))
     async with ctx.client() as c:
-        assert [p["slug"] for p in (await c.get("/v1/wall.json")).json()["pieces"]] == [s2]  # the week
+        wall = (await c.get("/v1/wall.json")).json()  # the week, one piece: topped up with the older one
+        assert wall["source"] == "week+recent" and [p["slug"] for p in wall["pieces"]] == [s2, s1]
         forced = (await c.get("/v1/wall.json?picks=1")).json()
         assert forced["source"] == "picks" and [p["slug"] for p in forced["pieces"]] == [s1]
+
+
+LAST_WEEK = "2026-01-0{}T10:00:00+00:00"  # any day long before this week; {} orders them
+
+
+async def _aged(ctx, *subs_newest_first):
+    """Move pieces before this week, keeping the given order newest first."""
+    for n, sub_id in enumerate(subs_newest_first):
+        await ctx.app.state.db.execute("UPDATE submissions SET published_at = ? WHERE id = ?",
+                                       (LAST_WEEK.format(9 - n), sub_id))
+
+
+async def test_a_week_rollover_with_no_new_pieces_and_no_picks_plays_the_recent_ones(ctx, monkeypatch):
+    token = await ctx.login("alex")
+    a = await _published(ctx, token=token, title="One")
+    b = await _published(ctx, token=token, title="Two")
+    await _aged(ctx, b[1], a[1])  # Monday morning: everything is last week's, nothing is a pick
+    async with ctx.client() as c:
+        wall = (await c.get("/v1/wall.json")).json()
+        assert wall["source"] == "recent" and [p["slug"] for p in wall["pieces"]] == [b[3], a[3]]
+        assert all(p["frames"]["frames"] == 3 and p["etag"] for p in wall["pieces"])
+        forced = (await c.get("/v1/wall.json?picks=1")).json()  # asked for picks: only picks, none yet
+        assert forced == {**forced, "source": "picks", "pieces": []}
+    from tac_platform import wall as wall_mod
+
+    monkeypatch.setattr(wall_mod, "RECENT", 1)  # capped, newest first
+    async with ctx.client(ip="10.0.0.2") as c:
+        assert [p["slug"] for p in (await c.get("/v1/wall.json")).json()["pieces"]] == [b[3]]
+
+
+async def test_a_thin_week_is_topped_up_with_recent_pieces_after_its_own(ctx):
+    token = await ctx.login("alex")
+    old1, old2, wk1, wk2 = [await _published(ctx, token=token, title=t) for t in ("Old A", "Old B", "Wk A", "Wk B")]
+    await _aged(ctx, old2[1], old1[1])
+    async with ctx.client() as c:
+        wall = (await c.get("/v1/wall.json")).json()
+    assert wall["source"] == "week+recent"
+    assert [p["slug"] for p in wall["pieces"]] == [wk2[3], wk1[3], old2[3], old1[3]]  # week first, no repeats
+
+
+async def test_a_full_week_is_not_topped_up(ctx, monkeypatch):
+    from tac_platform import wall as wall_mod
+
+    token = await ctx.login("alex")
+    old, wk = [await _published(ctx, token=token, title=t) for t in ("Old", "Wk")]
+    await _aged(ctx, old[1])
+    monkeypatch.setattr(wall_mod, "TOP_UP_BELOW", 1)  # one piece this week is "enough"
+    async with ctx.client() as c:
+        wall = (await c.get("/v1/wall.json")).json()
+    assert wall["source"] == "week" and [p["slug"] for p in wall["pieces"]] == [wk[3]]
+
+
+async def test_hidden_suspended_and_deleted_pieces_never_reach_recent_or_the_top_up(ctx):
+    tok_a, tok_b, tok_c = await ctx.login("alex"), await ctx.login("bea"), await ctx.login("cyd")
+    keep = await _published(ctx, token=tok_a, title="Keep")
+    hidden = await _published(ctx, token=tok_a, title="Hidden")
+    deleted = await _published(ctx, token=tok_a, title="Deleted")
+    suspended = await _published(ctx, handle="bea", token=tok_b, title="Suspended")
+    await _aged(ctx, suspended[1], deleted[1], hidden[1], keep[1])
+    async with ctx.admin() as a:
+        assert (await a.post(f"/v1/admin/pieces/{hidden[2]}/{hidden[3]}/hide", json={"reason": "DMCA"})).status_code == 200
+        assert (await a.post(f"/v1/admin/pieces/{deleted[2]}/{deleted[3]}/delete",
+                             json={"reason": "DMCA-2"})).status_code == 200
+        assert (await a.post(f"/v1/admin/users/{suspended[2]}/suspend", json={"reason": "spam"})).status_code == 200
+    async with ctx.client() as c:
+        wall = (await c.get("/v1/wall.json")).json()
+        assert wall["source"] == "recent" and [p["slug"] for p in wall["pieces"]] == [keep[3]]
+    week = await _published(ctx, handle="cyd", token=tok_c, title="This Week")  # top-up path: same filter
+    async with ctx.client(ip="10.0.0.2") as c:
+        wall = (await c.get("/v1/wall.json")).json()
+        assert wall["source"] == "week+recent" and [p["slug"] for p in wall["pieces"]] == [week[3], keep[3]]
+        for gone in (hidden, deleted, suspended):
+            assert (await c.get(f"/v1/pieces/{gone[2]}/{gone[3]}/frames")).status_code == 404
+
+
+@pytest.mark.parametrize("arrange", ["recent", "week+recent"])
+async def test_the_0_1_3_plugin_parser_takes_the_new_sources(ctx, arrange, tmp_path):
+    """The plugin as shipped in 0.1.3 checks `source` against ("week", "picks") and maps anything else to
+    "week" (lib/wall.py parse_playlist); `source` is never shown or branched on, so the new values need no
+    plugin release. This runs that parser, and its cache round trip, on the platform's real response."""
+    import importlib.util
+    import sys
+    from pathlib import Path
+
+    lib = Path(__file__).resolve().parents[2] / "plugins" / "tac-studio" / "lib"
+    sys.path.insert(0, str(lib))
+    try:
+        spec = importlib.util.spec_from_file_location("tac_plugin_wall", lib / "wall.py")
+        plugin = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(plugin)
+    finally:
+        sys.path.remove(str(lib))
+    token = await ctx.login("alex")
+    old = await _published(ctx, token=token, title="Old")
+    await _aged(ctx, old[1])
+    if arrange == "week+recent":
+        await _published(ctx, token=token, title="New")
+    async with ctx.client() as c:
+        body = (await c.get("/v1/wall.json")).content
+    sent = json.loads(body)
+    assert sent["source"] == arrange
+    got = plugin.parse_playlist(body)
+    assert got["source"] == "week" and got["week"] == sent["week"]
+    assert [(p["handle"], p["slug"], p["etag"]) for p in got["pieces"]] == \
+        [(p["handle"], p["slug"], p["etag"]) for p in sent["pieces"]]
+    cache = plugin.Cache(tmp_path / "wall")
+    cache.save_playlist(got, "https://api.example")
+    again = cache.load_playlist()
+    assert [p["slug"] for p in again["pieces"]] == [p["slug"] for p in sent["pieces"]]
 
 
 async def test_the_wall_orders_newest_first(ctx):
