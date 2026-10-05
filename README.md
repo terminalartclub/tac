@@ -241,6 +241,6 @@ studio. Their token counts are subagent totals including revision passes.
 ## Development
 
 ```bash
-uv run --with pytest --with rich --with Pillow --with fonttools python3 -m pytest -q
+uv run --with pytest --with pyte --with rich --with Pillow --with fonttools python3 -m pytest -q
 claude plugin validate . && claude plugin validate ./plugins/tac-studio
 ```

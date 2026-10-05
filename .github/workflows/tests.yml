@@ -22,5 +22,5 @@ jobs:
           python-version: "3.12"
       - run: |
           sudo apt-get install -y --no-install-recommends fonts-dejavu-core
-          python -m pip install --disable-pip-version-check pytest "rich>=13" "Pillow>=10" "fonttools>=4"
+          python -m pip install --disable-pip-version-check pytest pyte "rich>=13" "Pillow>=10" "fonttools>=4"
       - run: python -m pytest -q

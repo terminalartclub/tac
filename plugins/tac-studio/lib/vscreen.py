@@ -626,24 +626,100 @@ async def cmd_mp4(code: str, out: Path, cols: int, rows: int, fps: int | None, s
             f"{out.stat().st_size / 1e6:.1f}MB · loop {probe.loop_s:.2f}s")
 
 
+RESIZE_SETTLE_S = 0.1  # a drag sends a burst of SIGWINCH: redraw once the size has held this long
+FAST_FORWARD_S = 0.3  # after a resize, catch the restarted piece up to where it was, for at most this long
+
+
+class _Resized(Exception):
+    pass
+
+
 async def cmd_play(code: str, cols: int | None, rows: int | None) -> None:
+    """Plays live until Ctrl-C. A piece reads `width` and `height` once, when it starts, so when the terminal
+    changes size (SIGWINCH: a pane dragged, a window resized) the piece starts again at the new size, caught up
+    to where it was in its loop (fast-forwarded without drawing, for at most FAST_FORWARD_S), on a cleared
+    screen: no cells of the old size are left. Explicit --cols/--rows stay as given."""
+    import signal
+    import time
+
     from rich.live import Live
 
-    term = shutil.get_terminal_size()
-    cols, rows = cols or term.columns, rows or term.lines
+    fixed = cols, rows
     canvas = _Canvas()
     compiled = _compile(code)
     console = Console()
-    with Live(console=console, screen=True, auto_refresh=False) as live:
-        async def real_sleep(dt: float = 0) -> None:
-            live.update(Group(*canvas.buffer), refresh=True)
-            await asyncio.sleep(max(float(dt), 0.0))
-        while True:
-            canvas.clear()
-            ns = _namespace(canvas, real_sleep, cols, rows)
-            exec(compiled, ns)
-            await ns["__script__"]()
-            await asyncio.sleep(0.1)
+    state = {"winch": 0.0, "t": 0.0, "target": 0.0, "deadline": 0.0}
+
+    def size() -> tuple[int, int]:
+        term = shutil.get_terminal_size()
+        return fixed[0] or term.columns, fixed[1] or term.lines
+
+    def on_winch() -> None:
+        state["winch"] = time.monotonic()
+
+    loop = asyncio.get_running_loop()
+    try:
+        loop.add_signal_handler(signal.SIGWINCH, on_winch)
+    except (NotImplementedError, AttributeError, RuntimeError, ValueError):
+        pass  # no SIGWINCH here (Windows): the size is fixed for the run
+    try:
+        with Live(console=console, screen=True, auto_refresh=False) as live:
+            async def real_sleep(dt: float = 0) -> None:
+                dt = max(float(dt), 0.0)
+                if state["t"] < state["target"] and time.monotonic() < state["deadline"]:
+                    state["t"] += dt  # catching up after a resize: no drawing, no waiting
+                    return
+                if state["winch"]:
+                    if time.monotonic() - state["winch"] >= RESIZE_SETTLE_S:
+                        state["winch"] = 0.0
+                        raise _Resized
+                    # still being dragged: draw nothing at the old size, just wait out the step
+                else:
+                    live.update(Group(*canvas.buffer), refresh=True)
+                state["t"] += dt
+                await asyncio.sleep(dt)
+
+            resized = False  # this pass started after a resize
+            while True:
+                cols_now, rows_now = size()
+                canvas.clear()
+                ns = _namespace(canvas, real_sleep, cols_now, rows_now)
+                exec(compiled, ns)
+                try:
+                    await ns["__script__"]()
+                except (_Resized, KeyboardInterrupt, asyncio.CancelledError, _Runaway):
+                    if not sys.exc_info()[0] is _Resized:
+                        raise
+                    resized = True
+                    # restart at the new size, from where it was; a full repaint on a cleared screen
+                    state["target"], state["t"] = state["t"], 0.0
+                    state["deadline"] = time.monotonic() + FAST_FORWARD_S
+                    console.file.write("\x1b[2J\x1b[3J\x1b[H")
+                    console.file.flush()
+                    live.update(Group(), refresh=True)
+                    continue
+                except Exception as e:  # noqa: BLE001 - the piece's own error
+                    if not resized:
+                        raise  # it fails at the size it started with: tac play reports it as before
+                    # It ran before the resize and fails at this size (some assume 60-odd columns): say so,
+                    # and try again at the next size the pane is given.
+                    live.update(Text(f"this piece doesn't run at {cols_now}x{rows_now} ({type(e).__name__}): "
+                                     "widen the pane, or play it with --window"), refresh=True)
+                    while not state["winch"] or time.monotonic() - state["winch"] < RESIZE_SETTLE_S:
+                        await asyncio.sleep(0.05)
+                    state["winch"] = 0.0
+                    state["t"] = state["target"] = 0.0
+                    console.file.write("\x1b[2J\x1b[3J\x1b[H")
+                    console.file.flush()
+                    continue
+                resized = False
+                state["t"] = state["target"] = 0.0
+                await asyncio.sleep(0.1)
+    finally:
+        try:
+            loop.remove_signal_handler(signal.SIGWINCH)
+        except (NotImplementedError, AttributeError, RuntimeError, ValueError):
+            pass
 
 
 def main(argv: list[str] | None = None) -> int:
