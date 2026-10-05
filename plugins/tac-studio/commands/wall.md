@@ -1,6 +1,6 @@
 ---
 description: Watch this week's wall, piece after piece, in a pane beside Claude Code (or a window)
-argument-hint: "[--picks] [--seconds N] [--tab|--window]"
+argument-hint: "[--picks] [--seconds N] [--tab|--window] [--cells]"
 ---
 
 Run (Bash timeout 120000 ms):
@@ -16,6 +16,9 @@ Run (Bash timeout 120000 ms):
   `terminal art club` mark, links to the artist and the piece); a pane smaller than the piece shrinks it.
   Nobody's code runs on this machine: the platform renders every piece in its sandbox and sends the frames as
   data, fetched one piece at a time as it comes up.
+- In iTerm2, kitty and Ghostty each frame is drawn as a real image, like the gallery's previews, at any font
+  size (the terminal is asked first; anywhere else, under tmux, or if it doesn't answer: text cells, as before).
+  `--cells` forces text cells.
 - In iTerm2 (and Ghostty 1.3+) it plays in a **pane on the right** of this session; `--tab` or `--window` if
   the user asks; other terminals get a window. Tell the user what it printed (what's playing, how many pieces,
   where), and that Ctrl-C there stops it.

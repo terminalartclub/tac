@@ -26,7 +26,7 @@ labelled. `TAC_WORK` replaces both. `tacctl root` prints `~/tac-work`; `tacctl r
 | `/tac:login` | Device-code login to the TAC platform in your browser. The token goes in `~/.config/tac/credentials.json` (mode 600). It never touches your Claude credentials. |
 | `/tac:create [--sketch] [idea]` | Claude sketches 3 concepts, iterates on the virtual screen (renders, looks, critiques) and finishes `<name>.py` + `notes.md`. |
 | `/tac:play [name]` | Plays the piece live beside Claude Code: in iTerm2 a pane splits off to the right of the session Claude Code runs in, in Ghostty 1.3+ a split on the right; Ctrl-C stops it and closes the pane. `--tab` opens a tab instead (iTerm2 adds it at the end of the window's tabs), `--window` a new window (Ghostty's own in Ghostty; iTerm2 when installed, else Terminal, everywhere else on macOS; iTerm2 and Terminal windows open at the reel's 80×66). A pane or tab closes when the piece ends, and stays open with the error if it fails to start. Other terminals (Terminal.app, WezTerm, …) get a new window the same way, and Linux your terminal emulator's. Over SSH or without a display it prints the `tac play …` command to paste instead. No name lists your pieces. It also builds the local review page `~/tac-work/index.html` and prints its path (`--page` opens it). |
-| `/tac:wall [--picks] [--seconds N]` | **New in 0.1.3.** Watch this week's wall in your terminal like a screensaver: each published piece for N seconds (default 30) with a credit bar (`title · @handle · model`, and a `terminal art club` mark linking to the piece), then the next, looping; no pieces this week → the picks, no picks → the most recent; a week under 5 pieces is topped up with recent ones. Same pane/tab/window as `/tac:play`; Ctrl-C stops it. Never runs anyone's code: see [The wall in your terminal](#the-wall-in-your-terminal-tacwall). |
+| `/tac:wall [--picks] [--seconds N] [--cells]` | **New in 0.1.3.** Watch this week's wall in your terminal like a screensaver: each published piece for N seconds (default 30) with a credit bar (`title · @handle · model`, and a `terminal art club` mark linking to the piece), then the next, looping; no pieces this week → the picks, no picks → the most recent; a week under 5 pieces is topped up with recent ones. Same pane/tab/window as `/tac:play`; Ctrl-C stops it. Never runs anyone's code: see [The wall in your terminal](#the-wall-in-your-terminal-tacwall). |
 | `/tac:submit <name>` | Assembles `~/tac-work/<name>/submission/`, lints it locally (rejects never leave your machine), asks you to confirm you have the right to share it and that it copies no one else's characters, brands or logos, then uploads it and returns: the platform renders it (~1–2 min) and a person reviews it; `/tac:mine` shows where it is (`--wait` polls instead, up to `--wait-seconds N`, default 300). |
 | `/tac:mine` | Your submitted pieces: status (rendering · waiting for review · published with its link · rejected with the reasons, marked "not counted against your daily limit" when our side failed), total and 7-day views, a 28-day sparkline, the critique, and the reasons for any rejection. View totals are public on the site (anonymous, one per IP per piece per day). Unpublishing or deleting your account happens on the web only (terminalart.club/me). |
 | `/tac:logout` | Deletes the token. |
@@ -130,6 +130,9 @@ A Max plan typically needs a much smaller value than Pro. Measure, don't guess.
 recent before them; none yet this week: the picks; no picks either: the most recent; `--picks` for the picks
 anyway), in the same pane beside Claude Code as `/tac:play`. The pane's last row is always the credit bar:
 `title · @handle · model` and the `terminal art club` mark, both links (OSC 8) in terminals that support them.
+In iTerm2, kitty and Ghostty (0.1.5+) each frame is drawn as an image, rasterised locally from the same frames
+with the previews' renderer, so it looks like the gallery at any font size; everywhere else (and with `--cells`)
+it's drawn in text cells.
 
 - **Nobody's code runs on your machine.** The platform renders every piece in its sandboxed render VM, the
   same one that makes the previews, and keeps its frames as terminal cells (glyph, 24-bit colours). The plugin
@@ -172,6 +175,8 @@ plugins/tac-studio/
   lib/render_piece.py               preview/og/stats/process/frames ← tools/render_piece.py runs this
   lib/wallframes.py                 the wall's frames format (stdlib; byte-identical copy in platform/)
   lib/wall.py                       /tac:wall: playlist, frames cache, the pane player
+  lib/wallpix.py                    /tac:wall pixel mode: iTerm2 inline images, kitty graphics protocol
+  assets/tac-logo.png               the bar's logo in pixel mode (the site icon, 96 px)
   lib/tacctl.py  meta.py  notes.py  review.py  termwin.py  uvfind.py
   skills/tac-studio/SKILL.md, DNA.md
   commands/{create,play,wall,login,logout,submit,mine,style}.md

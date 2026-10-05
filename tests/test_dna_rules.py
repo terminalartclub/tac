@@ -71,6 +71,6 @@ def test_no_lint_enforces_palette_so_a_directed_full_colour_piece_passes(good) -
     assert check_dir(good) == []
 
 
-def test_plugin_version_is_0_1_4() -> None:
+def test_plugin_version_is_0_1_5() -> None:
     meta = json.loads((ROOT / "plugins" / "tac-studio" / ".claude-plugin" / "plugin.json").read_text())
-    assert meta["version"] == "0.1.4"
+    assert meta["version"] == "0.1.5"

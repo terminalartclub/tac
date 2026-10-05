@@ -1,6 +1,6 @@
 {
   "name": "tac",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Terminal Art Club studio: Claude makes a looping terminal-art animation on a virtual screen, iterates on it, and submits it to the community gallery.",
   "author": { "name": "Terminal Art Club" },
   "license": "MIT",
