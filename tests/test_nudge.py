@@ -46,8 +46,9 @@ def test_piece_pct_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
 def run_hook(tmp_path: Path, data: dict | None) -> str:
     uv_dir = tmp_path / "uvbin"  # uv is installed here (the missing-uv line has its own tests)
     uv_dir.mkdir(exist_ok=True)
-    (uv_dir / "uv").write_text("#!/bin/sh\n")
-    (uv_dir / "uv").chmod(0o755)
+    for tool in ("uv", "python3.12"):  # and a Python for it (the first-run line has its own tests)
+        (uv_dir / tool).write_text("#!/bin/sh\n")
+        (uv_dir / tool).chmod(0o755)
     env = {"XDG_CACHE_HOME": str(tmp_path), "XDG_CONFIG_HOME": str(tmp_path / "cfg"), "HOME": str(tmp_path),
            "PATH": f"{uv_dir}:/usr/bin:/bin", "CLAUDE_PLUGIN_DATA": str(tmp_path / "data")}
     if data is not None:
@@ -101,10 +102,21 @@ def test_hook_never_overwrites_existing_statusline_helper(tmp_path: Path) -> Non
     assert "\n" not in msg and "differs from this plugin's version" in msg and str(helper) in msg
 
 
-@pytest.mark.parametrize("script", ["nudge.py", "session_env.py"])
-def test_hook_makes_no_network_calls(script: str) -> None:
-    src = (SCRIPTS / script).read_text()
-    assert not any(m in src for m in ("urllib", "http", "socket", "requests", "subprocess"))
+@pytest.mark.parametrize("path", [SCRIPTS / "nudge.py", SCRIPTS / "session_env.py",
+                                  ROOT / "plugins" / "tac-studio" / "lib" / "uvfind.py"])
+def test_hook_makes_no_network_calls_and_runs_nothing(path: Path) -> None:
+    """Everything a SessionStart hook loads: no network module, no subprocess, no os.system/exec/spawn."""
+    import ast
+
+    tree = ast.parse(path.read_text())
+    banned = {"urllib", "http", "socket", "requests", "httpx", "subprocess", "asyncio", "multiprocessing"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            assert not {a.name.split(".")[0] for a in node.names} & banned, ast.dump(node)
+        elif isinstance(node, ast.ImportFrom):
+            assert (node.module or "").split(".")[0] not in banned, ast.dump(node)
+        elif isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == "os":
+            assert not (node.attr in {"system", "popen", "fork", "forkpty"} or node.attr.startswith(("exec", "spawn"))), node.attr
 
 
 @pytest.mark.parametrize("sid,written", [("d4eac668-7812-49a5-876a-0edb5cddbf89", True), ("x; rm -rf ~", False),

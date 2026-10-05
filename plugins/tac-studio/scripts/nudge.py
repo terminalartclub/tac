@@ -118,7 +118,9 @@ def uv_line() -> str | None:
         import uvfind
     except ImportError:
         return None
-    return None if uvfind.find_uv() else uvfind.MISSING
+    if uvfind.find_uv() is None:
+        return uvfind.MISSING
+    return None if uvfind.has_python310() else uvfind.FIRST_RUN  # uv is there, a Python for it may not be
 
 
 def main() -> int:

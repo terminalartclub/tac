@@ -49,7 +49,9 @@ def _worker_cmd() -> list[str]:
     uv = uvfind.find_uv()
     if uv is None:
         raise NoUv(uvfind.MISSING)
-    return [uv, "run", "-q", "--no-project", "--python", uvfind.PYTHON, *(a for d in UV_DEPS for a in ("--with", d)),
+    # --isolated, --no-config: no .venv, uv.toml or [tool.uv] from the cwd's ancestors (see bin/tacctl)
+    return [uv, "run", "-q", "--no-project", "--isolated", "--no-config", "--python", uvfind.PYTHON,
+            *(a for d in UV_DEPS for a in ("--with", d)),
             "python3", str(Path(__file__).resolve())]
 
 

@@ -13,7 +13,10 @@ if [ -z "$UV" ]; then
   exit 127
 fi
 # Pinned, and --no-project: run from a repo with its own pyproject.toml, uv would otherwise sync that
-# project (its deps and build hooks) first. --python >=3.10: a uv-managed Python when the machine's is older.
+# project (its deps and build hooks) first. --isolated: never a .venv found in the cwd or an ancestor (its
+# site-packages and .pth files would run here: a cloned repo could ship one). --no-config: no uv.toml or
+# [tool.uv] from the cwd's ancestors either (it could swap the package index under our pins).
+# --python >=3.10: a uv-managed Python when the machine's is older.
 # Bump the pins together with render_piece.py's.
-exec "$UV" run -q --no-project --python '>=3.10' --with 'rich==15.0.0' --with 'Pillow==12.3.0' --with 'fonttools==4.66.1' \
+exec "$UV" run -q --no-project --isolated --no-config --python '>=3.10' --with 'rich==15.0.0' --with 'Pillow==12.3.0' --with 'fonttools==4.66.1' \
   python3 "$LIB/vscreen.py" "$@"
