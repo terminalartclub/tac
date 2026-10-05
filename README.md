@@ -244,3 +244,7 @@ studio. Their token counts are subagent totals including revision passes.
 uv run --with pytest --with pyte --with rich --with Pillow --with fonttools python3 -m pytest -q
 claude plugin validate . && claude plugin validate ./plugins/tac-studio
 ```
+
+`tac play` debug log (off by default): `TAC_PLAY_DEBUG=/tmp/tac-play.log tac play <piece.py>` appends what the
+live player saw and did: resize signals and the pane size read, restarts (and their catch-up), the fallback to
+a cropped size, and the size of every frame written when it changes.

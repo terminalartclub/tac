@@ -26,6 +26,7 @@ import statistics
 import subprocess
 import sys
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -628,98 +629,199 @@ async def cmd_mp4(code: str, out: Path, cols: int, rows: int, fps: int | None, s
 
 RESIZE_SETTLE_S = 0.1  # a drag sends a burst of SIGWINCH: redraw once the size has held this long
 FAST_FORWARD_S = 0.3  # after a resize, catch the restarted piece up to where it was, for at most this long
+NOTE_HIDDEN = 0.25  # a cropped piece gets a one-line note when the pane hides more than this share of it
+ENTER = "\x1b[?1049h\x1b[?25l\x1b[?7l\x1b[2J"  # alternate screen, no cursor, no autowrap, cleared
+LEAVE = "\x1b[0m\x1b[?7h\x1b[?25h\x1b[?1049l"
 
 
 class _Resized(BaseException):  # a piece's own `except Exception:` around sleep() must not swallow it
     pass
 
 
+def _sgr(fg: tuple[int, int, int], bg: tuple[int, int, int], bold: bool) -> str:
+    return f"\x1b[0;{'1;' if bold else ''}38;2;{fg[0]};{fg[1]};{fg[2]};48;2;{bg[0]};{bg[1]};{bg[2]}m"
+
+
+def frame_ansi(grid: list[list[Cell]], pane_cols: int, pane_rows: int, note: str = "") -> str:
+    """One whole frame for a pane_cols x pane_rows terminal, every row by absolute address (ESC[r;1H), each
+    cleared to its end in the ground colour: nothing depends on what the terminal holds from before (a
+    terminal that reflowed its screen on a resize, the last frame at another size). The grid is centred:
+    cropped where it is bigger than the pane, the ground around it where smaller. `note`: a dim last row."""
+    gh, gw = len(grid), len(grid[0]) if grid else 0
+    rows = pane_rows - 1 if note else pane_rows
+    y0, x0 = (gh - rows) // 2, (gw - pane_cols) // 2
+    ground = _sgr(FG, BG, False)
+    out = ["\x1b[H"]
+    for r in range(max(0, rows)):
+        out.append(f"\x1b[{r + 1};1H")
+        y = y0 + r
+        if 0 <= y < gh:
+            if x0 < 0:
+                out.append(ground + " " * -x0)
+            last = None
+            row = grid[y][max(0, x0):max(0, x0) + pane_cols - max(0, -x0)]
+            for c in row:
+                if c.ch == "":  # the second half of a wide glyph
+                    continue
+                key = (c.fg, c.bg, c.bold)
+                if key != last:
+                    out.append(_sgr(*key))
+                    last = key
+                out.append(c.ch)
+        out.append(ground + "\x1b[K")
+    if note:
+        out.append(f"\x1b[{pane_rows};1H{ground}\x1b[2m{note[:pane_cols]}\x1b[0m{ground}\x1b[K")
+    out.append("\x1b[0m")
+    return "".join(out)
+
+
+class _PlayLog:
+    """TAC_PLAY_DEBUG=/path/file: what the live player saw and decided (resize signals, sizes, restarts,
+    frames written), appended with timestamps. Off by default; nothing else is recorded."""
+
+    def __init__(self, path: str | None) -> None:
+        self.fh = open(path, "a", encoding="utf-8") if path else None  # noqa: SIM115 - closed in close()
+        self.t0 = time.monotonic()
+
+    def __call__(self, msg: str) -> None:
+        if self.fh:
+            self.fh.write(f"{time.monotonic() - self.t0:9.3f} {msg}\n")
+            self.fh.flush()
+
+    def close(self) -> None:
+        if self.fh:
+            self.fh.close()
+
+
 async def cmd_play(code: str, cols: int | None, rows: int | None) -> None:
-    """Plays live until Ctrl-C. A piece reads `width` and `height` once, when it starts, so when the terminal
-    changes size (SIGWINCH: a pane dragged, a window resized) the piece starts again at the new size, caught up
-    to where it was in its loop (fast-forwarded without drawing, for at most FAST_FORWARD_S), on a cleared
-    screen: no cells of the old size are left. Explicit --cols/--rows stay as given."""
+    """Plays live until Ctrl-C, writing each frame whole, by absolute cursor address, in the published render's
+    colours (to_cells): no relative cursor moves, so a terminal that reflows its screen on a resize (iTerm2)
+    can't smear it. A piece reads `width` and `height` once, when it starts, so on a resize (SIGWINCH, seen by
+    a watcher even while the piece sleeps) it starts again at the new size once the size has held for
+    RESIZE_SETTLE_S, caught up to where it was in its loop. A pane the piece can't run in (too narrow for it):
+    the piece plays at the last size it ran at (else its own 80x66), centred and cropped to the pane, with a
+    one-line note when more than NOTE_HIDDEN of it is hidden. Explicit --cols/--rows: rendered at that size,
+    centred in the pane."""
+    import os
     import signal
-    import time
 
-    from rich.live import Live
-
+    log = _PlayLog(os.environ.get("TAC_PLAY_DEBUG"))
     fixed = cols, rows
     canvas = _Canvas()
     compiled = _compile(code)
-    console = Console()
-    state = {"winch": 0.0, "t": 0.0, "target": 0.0, "deadline": 0.0}
+    out = sys.stdout
+    st: dict[str, Any] = {"winch": 0.0, "t": 0.0, "target": 0.0, "deadline": 0.0, "gen": 0, "frames": 0,
+                          "last_good": None, "render": None, "note": "", "drawn": None}
 
-    def size() -> tuple[int, int]:
-        term = shutil.get_terminal_size()
-        return fixed[0] or term.columns, fixed[1] or term.lines
+    def pane() -> tuple[int, int]:
+        t = shutil.get_terminal_size()
+        return max(1, t.columns), max(1, t.lines)
 
     def on_winch() -> None:
-        state["winch"] = time.monotonic()
+        st["winch"] = time.monotonic()
+        log(f"SIGWINCH pane={pane()}")
+
+    def draw() -> None:
+        pc, pr = pane()
+        rw, rh = st["render"]
+        hidden = 1 - (min(pc, rw) * min(pr, rh)) / (rw * rh)
+        note = st["note"] if hidden > NOTE_HIDDEN else ""
+        out.write(frame_ansi(to_cells(list(canvas.buffer), rw, rh), pc, pr, note))
+        out.flush()
+        st["frames"] += 1
+        if st["drawn"] != (pc, pr, rw, rh, bool(note)) or st["frames"] % 100 == 0:
+            st["drawn"] = (pc, pr, rw, rh, bool(note))
+            log(f"frame {st['frames']} pane={pc}x{pr} render={rw}x{rh} note={bool(note)}")
+
+    async def real_sleep(dt: float = 0, *, gen: int) -> None:
+        if gen != st["gen"]:
+            raise _Resized  # an old pass still running (it caught the cancel): stop it here
+        dt = max(float(dt), 0.0)
+        if st["t"] < st["target"] and time.monotonic() < st["deadline"]:
+            st["t"] += dt  # catching up after a restart: no drawing, no waiting
+            return
+        if not st["winch"]:
+            draw()
+            if st["last_good"] != st["render"] and not st["note"]:
+                st["last_good"] = st["render"]
+        st["t"] += dt
+        await asyncio.sleep(dt)
+
+    async def one_pass(gen: int) -> None:
+        canvas.clear()
+        ns = _namespace(canvas, lambda dt=0: real_sleep(dt, gen=gen), *st["render"])
+        exec(compiled, ns)
+        await ns["__script__"]()
+
+    def restart(reason: str) -> None:
+        st["gen"] += 1
+        st["target"], st["t"] = st["t"], 0.0
+        st["deadline"] = time.monotonic() + FAST_FORWARD_S
+        out.write("\x1b[0m\x1b[2J\x1b[H")
+        out.flush()
+        log(f"restart ({reason}) render={st['render']} catch-up to t={st['target']:.2f}")
+
+    def size_for_pane() -> tuple[int, int]:
+        pc, pr = pane()
+        return fixed[0] or pc, fixed[1] or pr
 
     loop = asyncio.get_running_loop()
     try:
         loop.add_signal_handler(signal.SIGWINCH, on_winch)
     except (NotImplementedError, AttributeError, RuntimeError, ValueError):
         pass  # no SIGWINCH here (Windows): the size is fixed for the run
+    out.write(ENTER)
+    out.flush()
+    st["render"] = size_for_pane()
+    log(f"start pane={pane()} render={st['render']}")
     try:
-        with Live(console=console, screen=True, auto_refresh=False) as live:
-            async def real_sleep(dt: float = 0) -> None:
-                dt = max(float(dt), 0.0)
-                if state["t"] < state["target"] and time.monotonic() < state["deadline"]:
-                    state["t"] += dt  # catching up after a resize: no drawing, no waiting
-                    return
-                if state["winch"]:
-                    if time.monotonic() - state["winch"] >= RESIZE_SETTLE_S:
-                        state["winch"] = 0.0
-                        raise _Resized
-                    # still being dragged: draw nothing at the old size, just wait out the step
-                else:
-                    live.update(Group(*canvas.buffer), refresh=True)
-                state["t"] += dt
-                await asyncio.sleep(dt)
-
-            resized = False  # this pass started after a resize
-            while True:
-                cols_now, rows_now = size()
-                canvas.clear()
-                ns = _namespace(canvas, real_sleep, cols_now, rows_now)
-                exec(compiled, ns)
+        while True:
+            gen = st["gen"]
+            task = asyncio.ensure_future(one_pass(gen))
+            settled = False
+            while not task.done():
+                await asyncio.wait({task}, timeout=0.05)
+                if st["winch"] and time.monotonic() - st["winch"] >= RESIZE_SETTLE_S:
+                    settled = True
+                    break
+            if settled:  # the size held: start again at it (a watcher, so a long sleep() can't delay it)
+                task.cancel()
                 try:
-                    await ns["__script__"]()
-                except (_Resized, KeyboardInterrupt, asyncio.CancelledError, _Runaway):
-                    if not sys.exc_info()[0] is _Resized:
-                        raise
-                    resized = True
-                    # restart at the new size, from where it was; a full repaint on a cleared screen
-                    state["target"], state["t"] = state["t"], 0.0
-                    state["deadline"] = time.monotonic() + FAST_FORWARD_S
-                    console.file.write("\x1b[2J\x1b[H")  # not 3J: some terminals wipe the scrollback with it
-                    console.file.flush()
-                    live.update(Group(), refresh=True)
-                    continue
-                except Exception as e:  # noqa: BLE001 - the piece's own error
-                    if not resized:
-                        raise  # it fails at the size it started with: tac play reports it as before
-                    # It ran before the resize and fails at this size (some assume 60-odd columns): say so,
-                    # and try again at the next size the pane is given.
-                    live.update(Text(f"this piece doesn't run at {cols_now}x{rows_now} ({type(e).__name__}): "
-                                     "widen the pane, or play it with --window"), refresh=True)
-                    while not state["winch"] or time.monotonic() - state["winch"] < RESIZE_SETTLE_S:
-                        await asyncio.sleep(0.05)
-                    state["winch"] = 0.0
-                    state["t"] = state["target"] = 0.0
-                    console.file.write("\x1b[2J\x1b[H")  # not 3J: some terminals wipe the scrollback with it
-                    console.file.flush()
-                    continue
-                resized = False
-                state["t"] = state["target"] = 0.0
-                await asyncio.sleep(0.1)
+                    await task
+                except BaseException:  # noqa: BLE001 - the cancelled pass, whatever it raised
+                    pass
+                st["winch"] = 0.0
+                st["render"], st["note"] = size_for_pane(), ""
+                restart("resized")
+                continue
+            exc = task.exception() if not task.cancelled() else None
+            if isinstance(exc, (KeyboardInterrupt, _Runaway)):
+                raise exc
+            if isinstance(exc, _Resized):
+                continue
+            if isinstance(exc, Exception):
+                fallback = st["last_good"] or (DEFAULT_COLS, DEFAULT_ROWS)
+                if st["render"] == fallback:
+                    log(f"piece error at its fallback size {fallback}: {type(exc).__name__}")
+                    raise exc  # the last resort: tac play reports it (the pane holds it open)
+                pc, pr = pane()
+                log(f"piece error at {st['render']} ({type(exc).__name__}): playing at {fallback}, cropped")
+                st["note"] = (f"{fallback[0]}x{fallback[1]} doesn't fit this {pc}x{pr} pane: widen it, or "
+                              "play with --window")
+                st["render"] = fallback
+                restart("fallback")
+                continue
+            st["t"] = st["target"] = 0.0  # a pass ended: the next one starts from 0
+            await asyncio.sleep(0.1)
     finally:
         try:
             loop.remove_signal_handler(signal.SIGWINCH)
         except (NotImplementedError, AttributeError, RuntimeError, ValueError):
             pass
+        out.write(LEAVE)
+        out.flush()
+        log(f"exit after {st['frames']} frames")
+        log.close()
 
 
 def main(argv: list[str] | None = None) -> int:
