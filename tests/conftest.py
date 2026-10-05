@@ -22,6 +22,22 @@ def private_work_root(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
 
 
 @pytest.fixture(autouse=True)
+def plain_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The terminal the tests run in (iTerm2, kitty, Ghostty) must not leak into a test: /tac:wall would probe it
+    for pixel mode. Tests of pixel mode set these themselves."""
+    for var in ("TERM_PROGRAM", "TERM_PROGRAM_VERSION", "KITTY_WINDOW_ID", "TMUX", "STY"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("TERM", "xterm-256color")
+
+
+@pytest.fixture(autouse=True)
+def private_cache(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The wall's cache is ~/.cache/tac/wall: never the real one (a test that saves a playlist would replace the
+    user's and drop their cached pieces). Tests that need their own set XDG_CACHE_HOME again."""
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg-cache"))
+
+
+@pytest.fixture(autouse=True)
 def no_prod_platform(monkeypatch: pytest.MonkeyPatch) -> None:
     """The plugin defaults to the public platform. Tests start from a clean env: TAC_API is a dead loopback
     port (subprocesses inherit it, so a launcher test can't reach prod either) and TAC_SITE_URL is unset. Any

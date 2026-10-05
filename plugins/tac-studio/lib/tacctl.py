@@ -1189,7 +1189,8 @@ def cmd_wall(a: argparse.Namespace) -> int:
         print("there are no picks yet." if a.picks else
               "the wall is empty: nothing published yet. Make something for it: /tac:create")
         return 0
-    argv = [str(PLUGIN / "bin" / "tacctl"), "wall-play", "--seconds", f"{a.seconds:g}"] + (["--offline"] if offline else [])
+    argv = ([str(PLUGIN / "bin" / "tacctl"), "wall-play", "--seconds", f"{a.seconds:g}"] + (["--offline"] if offline else [])
+            + (["--cells"] if a.cells else []))
     what = {"week+recent": "this week's wall, topped up with recent pieces",
             "picks": "the picks (nothing on this week's wall yet)",
             "recent": "the most recent pieces (nothing this week, no picks yet)"}.get(doc["source"], "this week's wall")
@@ -1220,8 +1221,14 @@ def cmd_wall_play(a: argparse.Namespace) -> int:
         base = checked_base(doc["api"]) if doc.get("api") else None
     except ApiError:
         base = None
+    pixels = None
+    if not a.cells:  # images where the terminal confirms it shows them (iTerm2, kitty, Ghostty); else cells
+        import wallpix
+
+        pixels = wallpix.detect(os.environ, sys.stdin.fileno(), sys.stdout.fileno())
     try:
-        return wall.play(doc, base, cache, a.seconds, a.offline or base is None, picks=doc.get("picks", False))
+        return wall.play(doc, base, cache, a.seconds, a.offline or base is None, picks=doc.get("picks", False),
+                         pixels=pixels)
     except wall.WallError as e:
         return die(f"the wall stopped: {safe(e)}")
 
@@ -1266,9 +1273,11 @@ def main(argv: list[str] | None = None) -> int:
     ww.add_argument("--tab", action="store_true", help="a new tab instead of a pane on the right")
     ww.add_argument("--window", action="store_true", help="a new window")
     wl.add_argument("--no-window", action="store_true", help="just print the command to paste")
+    wl.add_argument("--cells", action="store_true", help="draw with text cells even where the terminal shows images")
     wp = sp.add_parser("wall-play", help=argparse.SUPPRESS)
     wp.add_argument("--seconds", type=seconds_arg, default=30.0)
     wp.add_argument("--offline", action="store_true")
+    wp.add_argument("--cells", action="store_true")
     rt = sp.add_parser("root", help="print ~/tac-work (where new pieces go), or with a name, that piece's folder")
     rt.add_argument("name", nargs="?")
     sa = sp.add_parser("start", help="create <work folder>/<name>/ and record the run size")

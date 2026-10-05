@@ -572,11 +572,13 @@ def credit_line(p: dict, i: int, n: int, offline: bool) -> Credit:
                   (f"{i + 1}/{n}",) + (("offline",) if offline else ()))
 
 
-def credit_row(credit: Credit | str, pane_cols: int, pane_rows: int) -> str:
+def credit_row(credit: Credit | str, pane_cols: int, pane_rows: int, reserve: int = 0) -> str:
     """The pane's last row, which the art never uses: the credit in readable ink at the left, the wordmark at the
-    right, every hyperlink closed before the row ends."""
+    right (left of `reserve` columns kept free, for pixel mode's logo), every hyperlink closed before the row
+    ends."""
     if not isinstance(credit, Credit):
         credit = Credit(_clean(credit), "")
+    pane_cols -= reserve
     parts, mark = credit.layout(pane_cols)
     at = f"@{_clean(credit.handle)}" if credit.handle else None
     left = " · ".join(_osc8(credit.handle_url(), x) if x == at else x for x in parts)
@@ -603,7 +605,7 @@ def pane_size() -> tuple[int, int]:
 # ── playing ────────────────────────────────────────────────────────────────
 
 
-class _Stop(Exception):
+class _Stop(BaseException):  # SIGTERM/SIGHUP: BaseException, so no `except Exception` on the way can swallow it
     pass
 
 
@@ -615,7 +617,7 @@ def playable_offline(doc: dict, cache: Cache) -> list[dict]:
 
 def play(doc: dict, base: str | None, cache: Cache, seconds: float, offline: bool,
          out: Any = None, clock: Any = time.monotonic, sleep: Any = time.sleep, rounds: int | None = None,
-         picks: bool = False) -> int:
+         picks: bool = False, pixels: Any = None) -> int:
     """Plays the playlist until Ctrl-C (or `rounds` passes, for tests). Each piece: its frames from the cache or
     the platform (the next one fetched in the background meanwhile), `seconds` of it (0: one loop), then the
     next. Each piece is revalidated at most once a session; the playlist is fetched again every lap, and a
@@ -722,7 +724,7 @@ def play(doc: dict, base: str | None, cache: Cache, seconds: float, offline: boo
                     failed += 1
                     pc, pr = pane_size()
                     note = "taken off the wall" if key(p) in gone else "couldn't load it; skipping"
-                    out.write(f"\x1b[H{GROUND_SGR}\x1b[2J"
+                    out.write((pixels.drop(pr) if pixels else "") + f"\x1b[H{GROUND_SGR}\x1b[2J"
                               + credit_row(Credit(_clean(p["title"]), p["handle"], p["slug"], extra=(note,)), pc, pr))
                     out.flush()
                     if failed >= len(pieces) and played == 0:
@@ -734,16 +736,20 @@ def play(doc: dict, base: str | None, cache: Cache, seconds: float, offline: boo
                 credit = credit_line(p, j, len(pieces), offline)
                 length = seconds if seconds > 0 else h.frames / h.fps
                 start = clock()
-                k = 0
+                k = fi = 0
                 it = wallframes.frames(h, w)
                 while clock() - start < length:
                     try:
                         cur = next(it)
                     except StopIteration:
                         it = wallframes.frames(h, w)  # loop the piece
-                        cur = next(it)
+                        cur, fi = next(it), 0
                     pc, pr = pane_size()
-                    out.write(frame_ansi(cur, h.cols, h.rows, pc, pr, credit))
+                    drawn = pixels.frame(cur, h.cols, h.rows, fi, key(p), credit) if pixels else None
+                    if drawn is None:  # cell mode, or a frame pixel mode can't draw
+                        drawn = (pixels.drop(pr) if pixels else "") + frame_ansi(cur, h.cols, h.rows, pc, pr, credit)
+                    out.write(drawn)
+                    fi += 1
                     out.flush()
                     k += 1
                     delay = start + k / h.fps - clock()
@@ -757,7 +763,7 @@ def play(doc: dict, base: str | None, cache: Cache, seconds: float, offline: boo
     finally:
         for sig, h0 in old.items():
             signal.signal(sig, h0)
-        out.write(LEAVE)
+        out.write((pixels.cleanup() if pixels else "") + LEAVE)
         out.flush()
         for t, _ in pending.values():  # a prefetch still running: give it a moment, never hold up the exit
             t.join(0.05)
