@@ -660,9 +660,13 @@ def frame_ansi(grid: list[list[Cell]], pane_cols: int, pane_rows: int, note: str
                 out.append(ground + " " * -x0)
             last = None
             row = grid[y][max(0, x0):max(0, x0) + pane_cols - max(0, -x0)]
-            for c in row:
-                if c.ch == "":  # the second half of a wide glyph
-                    continue
+            for i, c in enumerate(row):
+                if c.ch == "":  # the second half of a wide glyph: drawn by its first half
+                    if i:
+                        continue
+                    c = Cell(" ", FG, c.bg, False)  # its first half is cropped off: a space keeps the row in place
+                elif i == len(row) - 1 and i + 1 + max(0, x0) < len(grid[y]) and grid[y][i + 1 + max(0, x0)].ch == "":
+                    c = Cell(" ", FG, c.bg, False)  # a wide glyph cut in half by the right edge
                 key = (c.fg, c.bg, c.bold)
                 if key != last:
                     out.append(_sgr(*key))
@@ -680,7 +684,12 @@ class _PlayLog:
     frames written), appended with timestamps. Off by default; nothing else is recorded."""
 
     def __init__(self, path: str | None) -> None:
-        self.fh = open(path, "a", encoding="utf-8") if path else None  # noqa: SIM115 - closed in close()
+        self.fh = None
+        if path:  # never through a symlink (a planted link would aim our writes elsewhere); private to the user
+            import os
+
+            fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+            self.fh = os.fdopen(fd, "a", encoding="utf-8")
         self.t0 = time.monotonic()
 
     def __call__(self, msg: str) -> None:
@@ -711,7 +720,8 @@ async def cmd_play(code: str, cols: int | None, rows: int | None) -> None:
     compiled = _compile(code)
     out = sys.stdout
     st: dict[str, Any] = {"winch": 0.0, "t": 0.0, "target": 0.0, "deadline": 0.0, "gen": 0, "frames": 0,
-                          "last_good": None, "render": None, "note": "", "drawn": None}
+                          "last_good": None, "render": None, "note": "", "drawn": None, "abandoned": 0,
+                          "signal": None}
 
     def pane() -> tuple[int, int]:
         t = shutil.get_terminal_size()
@@ -734,8 +744,13 @@ async def cmd_play(code: str, cols: int | None, rows: int | None) -> None:
             log(f"frame {st['frames']} pane={pc}x{pr} render={rw}x{rh} note={bool(note)}")
 
     async def real_sleep(dt: float = 0, *, gen: int) -> None:
-        if gen != st["gen"]:
-            raise _Resized  # an old pass still running (it caught the cancel): stop it here
+        while gen != st["gen"]:
+            # An old pass that swallowed its cancel (a bare `except:` around sleep()): park it, for good. It
+            # never draws or runs again; the watcher has already moved on (and abandoned it).
+            try:
+                await asyncio.Future()
+            except BaseException:  # noqa: BLE001, S110 - any cancel: stay parked (shutdown exits around it)
+                pass
         dt = max(float(dt), 0.0)
         if st["t"] < st["target"] and time.monotonic() < st["deadline"]:
             st["t"] += dt  # catching up after a restart: no drawing, no waiting
@@ -754,7 +769,6 @@ async def cmd_play(code: str, cols: int | None, rows: int | None) -> None:
         await ns["__script__"]()
 
     def restart(reason: str) -> None:
-        st["gen"] += 1
         st["target"], st["t"] = st["t"], 0.0
         st["deadline"] = time.monotonic() + FAST_FORWARD_S
         out.write("\x1b[0m\x1b[2J\x1b[H")
@@ -766,15 +780,27 @@ async def cmd_play(code: str, cols: int | None, rows: int | None) -> None:
         return fixed[0] or pc, fixed[1] or pr
 
     loop = asyncio.get_running_loop()
+    main_task = asyncio.current_task()
+
+    def on_stop(sig: int) -> None:  # SIGTERM (kill), SIGHUP (its pane or window closed): restore, then exit
+        st["signal"] = sig
+        log(f"signal {sig}: stopping")
+        if main_task:
+            main_task.cancel()
+
+    handled = []
+    for sig, cb, args in ((signal.SIGWINCH, on_winch, ()), (signal.SIGTERM, on_stop, (signal.SIGTERM,)),
+                          (signal.SIGHUP, on_stop, (signal.SIGHUP,))):
+        try:
+            loop.add_signal_handler(sig, cb, *args)
+            handled.append(sig)
+        except (NotImplementedError, AttributeError, RuntimeError, ValueError):
+            pass  # not on this platform (Windows): no resize, the default stop
     try:
-        loop.add_signal_handler(signal.SIGWINCH, on_winch)
-    except (NotImplementedError, AttributeError, RuntimeError, ValueError):
-        pass  # no SIGWINCH here (Windows): the size is fixed for the run
-    out.write(ENTER)
-    out.flush()
-    st["render"] = size_for_pane()
-    log(f"start pane={pane()} render={st['render']}")
-    try:
+        out.write(ENTER)  # inside the try: whatever stops us from here on, the finally restores the terminal
+        out.flush()
+        st["render"] = size_for_pane()
+        log(f"start pane={pane()} render={st['render']}")
         while True:
             gen = st["gen"]
             task = asyncio.ensure_future(one_pass(gen))
@@ -785,11 +811,15 @@ async def cmd_play(code: str, cols: int | None, rows: int | None) -> None:
                     settled = True
                     break
             if settled:  # the size held: start again at it (a watcher, so a long sleep() can't delay it)
+                st["gen"] += 1  # before the cancel: a pass that swallows it parks at its next sleep()
                 task.cancel()
-                try:
-                    await task
-                except BaseException:  # noqa: BLE001 - the cancelled pass, whatever it raised
-                    pass
+                await asyncio.wait({task}, timeout=0.2)
+                if task.done():
+                    if not task.cancelled():
+                        task.exception()  # retrieved: no "never retrieved" warning
+                else:
+                    st["abandoned"] += 1  # it caught the cancel and is parked: never awaited again
+                    log(f"pass {gen} swallowed its cancel: abandoned ({st['abandoned']})")
                 st["winch"] = 0.0
                 st["render"], st["note"] = size_for_pane(), ""
                 restart("resized")
@@ -809,19 +839,34 @@ async def cmd_play(code: str, cols: int | None, rows: int | None) -> None:
                 st["note"] = (f"{fallback[0]}x{fallback[1]} doesn't fit this {pc}x{pr} pane: widen it, or "
                               "play with --window")
                 st["render"] = fallback
+                st["gen"] += 1
                 restart("fallback")
                 continue
             st["t"] = st["target"] = 0.0  # a pass ended: the next one starts from 0
             await asyncio.sleep(0.1)
     finally:
-        try:
-            loop.remove_signal_handler(signal.SIGWINCH)
-        except (NotImplementedError, AttributeError, RuntimeError, ValueError):
-            pass
+        for sig in handled:
+            try:
+                loop.remove_signal_handler(sig)
+            except (NotImplementedError, AttributeError, RuntimeError, ValueError):
+                pass
         out.write(LEAVE)
         out.flush()
-        log(f"exit after {st['frames']} frames")
+        log(f"exit after {st['frames']} frames, {st['abandoned']} abandoned passes")
         log.close()
+        if st["abandoned"]:
+            # A parked pass swallows every cancel, so asyncio.run's shutdown would wait on it forever. The
+            # terminal is restored: say how it ended, and leave now.
+            import os
+            import traceback
+
+            err = sys.exc_info()[1]
+            failed = err is not None and not isinstance(err, (asyncio.CancelledError, KeyboardInterrupt))
+            if failed:
+                traceback.print_exception(err)
+            sys.stdout.flush()
+            sys.stderr.flush()
+            os._exit(1 if failed else 0)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -872,7 +917,7 @@ def main(argv: list[str] | None = None) -> int:
             print(asyncio.run(cmd_mp4(code, a.out, a.cols, a.rows, a.fps, a.seconds, a.shade, size)))
         elif a.cmd == "play":
             asyncio.run(cmd_play(code, a.cols, a.rows))
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, asyncio.CancelledError):  # Ctrl-C, or SIGTERM/SIGHUP (cmd_play restored the screen)
         pass
     except _Runaway as e:
         print(f"error: {e}", file=sys.stderr)

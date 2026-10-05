@@ -210,3 +210,99 @@ def test_the_screen_is_exactly_the_published_renderers_cells_after_a_resize(tmp_
                 assert (got.data, got.fg, got.bg) == (want.ch, hexc(want.fg), hexc(want.bg)), (x, y)
     finally:
         p.close()
+
+
+def test_a_piece_whose_bare_except_swallows_the_cancel_still_follows_resizes(tmp_path):
+    """The review's probe (p032/stale_probe.py): a bare `except:` around sleep() swallows the watcher's cancel.
+    The old pass is parked for good and abandoned; the new size plays."""
+    piece = tmp_path / "sloppy.py"
+    piece.write_text(BOX.replace("    await sleep(0.05)\n", "    try:\n        await sleep(0.05)\n    except:\n        pass\n"))
+    p = Pty(piece, 60, 20)
+    try:
+        p.pump(2.5)
+        assert drawn(p.lines()) == box(60, 20)
+        p.resize(40, 14)
+        p.pump(1.5)
+        assert drawn(p.lines()) == box(40, 14)
+        p.resize(70, 24)
+        p.pump(1.5)
+        assert drawn(p.lines()) == box(70, 24)
+        os.write(p.fd, b"\x03")  # Ctrl-C still ends it, with two passes parked
+        p.pump(1.5)
+        pid, status = os.waitpid(p.pid, os.WNOHANG)
+        assert pid == p.pid and os.waitstatus_to_exitcode(status) == 0
+        p.pid = 0
+    finally:
+        if p.pid:
+            p.close()
+        else:
+            os.close(p.fd)
+
+
+@pytest.mark.parametrize("sig", [signal.SIGINT, signal.SIGTERM, signal.SIGHUP])
+def test_every_stop_signal_gives_the_terminal_back(tmp_path, sig):
+    """The review's probe (p032/term_probe.py): main screen, autowrap and cursor restored on Ctrl-C, kill (TERM)
+    and a closed pane (HUP)."""
+    piece = tmp_path / "box.py"
+    piece.write_text(BOX)
+    p = Pty(piece, 60, 20)
+    raw = b""
+    try:
+        p.pump(2.5)
+        os.kill(p.pid, sig)
+        end = time.monotonic() + 2
+        while time.monotonic() < end:
+            r, _, _ = select.select([p.fd], [], [], 0.05)
+            if r:
+                try:
+                    raw += os.read(p.fd, 65536)
+                except OSError:
+                    break
+        pid, status = os.waitpid(p.pid, os.WNOHANG)
+        if pid == 0:
+            time.sleep(0.5)
+            pid, status = os.waitpid(p.pid, os.WNOHANG)
+        assert pid == p.pid and os.waitstatus_to_exitcode(status) == 0
+        p.pid = 0
+        assert b"\x1b[?7h" in raw and b"\x1b[?25h" in raw and b"\x1b[?1049l" in raw
+    finally:
+        if p.pid:
+            p.close()
+        else:
+            os.close(p.fd)
+
+
+def test_the_debug_log_never_follows_a_symlink_and_is_private(tmp_path, monkeypatch):
+    import stat as st_mod
+
+    import vscreen
+
+    target = tmp_path / "precious"
+    target.write_text("keep")
+    link = tmp_path / "tac-play.log"
+    link.symlink_to(target)
+    with pytest.raises(OSError):
+        vscreen._PlayLog(str(link))
+    assert target.read_text() == "keep"
+    real = tmp_path / "real.log"
+    log = vscreen._PlayLog(str(real))
+    log("hello")
+    log.close()
+    assert st_mod.S_IMODE(real.stat().st_mode) == 0o600 and "hello" in real.read_text()
+
+
+def test_a_crop_through_a_wide_glyph_keeps_the_row_in_place():
+    """A wide glyph's continuation cell at the left crop edge, or its first half at the right edge, is drawn as
+    a space: every row stays exactly pane_cols wide."""
+    import vscreen
+
+    grid = vscreen.to_cells(["界" * 6], 12, 1)  # 6 wide glyphs = 12 cells
+    for pane in (11, 9, 7):  # odd widths: both edges cut a glyph
+        s = vscreen.frame_ansi(grid, pane, 1)
+        screen = pyte.Screen(pane, 1)
+        pyte.ByteStream(screen).feed(s.encode())
+        row = "".join(screen.buffer[0][x].data or "?" for x in range(pane))
+        x0 = (12 - pane) // 2  # the centred crop: cells x0 .. x0+pane-1 of the 12
+        want = "".join(" " if (x == x0 and x % 2) or (x == x0 + pane - 1 and x % 2 == 0) else
+                       ("界" if x % 2 == 0 else "?") for x in range(x0, x0 + pane))
+        assert row == want, (pane, row, want)  # whole glyphs in place, halves as spaces, nothing shifted

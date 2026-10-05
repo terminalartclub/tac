@@ -245,6 +245,7 @@ uv run --with pytest --with pyte --with rich --with Pillow --with fonttools pyth
 claude plugin validate . && claude plugin validate ./plugins/tac-studio
 ```
 
-`tac play` debug log (off by default): `TAC_PLAY_DEBUG=/tmp/tac-play.log tac play <piece.py>` appends what the
+`tac play` debug log (off by default): `TAC_PLAY_DEBUG=~/tac-play.log tac play <piece.py>` appends what the
 live player saw and did: resize signals and the pane size read, restarts (and their catch-up), the fallback to
-a cropped size, and the size of every frame written when it changes.
+a cropped size, and the size of every frame written when it changes. The file is created private (0600) and
+never written through a symlink.
