@@ -796,6 +796,7 @@ async def cmd_play(code: str, cols: int | None, rows: int | None) -> None:
             handled.append(sig)
         except (NotImplementedError, AttributeError, RuntimeError, ValueError):
             pass  # not on this platform (Windows): no resize, the default stop
+    task: asyncio.Future | None = None
     try:
         out.write(ENTER)  # inside the try: whatever stops us from here on, the finally restores the terminal
         out.flush()
@@ -850,6 +851,21 @@ async def cmd_play(code: str, cols: int | None, rows: int | None) -> None:
                 loop.remove_signal_handler(sig)
             except (NotImplementedError, AttributeError, RuntimeError, ValueError):
                 pass
+        if task is not None and not task.done():
+            # Stopping (Ctrl-C, SIGTERM, SIGHUP) with a pass still running: park it (its next sleep() never
+            # returns) and cancel it; one that swallows the cancel (a bare `except:`) is abandoned, so the exit
+            # below can't wait on it, and it never draws again.
+            st["gen"] += 1
+            task.cancel()
+            try:
+                await asyncio.wait({task}, timeout=0.2)
+            except BaseException:  # noqa: BLE001 - a second Ctrl-C while waiting: just go
+                pass
+            if not task.done():
+                st["abandoned"] += 1
+                log("the running pass swallowed its cancel: abandoned")
+            elif not task.cancelled():
+                task.exception()  # retrieved: no "never retrieved" warning
         out.write(LEAVE)
         out.flush()
         log(f"exit after {st['frames']} frames, {st['abandoned']} abandoned passes")

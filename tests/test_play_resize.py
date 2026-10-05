@@ -3,7 +3,6 @@ the new size, with no stale cells. Driven in a real pty, read back with pyte. No
 
 import fcntl
 import os
-import pty
 import select
 import signal
 import struct
@@ -14,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+import ptyspawn
 from conftest import LIB
 
 import pyte  # a test dependency (README, CI): never skipped silently
@@ -43,11 +43,9 @@ class Pty:
     def __init__(self, piece: Path, cols: int, rows: int) -> None:
         self.screen = pyte.Screen(cols, rows)
         self.stream = pyte.ByteStream(self.screen)
-        self.pid, self.fd = pty.fork()
-        if self.pid == 0:  # the child: the pty is its controlling terminal, so a resize sends it SIGWINCH
-            os.execv(sys.executable, [sys.executable, str(LIB / "vscreen.py"), "play", str(piece)])
-        winsize(self.fd, cols, rows)
-        os.kill(self.pid, signal.SIGWINCH)
+        # the pty is the child's controlling terminal: a resize sends it SIGWINCH, as in a real pane
+        self.proc, self.fd = ptyspawn.spawn([sys.executable, str(LIB / "vscreen.py"), "play", str(piece)], cols, rows)
+        self.pid = self.proc.pid
 
     def pump(self, seconds: float) -> None:
         end = time.monotonic() + seconds
@@ -67,8 +65,8 @@ class Pty:
         winsize(self.fd, cols, rows)  # the kernel sends the child's process group SIGWINCH
 
     def close(self) -> None:
-        os.kill(self.pid, signal.SIGKILL)  # our own child only
-        os.waitpid(self.pid, 0)
+        self.proc.kill()  # our own child only
+        self.proc.wait()
         os.close(self.fd)
 
 
@@ -306,3 +304,34 @@ def test_a_crop_through_a_wide_glyph_keeps_the_row_in_place():
         want = "".join(" " if (x == x0 and x % 2) or (x == x0 + pane - 1 and x % 2 == 0) else
                        ("界" if x % 2 == 0 else "?") for x in range(x0, x0 + pane))
         assert row == want, (pane, row, want)  # whole glyphs in place, halves as spaces, nothing shifted
+
+
+@pytest.mark.parametrize("sig", [signal.SIGINT, signal.SIGTERM])
+def test_a_bare_except_piece_stops_on_ctrl_c_and_kill_without_a_resize(tmp_path, sig):
+    """The review's stop_probe2: a bare `except:` around sleep() swallows the stop's cancel too. The running pass
+    is parked and abandoned: the terminal comes back, the process exits 0, and nothing is drawn after."""
+    piece = tmp_path / "sloppy.py"
+    piece.write_text(BOX.replace("    await sleep(0.05)\n", "    try:\n        await sleep(0.05)\n    except:\n        pass\n"))
+    p = Pty(piece, 60, 20)
+    raw = b""
+    try:
+        p.pump(2.5)
+        os.kill(p.pid, sig)
+        end = time.monotonic() + 3
+        while time.monotonic() < end:
+            r, _, _ = select.select([p.fd], [], [], 0.05)
+            if r:
+                try:
+                    raw += os.read(p.fd, 65536)
+                except OSError:
+                    break
+        pid, status = os.waitpid(p.pid, os.WNOHANG)
+        assert pid == p.pid and os.waitstatus_to_exitcode(status) == 0
+        p.pid = 0
+        tail = raw[raw.rfind(b"\x1b[?1049l"):]
+        assert tail.startswith(b"\x1b[?1049l") and b"\x1b[H" not in tail  # restored, and no frame after it
+    finally:
+        if p.pid:
+            p.close()
+        else:
+            os.close(p.fd)
