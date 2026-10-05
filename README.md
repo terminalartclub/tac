@@ -176,7 +176,6 @@ plugins/tac-studio/
   lib/wallframes.py                 the wall's frames format (stdlib; byte-identical copy in platform/)
   lib/wall.py                       /tac:wall: playlist, frames cache, the pane player
   lib/wallpix.py                    /tac:wall pixel mode: iTerm2 inline images, kitty graphics protocol
-  assets/tac-logo.png               the bar's logo in pixel mode (the site icon, 96 px)
   lib/tacctl.py  meta.py  notes.py  review.py  termwin.py  uvfind.py
   skills/tac-studio/SKILL.md, DNA.md
   commands/{create,play,wall,login,logout,submit,mine,style}.md

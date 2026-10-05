@@ -36,8 +36,6 @@ CACHE_CAP = 64 * 1024 * 1024  # encoded frames kept per piece and size (base64 c
 SETTLE_S = 0.1  # vscreen.RESIZE_SETTLE_S: a drag sends a burst of size changes; re-render once it has held
 PROBE_S = 0.5
 KITTY_IDS = (7301, 7302)  # two images, double-buffered: place the new one, then delete the old: no flicker
-LOGO_ID = 7303
-LOGO_COLS = 2
 GROUND = (8, 8, 15)
 JPEG_Q = 90  # iTerm2: JPEG (2 ms vs PNG's 8 ms at 952x1691); the site's previews are lossy WebP q70
 ITERM_MAX = 1_040_000  # iTerm2 drops an OSC 1337 over 1,048,576 bytes; base64 plus a < 100-byte header
@@ -275,16 +273,8 @@ def kitty_image(b64: str, image_id: int, ncols: int, nrows: int, place: bool = T
     return "".join(out)
 
 
-def kitty_place(image_id: int, ncols: int, nrows: int) -> str:
-    return f"\x1b_Ga=p,i={image_id},p=1,c={ncols},r={nrows},C=1,q=2\x1b\\"
-
-
 def kitty_delete(image_id: int) -> str:
     return f"\x1b_Ga=d,d=I,i={image_id},q=2\x1b\\"  # I: the placements and the image data
-
-
-def kitty_unplace(image_id: int) -> str:
-    return f"\x1b_Ga=d,d=i,i={image_id},q=2\x1b\\"  # i: the placements only; the data stays for a=p
 
 
 # ── the player's side ───────────────────────────────────────────────────────
@@ -295,10 +285,9 @@ class Pixels:
     layout), "" while a resize settles, or None when this frame can't be an image (the caller draws cells)."""
 
     def __init__(self, proto: str, cell: tuple[float, float], fd_in: int | None = None, fd_out: int | None = None,
-                 clock: Any = time.monotonic, size: Any = None, logo: Any = None) -> None:
+                 clock: Any = time.monotonic, size: Any = None) -> None:
         self.proto, self.cell, self.fd_in, self.fd_out, self.clock = proto, cell, fd_in, fd_out, clock
         self.size = size or (lambda: winsize(fd_out))  # () -> (cols, rows, xpix, ypix)
-        self.logo_png = logo
         self.seen: tuple | None = None  # the window size (cols, rows, xpix, ypix) last seen, and since when
         self.since = 0.0
         self.drawn: tuple | None = None  # the window size the current layout is for
@@ -307,8 +296,6 @@ class Pixels:
         self.cache_bytes = 0
         self.cache_for: Any = None
         self.flip = 0
-        self.logo: tuple | None = None  # (cell size, base64, transmitted to kitty)
-        self.logo_on = False  # on screen now: drawn once a layout, the credit row leaves its cells alone
         self.broken = False
 
     def _settled(self) -> tuple | None:
@@ -382,10 +369,7 @@ class Pixels:
             new, old = KITTY_IDS[self.flip], KITTY_IDS[1 - self.flip]
             self.flip = 1 - self.flip
             out.append(kitty_image(b64, new, lay.ncols, lay.nrows) + kitty_delete(old))
-        reserve = LOGO_COLS + 1 if self.logo_png and pc >= 30 else 0
-        out.append(wall.credit_row(credit, pc, pr, reserve))
-        if reserve:
-            out.append(self._logo(pc, pr))
+        out.append(wall.credit_row(credit, pc, pr))
         return "".join(out)
 
     def drop(self, pane_rows: int) -> str:
@@ -395,36 +379,12 @@ class Pixels:
         self.lay = self.drawn = None
         return self.clear(pane_rows)
 
-    def _logo(self, pc: int, pr: int) -> str:
-        """The round tac logo, LOGO_COLS x 1 cells at the bar's right end, square in the middle of them."""
-        from PIL import Image
-
-        if self.logo_on:
-            return ""
-        if self.logo is None or self.logo[0] != self.cell:
-            cw, ch = self.cell
-            w, h = max(2, round(LOGO_COLS * cw)), max(2, round(ch))
-            side = min(w, h)
-            mark = Image.open(io.BytesIO(self.logo_png)).convert("RGBA").resize((side, side), Image.Resampling.LANCZOS)
-            box = Image.new("RGB", (w, h), GROUND)
-            box.paste(mark, ((w - side) // 2, (h - side) // 2), mark)
-            self.logo = (self.cell, encode(self.proto, box), False)
-        place = f"\x1b[{pr};{pc - LOGO_COLS + 1}H"
-        self.logo_on = True
-        if self.proto == ITERM:
-            return place + iterm_image(self.logo[1], LOGO_COLS, 1)
-        if not self.logo[2]:
-            self.logo = (self.logo[0], self.logo[1], True)
-            return place + kitty_image(self.logo[1], LOGO_ID, LOGO_COLS, 1)
-        return place + kitty_place(LOGO_ID, LOGO_COLS, 1)
-
     def clear(self, pane_rows: int) -> str:
         """The picture rows back to the ground (a new piece, a new size), our images gone."""
         import wall
 
-        out = ["".join(kitty_delete(i) for i in KITTY_IDS) + kitty_unplace(LOGO_ID) if self.proto == KITTY else ""]
+        out = ["".join(kitty_delete(i) for i in KITTY_IDS) if self.proto == KITTY else ""]
         out.extend(f"\x1b[{r + 1};1H{wall.GROUND_SGR}\x1b[K" for r in range(max(1, pane_rows)))
-        self.logo_on = False
         return "".join(out)
 
     def cleanup(self) -> str:
@@ -432,10 +392,7 @@ class Pixels:
         screen."""
         if self.proto != KITTY:
             return ""
-        return "".join(kitty_delete(i) for i in (*KITTY_IDS, LOGO_ID))
-
-
-LOGO_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "assets", "tac-logo.png")
+        return "".join(kitty_delete(i) for i in KITTY_IDS)
 
 
 def detect(env: dict | None = None, fd_in: int | None = None, fd_out: int | None = None) -> Pixels | None:
@@ -454,9 +411,4 @@ def detect(env: dict | None = None, fd_in: int | None = None, fd_out: int | None
         return None
     if cell is None:
         return None
-    try:
-        with open(LOGO_PATH, "rb") as fh:
-            logo = fh.read(64 * 1024)
-    except OSError:
-        logo = None
-    return Pixels(proto, cell, fd_in, fd_out, logo=logo)
+    return Pixels(proto, cell, fd_in, fd_out)

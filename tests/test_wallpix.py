@@ -260,10 +260,9 @@ class Clock:
         return self.t
 
 
-def pixels(proto, size, clock=None, logo=True):
+def pixels(proto, size, clock=None):
     box = {"size": size}
-    logo_png = Path(wallpix.LOGO_PATH).read_bytes() if logo else None
-    px = wallpix.Pixels(proto, (14.0, 34.0), clock=clock or Clock(), size=lambda: box["size"], logo=logo_png)
+    px = wallpix.Pixels(proto, (14.0, 34.0), clock=clock or Clock(), size=lambda: box["size"])
     return px, box
 
 
@@ -274,45 +273,19 @@ def test_a_frame_is_one_image_over_the_picture_and_the_bar_stays_text(proto):
     lay = px.lay[1]
     assert f"\x1b[{lay.y + 1};{lay.x + 1}H" in s
     if proto == wallpix.ITERM:
-        assert len(OSC1337.findall(s)) == 2  # the frame and the logo
-        assert f"width={lay.ncols};height={lay.nrows}" in s and "width=2;height=1" in s
+        assert len(OSC1337.findall(s)) == 1  # the frame, nothing else over the art
+        assert f"width={lay.ncols};height={lay.nrows}" in s
     else:
         ids = re.findall(r"a=T,f=100,i=(\d+)", s)
-        assert ids == ["7301", "7303"] and "\x1b_Ga=d,d=I,i=7302,q=2\x1b\\" in s  # new placed, old deleted
+        assert ids == ["7301"] and "\x1b_Ga=d,d=I,i=7302,q=2\x1b\\" in s  # new placed, old deleted
     sc = screen(s, 68, 54)
-    assert "@alex" in sc.display[53] and sc.display[53].rstrip().endswith("terminal art club")
-    assert len(sc.display[53].rstrip()) <= 68 - 3  # the logo's two cells and a gap are kept free
+    assert "@alex" in sc.display[53] and sc.display[53].endswith("terminal art club")  # the wordmark at the edge
+    assert wall.credit_row(CREDIT, 68, 54) in s  # the bar exactly as in cell mode
     assert {sc.buffer[53][x].bg for x in range(68)} == {"08080f"}
 
 
-@pytest.mark.parametrize("proto", [wallpix.ITERM, wallpix.KITTY])
-def test_the_logo_is_sent_once_a_layout_not_with_every_frame(proto):
-    """iTerm2 3.7.3: the logo resent with each of 247 frames in 25 s, one more image to decode a frame. Once a
-    layout now: the bar's row is erased up to the logo's cells only; a resize or a clear draws it again (kitty:
-    a placement of the image already sent, never the bytes again)."""
-    clock = Clock()
-    px, box = pixels(proto, (68, 54, 0, 0), clock)
-    logo = "width=2;height=1" if proto == wallpix.ITERM else "i=7303,"
-    sent = lambda s: s.count(logo) if proto == wallpix.ITERM else s.count("a=T,f=100,i=7303,")  # noqa: E731
-    frames = [px.frame(halves(mast_x=k), 80, 66, k, "a", CREDIT) for k in range(10)]
-    frames += [px.frame(halves(mast_x=k), 80, 66, k, "b", CREDIT) for k in range(10)]  # the next piece
-    assert sent("".join(frames)) == 1 and all(logo not in f for f in frames[1:])
-    assert all(f"\x1b[54;1H{wall.GROUND_SGR}\x1b[65X" in f and "\x1b[54;1H" + wall.GROUND_SGR + "\x1b[K" not in f
-               for f in frames[1:])  # ECH, not EL: the logo's cells untouched (frame 0 clears first)
-    box["size"] = (100, 40, 0, 0)
-    assert px.frame(halves(), 80, 66, 0, "b", CREDIT) == ""
-    clock.t = 0.2
-    again = "".join(px.frame(halves(mast_x=k), 80, 66, k, "b", CREDIT) for k in range(5))
-    if proto == wallpix.ITERM:
-        assert again.count(logo) == 1
-    else:
-        assert sent(again) == 0 and again.count(wallpix.kitty_place(7303, 2, 1)) == 1
-        assert wallpix.kitty_unplace(7303) in again and wallpix.kitty_delete(7303) not in again
-    assert px.cleanup().endswith(wallpix.kitty_delete(7303)) or proto == wallpix.ITERM  # on exit: the data too
-
-
 def test_kitty_double_buffers_and_frames_are_cached_per_size():
-    px, _ = pixels(wallpix.KITTY, (68, 54, 0, 0), logo=False)
+    px, _ = pixels(wallpix.KITTY, (68, 54, 0, 0))
     a = px.frame(halves(), 80, 66, 0, "k", CREDIT)
     b = px.frame(halves(mast_x=3), 80, 66, 1, "k", CREDIT)
     c = px.frame(halves(), 80, 66, 0, "k", CREDIT)
@@ -346,7 +319,7 @@ def test_a_frame_pixels_cant_draw_falls_back_to_cells_and_clears_the_images():
     big[0] = ord("x")
     assert px.frame(big, 512, 256, 0, "big", CREDIT) is None
     gone = px.drop(40)
-    assert all(wallpix.kitty_delete(i) in gone for i in (7301, 7302)) and wallpix.kitty_unplace(7303) in gone
+    assert all(wallpix.kitty_delete(i) in gone for i in (7301, 7302))
     assert px.drop(40) == ""
     px.broken = True
     assert px.frame(halves(), 80, 66, 0, "k", CREDIT) is None
@@ -537,7 +510,7 @@ def test_the_pane_player_draws_images_and_cleans_up_on_every_stop(cached_wall, s
         assert tail.rstrip("\r\n").endswith(wall.LEAVE)
         if proto == "kitty":  # after the last image drawn: all three of ours deleted, then the screen restored
             last = tail[tail.rindex("a=T,f=100"):]
-            assert last.endswith("".join(wallpix.kitty_delete(i) for i in (7301, 7302, 7303)) + wall.LEAVE)
+            assert last.endswith("".join(wallpix.kitty_delete(i) for i in (7301, 7302)) + wall.LEAVE)
     finally:
         term.close()
         if proc.poll() is None:
