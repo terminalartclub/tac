@@ -21,10 +21,11 @@ import stat
 import sys
 import threading
 import time
+import unicodedata
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import wallframes
 
@@ -34,13 +35,14 @@ ETAG_RE = re.compile(r'"[0-9a-f]{32}"')
 TEXT_RE = re.compile(r"[^\x00-\x1f\x7f-\x9f­؜᠎​-‏ -‮⁠-⁩﻿]{0,120}")
 MAX_PLAYLIST = 256 * 1024
 MAX_PIECES = 200
+SOURCES = ("week", "week+recent", "picks", "recent")  # the platform's fallback order: week -> picks -> recent
 CACHE_CAP = 128 * 1024 * 1024
 TIMEOUT_S = 10  # per socket operation
 DEADLINE_S = 30  # per request, whole: a server dripping bytes can't hold a piece up longer
 OFFLINE_MAX_AGE_S = 7 * 86400  # offline, a cached piece last confirmed by the platform longer ago isn't replayed
 STALE_TMP_S = 600
 GROUND = (8, 8, 15)
-FG = (204, 204, 204)
+CREDIT_FG = (150, 150, 160)  # the credit's ink: readable on the ground, quieter than the art
 
 
 class WallError(Exception):
@@ -121,7 +123,7 @@ def parse_playlist(body: bytes) -> dict:
         pieces.append({"handle": h, "slug": s, "title": _text(p.get("title"), s),
                        "model": _text(p.get("model_label")) or _text(p.get("model")), "bytes": f["bytes"],
                        "etag": etag})
-    source = doc.get("source") if doc.get("source") in ("week", "picks") else "week"
+    source = doc.get("source") if doc.get("source") in SOURCES else "week"
     return {"week": _text(doc.get("week")), "source": source, "pieces": pieces}
 
 
@@ -318,31 +320,75 @@ def _sgr(fg: int, bg: int) -> str:
             f"48;2;{(bg >> 16) & 255};{(bg >> 8) & 255};{bg & 255}m")
 
 
-GROUND_SGR = _sgr((GROUND[0] << 16) | (GROUND[1] << 8) | GROUND[2], (GROUND[0] << 16) | (GROUND[1] << 8) | GROUND[2])
+GROUND_SGR = _sgr(wallframes.rgb(GROUND), wallframes.rgb(GROUND))
+CREDIT_SGR = _sgr(wallframes.rgb(CREDIT_FG), wallframes.rgb(GROUND))  # never GROUND_SGR's ink: that's invisible
 ENTER = "\x1b[?1049h\x1b[?25l\x1b[?7l\x1b[2J"
-LEAVE = "\x1b[0m\x1b[?7h\x1b[?25h\x1b[?1049l"
+LEAVE = "\x1b]8;;\x1b\\\x1b[0m\x1b[?7h\x1b[?25h\x1b[?1049l"  # closes any hyperlink first
 
 
-def frame_ansi(cur: Any, cols: int, rows: int, pane_cols: int, pane_rows: int, credit: str) -> str:
-    """One whole frame for the pane: the picture scaled down (nearest cell, one factor on both axes) to fit
-    above a one-line credit when the pane is smaller, centred; every row by absolute address and cleared to its
-    end, so a resize or a terminal's reflow can never leave stale cells."""
+def _blocks(n: int, m: int) -> list[tuple[int, int]]:
+    """n source cells into m (<= n) target cells: each target's run [a, b) of sources, every source in one."""
+    return [(t * n // m, (t + 1) * n // m) for t in range(m)]
+
+
+STAND_OUT = (2.0, 16)  # x times the first cell's distance, plus a floor (luma units: 0..5100 a cell)
+
+
+def _pick(vals: list[int], a: int, b: int) -> int:
+    """The index in [a, b) to show. The first (plain sampling) unless another stands out from the local ground
+    (the mean of the two cells just outside the run) by clearly more (STAND_OUT): a one-cell mast or line is
+    kept, while the edge of a wide shape, which stands out from that ground about as much either way, stays
+    put (no ragged edges, no shimmer)."""
+    if b - a == 1:
+        return a
+    out = [vals[j] for j in (a - 1, b) if 0 <= j < len(vals)]
+    ground = sum(out) / len(out) if out else sum(vals[a:b]) / (b - a)
+    far = max(range(a, b), key=lambda j: abs(vals[j] - ground))
+    return far if abs(vals[far] - ground) > STAND_OUT[0] * abs(vals[a] - ground) + STAND_OUT[1] else a
+
+
+def _lum(cp: int, fg: int, bg: int) -> int:
+    """How bright a cell looks (both halves, luma-weighted): a space shows only its bg, a full block its fg."""
+    f = 3 * ((fg >> 16) & 255) + 6 * ((fg >> 8) & 255) + (fg & 255)
+    b = 3 * ((bg >> 16) & 255) + 6 * ((bg >> 8) & 255) + (bg & 255)
+    return 2 * b if cp == 0x20 else 2 * f if cp == 0x2588 else f + b
+
+
+def fit(cur: Any, cols: int, rows: int, ow: int, oh: int) -> list[list[int]]:
+    """The source cell (index into the frame) for each of oh x ow target cells, when the picture is scaled down.
+    Each target cell stands for a run of 1-2 source cells per axis (columns first, then rows): _pick keeps a
+    one-cell feature that plain sampling would drop (it dropped every 5th column at 80x66 into 64x53, and
+    beacon-2's mast with it)."""
+    lum = [_lum(cur[3 * i], cur[3 * i + 1], cur[3 * i + 2]) for i in range(cols * rows)]
+    bx, by = _blocks(cols, ow), _blocks(rows, oh)
+    across = [[y * cols + _pick(lum[y * cols:(y + 1) * cols], a, b) for a, b in bx] for y in range(rows)]
+    grid = [[0] * ow for _ in range(oh)]
+    for x in range(ow):
+        down = [lum[across[y][x]] for y in range(rows)]
+        for t, (a, b) in enumerate(by):
+            grid[t][x] = across[_pick(down, a, b)][x]
+    return grid
+
+
+def frame_ansi(cur: Any, cols: int, rows: int, pane_cols: int, pane_rows: int, credit: Credit | str) -> str:
+    """One whole frame for the pane: the picture scaled down (fit(): one factor on both axes, thin features
+    kept) to fit above the credit bar (the last row, always) when the pane is smaller, centred; every row by absolute address and
+    cleared to its end, so a resize or a terminal's reflow can never leave stale cells."""
     pic_rows = max(1, pane_rows - 1)
     s = min(1.0, pane_cols / cols, pic_rows / rows)
     ow, oh = max(1, int(cols * s)), max(1, int(rows * s))
     x_off, y_off = max(0, (pane_cols - ow) // 2), max(0, (pic_rows - oh) // 2)
-    xs = [min(cols - 1, int(x / s)) for x in range(ow)]
+    src = (fit(cur, cols, rows, ow, oh) if (ow, oh) != (cols, rows)
+           else [[y * cols + x for x in range(cols)] for y in range(rows)])
     out = ["\x1b[H"]
     for r in range(pic_rows):
         out.append(f"\x1b[{r + 1};1H{GROUND_SGR}")
         y = r - y_off
         if 0 <= y < oh:
-            sy = min(rows - 1, int(y / s))
             out.append(" " * x_off)
             last = None
-            base = 3 * sy * cols
-            for sx in xs:
-                i = base + 3 * sx
+            for k in src[y]:
+                i = 3 * k
                 key = (cur[i + 1], cur[i + 2])
                 if key != last:
                     out.append(_sgr(*key))
@@ -350,13 +396,123 @@ def frame_ansi(cur: Any, cols: int, rows: int, pane_cols: int, pane_rows: int, c
                 out.append(wallframes.char(cur[i]))  # never chr() of a raw codepoint: no escapes on the terminal
             out.append(GROUND_SGR)
         out.append("\x1b[K")
-    out.append(f"\x1b[{pane_rows};1H{GROUND_SGR}\x1b[2m{credit[:pane_cols]}\x1b[0m{GROUND_SGR}\x1b[K\x1b[0m")
+    out.append(credit_row(credit, pane_cols, pane_rows))
     return "".join(out)
 
 
-def credit_line(p: dict, i: int, n: int, offline: bool) -> str:
-    parts = [p["title"], f"@{p['handle']}"] + ([p["model"]] if p["model"] else []) + [f"{i + 1}/{n}"]
-    return " · ".join(parts) + ("  (offline: cached pieces only)" if offline else "")
+def _clean(s: str) -> str:
+    """Only characters the playlist sanitiser (TEXT_RE) allows, minus marks and format characters (they'd
+    throw off the width)."""
+    return "".join(ch for ch in s if TEXT_RE.fullmatch(ch) and unicodedata.category(ch)[0] not in "MC")
+
+
+def _width(s: str) -> int:
+    return sum(2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1 for ch in s)
+
+
+def _trunc(s: str, n: int) -> str:
+    """s in at most n columns, cut with an ellipsis."""
+    if _width(s) <= n:
+        return s
+    out, w = "", 0
+    for ch in s:
+        cw = _width(ch)
+        if w + cw > n - 1:
+            break
+        out, w = out + ch, w + cw
+    return out + "…" if n >= 1 else ""
+
+
+SITE = "https://terminalart.club"
+WORDMARK = (("terminal", (0x00, 0xE5, 0xC3)), ("art", (0xA7, 0x8B, 0xFA)), ("club", (0xF4, 0x72, 0xB6)))
+SHORTMARK = tuple((word[0], rgb) for word, rgb in WORDMARK)  # "tac", same colours
+GAP = 2  # columns at least between the credit and the wordmark
+
+
+def _mark_text(mark: tuple) -> str:
+    return " ".join(w for w, _ in mark) if mark is WORDMARK else "".join(w for w, _ in mark)
+
+
+def _osc8(url: str | None, text: str) -> str:
+    """text as an OSC 8 hyperlink (iTerm2, Ghostty, kitty; other terminals show the text), opened and closed in
+    the same write. url is only ever built here from regex-checked names (Credit), never taken from the server."""
+    return f"\x1b]8;;{url}\x1b\\{text}\x1b]8;;\x1b\\" if url else text
+
+
+class Credit(NamedTuple):
+    """The bottom bar: the attribution (CC BY 4.0: it must always show) on the left, the club's wordmark on the
+    right, each a link where the terminal supports it."""
+
+    title: str
+    handle: str  # bare, as the playlist validated it (HANDLE_RE); kept whole in any pane wide enough for it
+    slug: str = ""
+    model: str = ""
+    extra: tuple[str, ...] = ()  # i/n, offline, a skip note
+
+    def handle_url(self) -> str | None:
+        return f"{SITE}/@{self.handle}" if HANDLE_RE.fullmatch(self.handle) else None
+
+    def piece_url(self) -> str | None:
+        ok = HANDLE_RE.fullmatch(self.handle) and SLUG_RE.fullmatch(self.slug)
+        return f"{SITE}/@{self.handle}/{self.slug}" if ok else None
+
+    def layout(self, width: int) -> tuple[list[str], tuple[tuple[str, tuple[int, int, int]], ...]]:
+        """(the left parts, the mark) for this many columns. Narrower: the model goes, then the title (cut first,
+        then gone), then i/n, then the mark shortens to "tac"; "@handle" and a mark stay to the last."""
+        at = f"@{_clean(self.handle)}" if self.handle else ""
+        head = [at] if at else []
+        title = [self.title] if self.title else []
+        model = [self.model] if self.model else []
+        extra = list(self.extra)
+
+        def fits(parts: list[str], mark: tuple) -> bool:
+            return _width(" · ".join(parts)) + GAP + len(_mark_text(mark)) <= width
+
+        for mark, parts in ((WORDMARK, title + head + model + extra), (WORDMARK, title + head + extra)):
+            if fits(parts, mark):
+                return parts, mark
+        room = width - GAP - len(_mark_text(WORDMARK)) - _width(" · ".join([""] + head + extra))
+        if title and room >= 4:
+            return [_trunc(self.title, room)] + head + extra, WORDMARK
+        for mark, parts in ((WORDMARK, head + extra), (SHORTMARK, head + extra), (SHORTMARK, head)):
+            if fits(parts, mark):
+                return parts, mark
+        room = width - GAP - 3
+        if room >= 2:
+            return [_trunc(at, room)], SHORTMARK
+        return [_trunc(at, width)], ()
+
+    def fit(self, width: int) -> str:
+        """The bar as plain text, for tests and widths."""
+        parts, mark = self.layout(width)
+        left, right = " · ".join(parts), _mark_text(mark)
+        return left + " " * (width - _width(left) - len(right)) + right if right else left
+
+
+def credit_line(p: dict, i: int, n: int, offline: bool) -> Credit:
+    return Credit(_clean(p["title"]), p["handle"], p.get("slug", ""), _clean(p.get("model") or ""),
+                  (f"{i + 1}/{n}",) + (("offline",) if offline else ()))
+
+
+def credit_row(credit: Credit | str, pane_cols: int, pane_rows: int) -> str:
+    """The pane's last row, which the art never uses: the credit in readable ink at the left, the wordmark at the
+    right, every hyperlink closed before the row ends."""
+    if not isinstance(credit, Credit):
+        credit = Credit(_clean(credit), "")
+    parts, mark = credit.layout(pane_cols)
+    at = f"@{_clean(credit.handle)}" if credit.handle else None
+    left = " · ".join(_osc8(credit.handle_url(), x) if x == at else x for x in parts)
+    out = [f"\x1b[{pane_rows};1H{GROUND_SGR}\x1b[K{CREDIT_SGR}{left}"]
+    if mark:
+        out.append(f"\x1b[{pane_rows};{pane_cols - len(_mark_text(mark)) + 1}H")
+        url = credit.piece_url()
+        inner = []
+        for k, (w, rgb) in enumerate(mark):
+            sep = " " if mark is WORDMARK and k else ""
+            inner.append(f"{_sgr(wallframes.rgb(rgb), wallframes.rgb(GROUND))}{sep}{w}")
+        out.append(_osc8(url, "".join(inner)))
+    out.append(f"{GROUND_SGR}\x1b[0m")
+    return "".join(out)
 
 
 def pane_size() -> tuple[int, int]:
@@ -488,8 +644,8 @@ def play(doc: dict, base: str | None, cache: Cache, seconds: float, offline: boo
                     failed += 1
                     pc, pr = pane_size()
                     note = "taken off the wall" if key(p) in gone else "couldn't load it; skipping"
-                    out.write(f"\x1b[H{GROUND_SGR}\x1b[2J\x1b[{pr};1H\x1b[2m{p['title']} · @{p['handle']}: {note}"
-                              "\x1b[0m")
+                    out.write(f"\x1b[H{GROUND_SGR}\x1b[2J"
+                              + credit_row(Credit(_clean(p["title"]), p["handle"], p["slug"], extra=(note,)), pc, pr))
                     out.flush()
                     if failed >= len(pieces) and played == 0:
                         raise WallError("no piece on the wall could be loaded")

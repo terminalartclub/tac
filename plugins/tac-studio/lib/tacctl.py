@@ -1186,10 +1186,13 @@ def cmd_wall(a: argparse.Namespace) -> int:
         print(f"offline ({safe(e)}): playing the {len(cached)} cached piece{'s' * (len(cached) != 1)}.")
         offline = True
     if not doc["pieces"]:
-        print("the wall is empty this week, and there are no picks yet. Make something for it: /tac:create")
+        print("there are no picks yet." if a.picks else
+              "the wall is empty: nothing published yet. Make something for it: /tac:create")
         return 0
     argv = [str(PLUGIN / "bin" / "tacctl"), "wall-play", "--seconds", f"{a.seconds:g}"] + (["--offline"] if offline else [])
-    what = "this week's wall" if doc["source"] == "week" else "the picks (nothing on this week's wall yet)"
+    what = {"week+recent": "this week's wall, topped up with recent pieces",
+            "picks": "the picks (nothing on this week's wall yet)",
+            "recent": "the most recent pieces (nothing this week, no picks yet)"}.get(doc["source"], "this week's wall")
     n = len(doc["pieces"])
     where = "window" if a.window else "tab" if a.tab else "split"
     opened, why = (None, "--no-window") if a.no_window else termwin.open_play_window(argv, where=where)

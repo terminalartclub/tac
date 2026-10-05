@@ -32,6 +32,13 @@ def film(n: int = 3, cols: int = 8, rows: int = 4, fps: int = 10, fg=(230, 120, 
     return enc.finish(n / fps)
 
 
+def plain(text: str) -> str:
+    """The player's output without its OSC 8 hyperlinks (the @handle and the wordmark are links)."""
+    import re
+
+    return re.sub(r"\x1b\]8;;[^\x1b]*\x1b\\", "", text)
+
+
 # ── the format ─────────────────────────────────────────────────────────────
 
 
@@ -130,6 +137,7 @@ class Platform:
         self.requests: list[str] = []
         self.redirect = False
         self.down = False
+        self.source = "week"
         platform = self
 
         class H(http.server.BaseHTTPRequestHandler):
@@ -147,7 +155,7 @@ class Platform:
                     self.end_headers()
                     return
                 if self.path.startswith("/v1/wall.json"):
-                    body = json.dumps({"week": "2026-W41", "source": "week", "pieces": platform.order}).encode()
+                    body = json.dumps({"week": "2026-W41", "source": platform.source, "pieces": platform.order}).encode()
                     ctype, tag = "application/json", None
                 else:
                     key = "/".join(self.path.split("/")[3:5])
@@ -294,7 +302,7 @@ def test_lazy_fetch_never_more_than_one_ahead(plat, tmp_path, monkeypatch):
         return real(*a, **k)
 
     monkeypatch.setattr(wall, "frame_ansi", spy)
-    monkeypatch.setattr(wall, "pane_size", lambda: (40, 10))
+    monkeypatch.setattr(wall, "pane_size", lambda: (80, 10))
     out = io.StringIO()
     clock = Clock()
     assert wall.play(doc, plat.base, cache, 1.0, False, out=out, clock=clock, sleep=clock.sleep, rounds=1) == 0
@@ -303,7 +311,7 @@ def test_lazy_fetch_never_more_than_one_ahead(plat, tmp_path, monkeypatch):
     assert plat.frames_requests()[:5] == [f"/v1/pieces/alex/p{i}/frames" for i in range(5)]  # in order, lazily
     text = out.getvalue()
     assert text.startswith(wall.ENTER) and text.endswith(wall.LEAVE)
-    assert "Piece 0 · @alex · Opus 5.5 · 1/5" in text and "Piece 4 · @alex · Opus 5.5 · 5/5" in text
+    assert "Piece 0 · @alex · Opus 5.5 · 1/5" in plain(text) and "Piece 4 · @alex · Opus 5.5 · 5/5" in plain(text)
 
 
 def test_offline_plays_only_what_is_cached(plat, tmp_path, monkeypatch):
@@ -317,7 +325,7 @@ def test_offline_plays_only_what_is_cached(plat, tmp_path, monkeypatch):
     out, clock = io.StringIO(), Clock()
     assert wall.play(doc, None, cache, 0.5, True, out=out, clock=clock, sleep=clock.sleep, rounds=2) == 0
     assert "Cached One" in out.getvalue() and "Never Fetched" not in out.getvalue()
-    assert "offline: cached pieces only" in out.getvalue()
+    assert " · offline" in out.getvalue()
     empty = wall.Cache(tmp_path / "empty")
     assert wall.play(doc, None, empty, 0.5, True, out=io.StringIO(), clock=clock, sleep=clock.sleep) == 1
 
@@ -331,7 +339,7 @@ def test_a_piece_that_fails_is_skipped_not_fatal(plat, tmp_path, monkeypatch):
     out, clock = io.StringIO(), Clock()
     assert wall.play(doc, plat.base, wall.Cache(tmp_path / "c"), 0.5, False, out=out, clock=clock,
                      sleep=clock.sleep, rounds=1) == 0
-    assert "A Piece · @alex: taken off the wall" in out.getvalue() and "Still Plays" in out.getvalue()
+    assert "A Piece · @alex · taken off the wall" in plain(out.getvalue()) and "Still Plays" in out.getvalue()
 
 
 def test_frames_scale_down_to_fit_and_are_written_by_address():
@@ -344,8 +352,126 @@ def test_frames_scale_down_to_fit_and_are_written_by_address():
     pyte.ByteStream(screen).feed(s.encode())
     drawn = [ln.rstrip() for ln in screen.display]
     assert drawn[0] == "0" + "▀" * 39  # 80 columns into 40: every other cell, the whole width
-    assert drawn[33] == "credit" and all(len(ln) <= 40 for ln in drawn)
+    assert drawn[33].startswith("credit") and drawn[33].endswith("terminal art club")
+    assert all(len(ln) <= 40 for ln in drawn)
     assert "\n" not in s and "\x1b[A" not in s
+
+
+def _scene(cols=80, rows=66, mast_x=None, line_y=None, ground=(40, 30, 30), ink=(10, 8, 12)):
+    """A key frame of half-block cells on a flat ground, with a one-cell-wide mast (rows 10..55) at mast_x
+    and/or a one-cell-tall line (cols 10..69) at line_y."""
+    from array import array
+
+    g, k = wallframes.rgb(ground), wallframes.rgb(ink)
+    cur = array("I")
+    for y in range(rows):
+        for x in range(cols):
+            hit = (x == mast_x and 10 <= y < 56) or (y == line_y and 10 <= x < 70)
+            cur.extend((0x2580, k if hit else g, k if hit else g))
+    return cur
+
+
+def _screen(s, cols, rows):
+    import pyte
+
+    screen = pyte.Screen(cols, rows)
+    pyte.ByteStream(screen).feed(s.encode())
+    return screen
+
+
+@pytest.mark.parametrize("pane", [(107, 54), (60, 40)])
+def test_a_one_cell_feature_survives_the_downscale(pane):
+    """beacon-2's mast is one column of 80: nearest-cell sampling into 64x53 (a 107x54 pane) dropped every 5th
+    column, the mast's among them. At any column, and a one-row line at any row, it stays: unbroken."""
+    pc, pr = pane
+    s = min(pc / 80, (pr - 1) / 66)
+    for x in range(80):
+        sc = _screen(wall.frame_ansi(_scene(mast_x=x), 80, 66, pc, pr, "c"), pc, pr)
+        cols = {c for r in range(pr - 1) for c, cell in sc.buffer[r].items() if cell.bg == "0a080c"}
+        assert len(cols) == 1, (x, cols)  # one column wide, never smeared or lost
+        c0 = next(iter(cols))
+        rows_hit = [r for r in range(pr - 1) if sc.buffer[r][c0].bg == "0a080c"]
+        assert rows_hit == list(range(rows_hit[0], rows_hit[0] + len(rows_hit)))  # unbroken
+        assert len(rows_hit) >= int(46 * s)
+    for y in range(66):
+        sc = _screen(wall.frame_ansi(_scene(line_y=y), 80, 66, pc, pr, "c"), pc, pr)
+        rows = {r for r in range(pr - 1) if any(cell.bg == "0a080c" for cell in sc.buffer[r].values())}
+        assert len(rows) == 1, (y, rows)
+        r0 = next(iter(rows))
+        assert sum(cell.bg == "0a080c" for cell in sc.buffer[r0].values()) >= int(60 * s)
+
+
+def test_a_flat_ground_scales_to_itself():
+    sc = _screen(wall.frame_ansi(_scene(), 80, 66, 60, 40, "c"), 60, 40)
+    art = {(cell.fg, cell.bg) for r in range(39) for cell in sc.buffer[r].values() if cell.data == "▀"}
+    assert art == {("281e1e", "281e1e")}
+
+
+VANITAS = {"title": "Vanitas", "handle": "alex-radaev", "slug": "vanitas", "model": "Opus 5.5"}
+
+
+def test_the_credit_is_readable_on_the_last_row():
+    """It was drawn in the ground's own colour (08080f on 08080f): there, and invisible. CC BY needs it seen."""
+    bar = wall.credit_line(VANITAS, 0, 4, False)
+    sc = _screen(wall.frame_ansi(_scene(mast_x=25), 80, 66, 68, 54, bar), 68, 54)
+    row = sc.display[53]
+    assert row.startswith("Vanitas · @alex-radaev · Opus 5.5 · 1/4") and row.endswith("terminal art club")
+    cells = sc.buffer[53]
+    assert {cells[x].fg for x in range(39)} == {"9696a0"} and all(cells[x].bg == "08080f" for x in range(68))
+    assert [cells[x].fg for x in (51, 60, 64)] == ["00e5c3", "a78bfa", "f472b6"]  # terminal / art / club
+
+
+@pytest.mark.parametrize("width, bar", [
+    (120, "Vanitas · @alex-radaev · Opus 5.5 · 1/4" + " " * 64 + "terminal art club"),
+    (68, "Vanitas · @alex-radaev · Opus 5.5 · 1/4" + " " * 12 + "terminal art club"),
+    (40, "@alex-radaev · 1/4" + " " * 5 + "terminal art club"),
+    (24, "@alex-radaev · 1/4   tac"),
+])
+def test_the_bottom_bar_layout(width, bar):
+    assert wall.credit_line(VANITAS, 0, 4, False).fit(width) == bar
+
+
+def test_the_bar_degrades_model_then_title_then_the_mark_and_keeps_the_handle():
+    c = wall.credit_line({**VANITAS, "title": "A Very Long Title Indeed"}, 1, 9, True)
+    assert "Opus 5.5" in c.fit(85) and c.fit(84).startswith(
+        "A Very Long Title Indeed · @alex-radaev · 2/9 · offline ")  # the model goes first
+    assert c.fit(56).startswith("A Ver… · @alex-radaev · 2/9 · offline ")  # then the title is cut
+    assert c.fit(52).startswith("@alex-radaev · 2/9 · offline ")  # then it goes
+    assert c.fit(30) == "@alex-radaev" + " " * 15 + "tac"  # then the mark shortens
+    for w in range(17, 140):
+        bar = c.fit(w)
+        assert "@alex-radaev" in bar and wall._width(bar) == w and bar.rstrip().endswith(("club", "tac")), w
+    wide = wall.Credit("灯塔灯塔灯塔灯塔灯塔灯塔灯塔", "alex", "x", extra=("1/2",))
+    assert wall._width(wide.fit(40)) == 40 and "… · @alex · 1/2" in wide.fit(40)
+
+
+def test_the_bar_links_are_well_formed_closed_and_built_only_from_checked_names():
+    import re
+
+    row = wall.credit_row(wall.credit_line(VANITAS, 0, 4, False), 68, 54)
+    opens = re.findall(r"\x1b\]8;;([^\x1b]*)\x1b\\", row)
+    assert opens == ["https://terminalart.club/@alex-radaev", "",
+                     "https://terminalart.club/@alex-radaev/vanitas", ""]  # each link opened, then closed
+    assert row.rindex("\x1b]8;;\x1b\\") > row.rindex("\x1b]8;;https")
+    sc = _screen(row, 68, 54)
+    assert sc.display[53].endswith("terminal art club")
+    # a name that isn't a valid handle or slug never reaches a URL (the playlist drops such entries anyway)
+    evil = wall.Credit("t", "x\x1b]8;;http://evil\x1b\\", "../../a", extra=())
+    assert "evil" not in "".join(re.findall(r"\x1b\]8;;([^\x1b]*)", wall.credit_row(evil, 80, 5)))
+    assert wall.Credit("t", "alex", "../x").piece_url() is None and wall.Credit("t", "alex", "ok").piece_url()
+    assert wall.LEAVE.startswith("\x1b]8;;\x1b\\")  # restore closes a link a stop may have cut
+
+
+def test_the_bar_text_goes_through_the_sanitiser():
+    bar = wall.credit_line({**VANITAS, "title": "Evil\u202e\u200b\x1b[2Jx\u0301"}, 0, 1, False)
+    assert bar.title == "Evil[2Jx"
+
+
+def test_the_credit_and_the_art_never_share_a_row():
+    for pc, pr in ((107, 54), (60, 40), (80, 67), (24, 5), (18, 2)):
+        bar = wall.credit_line(VANITAS, 0, 4, False)
+        sc = _screen(wall.frame_ansi(_scene(mast_x=25), 80, 66, pc, pr, bar), pc, pr)
+        assert "@alex-radaev" in sc.display[pr - 1] and "▀" not in sc.display[pr - 1]
 
 
 # ── the commands ───────────────────────────────────────────────────────────
@@ -393,9 +519,23 @@ def test_tac_wall_offline_with_nothing_cached_is_an_error(plat, opened, capsys):
     assert "nothing is cached from the last 7 days" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("source, said", [
+    ("week+recent", "playing this week's wall, topped up with recent pieces, 1 piece"),
+    ("picks", "playing the picks (nothing on this week's wall yet), 1 piece"),
+    ("recent", "playing the most recent pieces (nothing this week, no picks yet), 1 piece"),
+    ("nonsense", "playing this week's wall, 1 piece"),
+])
+def test_tac_wall_says_which_fallback_it_plays(plat, opened, capsys, source, said):
+    """The platform falls back week -> picks -> recent and tops up a thin week; the line Claude relays says so."""
+    plat.source = source
+    plat.add("alex", "kettle", film())
+    assert tacctl.main(["wall"]) == 0
+    assert said in capsys.readouterr().out
+
+
 def test_an_empty_wall_says_so(plat, opened, capsys):
     assert tacctl.main(["wall"]) == 0
-    assert "the wall is empty this week" in capsys.readouterr().out and opened == []
+    assert "the wall is empty: nothing published yet" in capsys.readouterr().out and opened == []
 
 
 @pytest.mark.parametrize("bad", ["-1", "3601", "nan", "x"])
@@ -456,6 +596,71 @@ def test_the_pane_player_gives_the_terminal_back_on_every_stop(plat, tmp_path, s
         if pid:
             os.kill(pid, sigmod.SIGKILL)
             os.waitpid(pid, 0)
+        os.close(fd)
+
+
+def test_the_bottom_bar_holds_the_last_row_through_a_resize_and_a_piece_change(plat):
+    """`tacctl wall-play` in a real pty: after the first frame, after a resize (narrower: the model and title
+    give way, @handle stays) and after the next piece starts (scaled: 80x66 into the pane), the last row is the
+    bar, in its own ink on the ground, and no art cell is on it."""
+    import select
+    import signal as sigmod
+    import sys
+    import time
+
+    import pyte
+
+    plat.add("alex", "kettle", film(30), title="Kettle")
+    plat.add("alex", "big", film(30, cols=80, rows=66), title="Big One")
+    cache = wall.Cache()
+    doc = wall.fetch_playlist(plat.base, False)
+    cache.save_playlist(doc, plat.base)
+    for p in doc["pieces"]:
+        cache.fetch(plat.base, p)
+    plat.server.shutdown()  # offline: plays from the cache
+    plat.server.server_close()
+    for t in threading.enumerate():
+        if t is not threading.main_thread():
+            t.join(5)
+    import ptyspawn
+
+    env = {k: v for k, v in os.environ.items() if k not in ("COLUMNS", "LINES")}
+    lib = Path(tacctl.__file__).parent
+    proc, fd = ptyspawn.spawn([sys.executable, str(lib / "tacctl.py"), "wall-play", "--seconds", "2"], 70, 20, env)
+    screen = pyte.Screen(70, 20)
+    stream = pyte.ByteStream(screen)
+
+    def pump(until, timeout=6.0):
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
+            r, _, _ = select.select([fd], [], [], 0.05)
+            if r:
+                stream.feed(os.read(fd, 65536))
+                if until():
+                    return True
+        return False
+
+    def bar_ok(*want):
+        last = screen.lines - 1
+        row = screen.display[last]
+        cells = [screen.buffer[last][x] for x in range(screen.columns)]
+        return (all(w in row for w in want) and "▀" not in row and all(c.bg == "08080f" for c in cells)
+                and "e6781e" not in {c.fg for c in cells})  # the art's ink never on the bar
+
+    try:
+        assert pump(lambda: bar_ok("Kettle", "@alex", "Opus 5.5", "terminal art club")), screen.display[-1]
+        ptyspawn.winsize(fd, 26, 12)  # narrower and shorter: SIGWINCH, the next frame is drawn at 26x12
+        screen.resize(12, 26)
+        assert pump(lambda: bar_ok("@alex", "tac") and "Opus" not in screen.display[-1]), screen.display[-1]
+        assert pump(lambda: bar_ok("@alex", "2/2", "tac")), screen.display[-1]  # the next piece, scaled
+        assert screen.display[-1].startswith("@alex · 2/2")
+    finally:
+        proc.send_signal(sigmod.SIGTERM)
+        try:
+            proc.wait(5)
+        except Exception:  # noqa: BLE001
+            proc.kill()
+            proc.wait()
         os.close(fd)
 
 
@@ -537,6 +742,7 @@ def test_a_piece_delisted_mid_session_leaves_after_the_lap(plat, tmp_path, monke
     out, clock = io.StringIO(), Clock()
     assert wall.play(doc, plat.base, cache, 0.3, False, out=out, clock=clock, sleep=clock.sleep, rounds=3) == 0
     text = out.getvalue()
+    text = plain(text)
     assert text.count("Goes · @alex") >= 1 and "Stays · @alex · Opus 5.5 · 1/1" in text  # lap 2 on: one piece
     assert cache.cached({"handle": "alex", "slug": "b"}) is None
 

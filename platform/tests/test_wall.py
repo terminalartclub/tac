@@ -179,10 +179,10 @@ async def test_hidden_suspended_and_deleted_pieces_never_reach_recent_or_the_top
 
 
 @pytest.mark.parametrize("arrange", ["recent", "week+recent"])
-async def test_the_0_1_3_plugin_parser_takes_the_new_sources(ctx, arrange, tmp_path):
-    """The plugin as shipped in 0.1.3 checks `source` against ("week", "picks") and maps anything else to
-    "week" (lib/wall.py parse_playlist); `source` is never shown or branched on, so the new values need no
-    plugin release. This runs that parser, and its cache round trip, on the platform's real response."""
+async def test_the_plugin_parser_takes_the_new_sources(ctx, arrange, tmp_path):
+    """The plugin (lib/wall.py parse_playlist) keeps "recent" and "week+recent" since 0.1.4, so `tacctl wall` can
+    say what it plays (0.1.3 mapped them to "week", harmlessly). This runs that parser, and its cache round
+    trip, on the platform's real response."""
     import importlib.util
     import sys
     from pathlib import Path
@@ -205,7 +205,7 @@ async def test_the_0_1_3_plugin_parser_takes_the_new_sources(ctx, arrange, tmp_p
     sent = json.loads(body)
     assert sent["source"] == arrange
     got = plugin.parse_playlist(body)
-    assert got["source"] == "week" and got["week"] == sent["week"]
+    assert got["source"] == arrange and got["week"] == sent["week"]
     assert [(p["handle"], p["slug"], p["etag"]) for p in got["pieces"]] == \
         [(p["handle"], p["slug"], p["etag"]) for p in sent["pieces"]]
     cache = plugin.Cache(tmp_path / "wall")
