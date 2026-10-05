@@ -453,6 +453,33 @@ def test_a_mixed_frame_keeps_the_cell_path():
     assert {c[0] for row in wall.scaled(halves, 80, 66, 64, 53) for c in row} == {0x2580}
 
 
+def test_a_big_frame_is_presampled_to_twice_the_target():
+    """512x256 into a 250x70 pane: _pick sees at most 2x the target per axis (cost follows the pane), and a
+    frame within 2x is untouched."""
+    big = _scene(cols=512, rows=256)
+    sub, c, r = wall._presample(big, 512, 256, 138, 69)
+    assert (c, r) == (276, 138) and len(sub) == 3 * c * r
+    assert wall._presample(big, 512, 256, 300, 200)[1:] == (512, 256)
+    cells = wall.scaled(big, 512, 256, 138, 69)
+    assert len(cells) == 69 and {len(row) for row in cells} == {138}
+    assert {c for row in cells for c in row} == {(0x2580, 0x281E1E, 0x281E1E)}
+
+
+def test_an_unchanged_frame_reuses_the_last_scaled_grid():
+    """A delta frame with no spans leaves the buffer as it was: no second scale. frames() updates one buffer
+    in place, so the reuse must notice a change made to the same object."""
+    from array import array
+
+    cur = _scene(mast_x=25)
+    first = wall.scaled(cur, 80, 66, 64, 53)
+    assert wall.scaled(cur, 80, 66, 64, 53) is first
+    assert wall.scaled(array("I", cur), 80, 66, 64, 53) is first  # equal contents, another object
+    cur[3 * (40 * 80 + 60) + 1] = 0xFFFFFF  # changed in place
+    again = wall.scaled(cur, 80, 66, 64, 53)
+    assert again is not first and again != first
+    assert wall.scaled(cur, 80, 66, 60, 40) is not again  # another size: scaled afresh
+
+
 def test_a_flat_ground_scales_to_itself():
     sc = _screen(wall.frame_ansi(_scene(), 80, 66, 60, 40, "c"), 60, 40)
     art = {(cell.fg, cell.bg) for r in range(39) for cell in sc.buffer[r].values() if cell.data == "▀"}
@@ -495,6 +522,19 @@ def test_the_bar_degrades_model_then_title_then_the_mark_and_keeps_the_handle():
         assert "@alex-radaev" in bar and wall._width(bar) == w and bar.rstrip().endswith(("club", "tac")), w
     wide = wall.Credit("灯塔灯塔灯塔灯塔灯塔灯塔灯塔", "alex", "x", extra=("1/2",))
     assert wall._width(wide.fit(40)) == 40 and "… · @alex · 1/2" in wide.fit(40)
+
+
+@pytest.mark.parametrize("handle", ["ab", "a" * 24])
+def test_the_whole_handle_shows_at_every_width_it_fits(handle):
+    """CC BY attribution beats our brand: the mark shortens, then goes, before "@handle" is ever cut."""
+    c = wall.credit_line({**VANITAS, "handle": handle}, 0, 4, False)
+    at = "@" + handle
+    for w in range(len(at), 200):
+        parts, mark = c.layout(w)
+        assert at in parts, (w, parts, mark)
+        assert at in _screen(wall.credit_row(c, w, 3), w, 3).display[2]  # drawn whole, not just laid out
+    for w in range(1, len(at)):
+        assert c.fit(w) == at[:w - 1] + "…" and c.layout(w)[1] == ()  # only when it can't fit at all: cut, no mark
 
 
 def test_the_bar_links_are_well_formed_closed_and_built_only_from_checked_names():

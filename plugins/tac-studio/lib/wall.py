@@ -24,6 +24,7 @@ import time
 import unicodedata
 import urllib.error
 import urllib.request
+from array import array
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -338,13 +339,24 @@ def _pick(vals: list[int], a: int, b: int) -> int:
     """The index in [a, b) to show. The first (plain sampling) unless another stands out from the local ground
     (the mean of the two cells just outside the run) by clearly more (STAND_OUT): a one-cell mast or line is
     kept, while the edge of a wide shape, which stands out from that ground about as much either way, stays
-    put (no ragged edges, no shimmer)."""
+    put (no ragged edges, no shimmer). Hot (tens of thousands of calls a frame): plain loops, no key funcs."""
     if b - a == 1:
         return a
-    out = [vals[j] for j in (a - 1, b) if 0 <= j < len(vals)]
-    ground = sum(out) / len(out) if out else sum(vals[a:b]) / (b - a)
-    far = max(range(a, b), key=lambda j: abs(vals[j] - ground))
-    return far if abs(vals[far] - ground) > STAND_OUT[0] * abs(vals[a] - ground) + STAND_OUT[1] else a
+    if a > 0 and b < len(vals):
+        ground = (vals[a - 1] + vals[b]) / 2
+    elif a > 0:
+        ground = vals[a - 1]
+    elif b < len(vals):
+        ground = vals[b]
+    else:
+        ground = sum(vals[a:b]) / (b - a)
+    first = far = abs(vals[a] - ground)
+    best = a
+    for j in range(a + 1, b):
+        d = abs(vals[j] - ground)
+        if d > far:  # ties keep the earlier
+            best, far = j, d
+    return best if far > STAND_OUT[0] * first + STAND_OUT[1] else a
 
 
 def _lum(cp: int, fg: int, bg: int) -> int:
@@ -374,26 +386,25 @@ UPPER, LOWER, FULL = 0x2580, 0x2584, 0x2588
 HALVES = frozenset((UPPER, LOWER, FULL, wallframes.SPACE))  # cells that are just two pixels, top and bottom
 
 
-def _pix_lum(c: int) -> int:
-    return 2 * (3 * ((c >> 16) & 255) + 6 * ((c >> 8) & 255) + (c & 255))  # 2x: same units as _lum's cells
-
-
 def fit_pixels(cur: Any, cols: int, rows: int, ow: int, oh: int) -> list[list[tuple[int, int, int]]] | None:
     """fit() at twice the vertical resolution, for a frame of half blocks (every cell UPPER, LOWER, FULL or a
     space): the cells as a cols x 2*rows image, scaled down with the same _pick per pixel column and pixel row,
     repacked as UPPER cells (fg the top pixel, bg the bottom one). A one-pixel line (half a cell) survives;
     cell rows would have kept a whole cell or dropped it. None for any other frame (glyphs need fit())."""
     cps = cur[0::3]
-    if not HALVES.issuperset(cps):
-        return None
     fgs, bgs = cur[1::3], cur[2::3]
-    top = [f if cp in (UPPER, FULL) else b for cp, f, b in zip(cps, fgs, bgs)]
-    bot = [f if cp in (LOWER, FULL) else b for cp, f, b in zip(cps, fgs, bgs)]
+    if cps.count(UPPER) == len(cps):  # the usual frame: no per-cell work to unpack it
+        top, bot = fgs, bgs
+    elif HALVES.issuperset(cps):
+        top = [f if cp in (UPPER, FULL) else b for cp, f, b in zip(cps, fgs, bgs)]
+        bot = [f if cp in (LOWER, FULL) else b for cp, f, b in zip(cps, fgs, bgs)]
+    else:
+        return None
     img = []  # pixel rows
     for y in range(rows):
         img.append(top[y * cols:(y + 1) * cols])
         img.append(bot[y * cols:(y + 1) * cols])
-    lum = [[_pix_lum(c) for c in row] for row in img]
+    lum = [[2 * (3 * (c >> 16 & 255) + 6 * (c >> 8 & 255) + (c & 255)) for c in row] for row in img]  # 2x: _lum's units
     bx, by = _blocks(cols, ow), _blocks(2 * rows, 2 * oh)
     across = [[_pick(lrow, a, b) for a, b in bx] for lrow in lum]  # source column, per pixel row and target col
     out = [[0] * ow for _ in range(2 * oh)]
@@ -405,16 +416,41 @@ def fit_pixels(cur: Any, cols: int, rows: int, ow: int, oh: int) -> list[list[tu
     return [[(UPPER, out[2 * t][x], out[2 * t + 1][x]) for x in range(ow)] for t in range(oh)]
 
 
+def _presample(cur: Any, cols: int, rows: int, ow: int, oh: int) -> tuple[Any, int, int]:
+    """Past 2x down, every other cell of a big frame is work _pick can't use: sample it (cell centres) to at most
+    2x the target first, so the cost follows the pane, not the frame (512x256 into 250x70: 131k cells -> 38k)."""
+    sc, sr = min(cols, 2 * ow), min(rows, 2 * oh)
+    if (sc, sr) == (cols, rows):
+        return cur, cols, rows
+    xs = [(2 * j + 1) * cols // (2 * sc) for j in range(sc)]
+    sub = array("I")
+    for j in range(sr):
+        base = 3 * ((2 * j + 1) * rows // (2 * sr)) * cols
+        row = cur[base:base + 3 * cols]
+        for x in xs:
+            sub.extend(row[3 * x:3 * x + 3])
+    return sub, sc, sr
+
+
+_LAST: list[Any] = [None]  # the last frame scaled: (cols, rows, ow, oh, a copy of it, its cells)
+
+
 def scaled(cur: Any, cols: int, rows: int, ow: int, oh: int) -> list[list[tuple[int, int, int]]]:
     """The oh x ow cells (codepoint, fg, bg) to draw: the frame itself at its own size; scaled down, by pixels
-    when it is all half blocks (fit_pixels), else by cells (fit)."""
+    when it is all half blocks (fit_pixels), else by cells (fit). A frame unchanged since the last call (a delta
+    with no spans: a still piece, a held pose) reuses the last result."""
+    last = _LAST[0]
+    if last is not None and last[:4] == (cols, rows, ow, oh) and last[4] == cur:
+        return last[5]
     if (ow, oh) == (cols, rows):
-        return [[(cur[3 * i], cur[3 * i + 1], cur[3 * i + 2]) for i in range(y * cols, (y + 1) * cols)]
-                for y in range(rows)]
-    pix = fit_pixels(cur, cols, rows, ow, oh)
-    if pix is not None:
-        return pix
-    return [[(cur[3 * k], cur[3 * k + 1], cur[3 * k + 2]) for k in row] for row in fit(cur, cols, rows, ow, oh)]
+        cells = [[(cur[3 * i], cur[3 * i + 1], cur[3 * i + 2]) for i in range(y * cols, (y + 1) * cols)]
+                 for y in range(rows)]
+    else:
+        src, c, r = _presample(cur, cols, rows, ow, oh)
+        cells = fit_pixels(src, c, r, ow, oh) or [
+            [(src[3 * k], src[3 * k + 1], src[3 * k + 2]) for k in row] for row in fit(src, c, r, ow, oh)]
+    _LAST[0] = (cols, rows, ow, oh, array("I", cur), cells)
+    return cells
 
 
 def frame_ansi(cur: Any, cols: int, rows: int, pane_cols: int, pane_rows: int, credit: Credit | str) -> str:
@@ -502,7 +538,8 @@ class Credit(NamedTuple):
 
     def layout(self, width: int) -> tuple[list[str], tuple[tuple[str, tuple[int, int, int]], ...]]:
         """(the left parts, the mark) for this many columns. Narrower: the model goes, then the title (cut first,
-        then gone), then i/n, then the mark shortens to "tac"; "@handle" and a mark stay to the last."""
+        then gone), then i/n, then the mark shortens to "tac", then it goes; "@handle" is cut only when it alone
+        doesn't fit."""
         at = f"@{_clean(self.handle)}" if self.handle else ""
         head = [at] if at else []
         title = [self.title] if self.title else []
@@ -521,10 +558,7 @@ class Credit(NamedTuple):
         for mark, parts in ((WORDMARK, head + extra), (SHORTMARK, head + extra), (SHORTMARK, head)):
             if fits(parts, mark):
                 return parts, mark
-        room = width - GAP - 3
-        if room >= 2:
-            return [_trunc(at, room)], SHORTMARK
-        return [_trunc(at, width)], ()
+        return [_trunc(at, width)], ()  # the mark goes before the handle is ever cut: attribution wins
 
     def fit(self, width: int) -> str:
         """The bar as plain text, for tests and widths."""
