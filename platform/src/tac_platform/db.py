@@ -80,6 +80,7 @@ CREATE TABLE IF NOT EXISTS submissions (
     published_at TEXT,
     platform_fault INTEGER NOT NULL DEFAULT 0,  -- rejected because OUR side failed: not counted in the daily limit
     ig_posted_at TEXT,  -- admin-set: we posted it on Instagram (a takedown must also remove it there)
+    frames_json  TEXT,  -- the wall's frames.cells.gz when the render made one: sha256, bytes, fps, frames, loop_ms
     UNIQUE (user_id, slug)
 );
 CREATE INDEX IF NOT EXISTS submissions_status ON submissions(status, created_at);
@@ -209,6 +210,8 @@ class Database:
             await self.conn.execute("ALTER TABLE submissions ADD COLUMN ig_posted_at TEXT")
         if "platform_fault" not in sub_cols:
             await self.conn.execute("ALTER TABLE submissions ADD COLUMN platform_fault INTEGER NOT NULL DEFAULT 0")
+        if "frames_json" not in sub_cols:  # the wall's frames.cells.gz: {sha256, bytes, fps, frames, loop_ms}
+            await self.conn.execute("ALTER TABLE submissions ADD COLUMN frames_json TEXT")
         if "id" not in {r["name"] for r in await self.fetchall("PRAGMA table_info(blocked_identities)")}:
             # first shape keyed by the hash: rebuild with a surrogate id (can't ALTER in a PRIMARY KEY).
             # tx(): a failure rolls the whole rebuild back (executescript would leave the transaction open).

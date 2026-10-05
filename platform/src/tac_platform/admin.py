@@ -403,6 +403,38 @@ async def admin_takedowns(request: Request) -> dict:
     return {"actions": await _takedowns(request)}
 
 
+class WallBackfillIn(BaseModel):
+    force: bool = False  # re-render frames for every published piece, not only those without
+
+
+@router.post("/v1/admin/wall/backfill", status_code=202)
+async def wall_backfill(body: WallBackfillIn, request: Request) -> dict:
+    """Make the wall's frames for published pieces that have none (force: all), in the background, one piece at a
+    time in the render backend. 409 while one runs. Audited: who asked (admin), and the result (system)."""
+    require_admin(request)
+    import asyncio
+    import logging
+
+    st = request.app.state
+    running = getattr(st, "wall_backfill", None)
+    if running is not None and not running.done():
+        raise ApiError(409, "already_running")
+    row = await st.db.fetchone(
+        "SELECT COUNT(*) AS n FROM submissions WHERE status = 'published' AND hidden = 0"
+        + ("" if body.force else " AND frames_json IS NULL"))
+    async with st.db.tx() as tx:
+        await tx.audit("admin", "wall_backfill", detail=f"{row['n']} pieces{' (force)' if body.force else ''}")
+
+    async def run() -> None:
+        try:
+            await st.pipeline.backfill_frames(force=body.force)
+        except Exception:  # noqa: BLE001 - logged; the audit row says it started
+            logging.getLogger("tac.admin").exception("wall backfill crashed")
+
+    st.wall_backfill = asyncio.create_task(run(), name="tac-wall-backfill")
+    return {"queued": row["n"], "force": body.force}
+
+
 class TrustIn(BaseModel):
     trusted: bool
 

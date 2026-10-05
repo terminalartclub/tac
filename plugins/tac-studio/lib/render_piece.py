@@ -7,6 +7,9 @@ Writes into <dir>:
     og.jpg          still at t≈1 s, 540x960, for link unfurls
     stats.json      motion_median / seam / void (+ loop_s, fps, frames, raw vscreen stats)
     process/NN.webp each process/*.png, ≤540 px wide
+    frames.cells.gz the frames as terminal cells for /tac:wall (wallframes.py): the piece's fps (≤30), or
+                    15, 10, 5 when that passes 32 MiB; left out (the piece still renders) when even 5 fps does,
+                    or there's no time left for another pass
 
 The piece runs in a child process (its own process group) killed after --timeout
 seconds of wall clock (exit 124). Needs rich, Pillow and fonttools: uses the current
@@ -61,7 +64,8 @@ def run_with_timeout(piece_dir: Path, out: Path, timeout: float, cols: int, rows
     except NoUv as e:
         print(str(e), file=sys.stderr)
         return 127
-    cmd = cmd + ["--worker", str(piece_dir), "--out", str(out), "--cols", str(cols), "--rows", str(rows)]
+    cmd = cmd + ["--worker", str(piece_dir), "--out", str(out), "--cols", str(cols), "--rows", str(rows),
+                 "--timeout", f"{timeout:g}"]
     proc = subprocess.Popen(cmd, start_new_session=True)
     try:
         return proc.wait(timeout=timeout)
@@ -222,14 +226,28 @@ class StreamStats:
         }
 
 
-def worker(piece_dir: Path, out: Path, cols: int, rows: int) -> int:
+def _frames_pass(vscreen, code: str, cols: int, rows: int, fps: int) -> bytes:  # type: ignore[no-untyped-def]
+    """One more capture, for frames.cells.gz only, at `fps` (raises wallframes.TooBig)."""
     import asyncio
+
+    import wallframes
+
+    enc = wallframes.Encoder(cols, rows, fps)
+    cap = asyncio.run(vscreen.capture(code, cols, rows, on_sample=lambda t, b: enc.sample(t, vscreen.to_cells(b, cols, rows))))
+    return enc.finish(cap.loop_s)
+
+
+def worker(piece_dir: Path, out: Path, cols: int, rows: int, timeout: float = TIMEOUT_S) -> int:
+    import asyncio
+    import time
 
     from PIL import Image
 
     sys.path.insert(0, str(HERE))
     import vscreen
+    import wallframes
 
+    started = time.monotonic()
     code = (piece_dir / "piece.py").read_text(encoding="utf-8")
     # Pass 1: loop length and step count only (the stats window depends on fps). Nothing is kept.
     probe = asyncio.run(vscreen.capture(code, cols, rows, on_sample=lambda t, b: None))
@@ -237,6 +255,8 @@ def worker(piece_dir: Path, out: Path, cols: int, rows: int) -> int:
     out.mkdir(parents=True, exist_ok=True)
 
     st = StreamStats(max(1, round(0.5 * n_steps / loop_s)), n_steps)
+    native_fps = max(1, min(wallframes.MAX_FPS, round(n_steps / loop_s)))
+    wall: dict = {"enc": wallframes.Encoder(cols, rows, native_fps), "why": ""}
     ras = vscreen.Rasterizer()
     webp = WebPStream(out / "preview.webp")
     state = {"t": None, "key": None, "img": None, "d": 0.0, "frames": 0, "og": None}
@@ -251,6 +271,11 @@ def worker(piece_dir: Path, out: Path, cols: int, rows: int) -> int:
             state["d"] += t - state["t"]  # the previous sample's step duration is now known
         grid = vscreen.to_cells(buf, cols, rows)
         st.add(grid)
+        if wall["enc"] is not None:  # the wall's frames ride along on this pass, at the piece's own fps
+            try:
+                wall["enc"].sample(t, grid)
+            except wallframes.TooBig as e:
+                wall.update(enc=None, why=str(e))
         key = hash(tuple(tuple(r) for r in grid))
         if key != state["key"]:
             flush()
@@ -260,7 +285,9 @@ def worker(piece_dir: Path, out: Path, cols: int, rows: int) -> int:
             state["og"] = state["img"]
         state["t"] = t
 
+    main_started = time.monotonic()
     cap = asyncio.run(vscreen.capture(code, cols, rows, on_sample=on_sample))
+    main_s = time.monotonic() - main_started
     state["d"] += cap.loop_s - state["t"]
     flush()
     webp.close()
@@ -282,6 +309,7 @@ def worker(piece_dir: Path, out: Path, cols: int, rows: int) -> int:
         "raw": {k: round(v, 5) for k, v in raw.items()},
     }
     (out / "stats.json").write_text(json.dumps(stats, indent=2) + "\n")
+    _write_frames(vscreen, wallframes, wall, code, cols, rows, cap.loop_s, native_fps, main_s, started, timeout, out)
 
     pngs = sorted((piece_dir / "process").glob("*.png")) if (piece_dir / "process").is_dir() else []
     if pngs:
@@ -297,6 +325,36 @@ def worker(piece_dir: Path, out: Path, cols: int, rows: int) -> int:
     return 0
 
 
+def _write_frames(vscreen, wallframes, wall: dict, code: str, cols: int, rows: int, loop_s: float,  # type: ignore[no-untyped-def]
+                  native_fps: int, main_s: float, started: float, timeout: float, out: Path) -> None:
+    """frames.cells.gz, or nothing: the wall is optional, the render is not. Over the cap at the piece's fps,
+    another capture at each lower step, only while it fits in half the render's time (each pass costs about
+    the main pass, scaled by fps)."""
+    import time
+
+    try:
+        data = wall["enc"].finish(loop_s) if wall["enc"] is not None else None
+    except wallframes.TooBig as e:
+        data, wall["why"] = None, str(e)
+    for fps in (f for f in wallframes.FPS_STEPS if f < native_fps):
+        if data is not None:
+            break
+        if time.monotonic() - started + main_s * fps / native_fps > timeout / 2:
+            print(f"frames.cells.gz skipped: {wall['why']}; no time for a {fps} fps pass", file=sys.stderr)
+            return
+        try:
+            data = _frames_pass(vscreen, code, cols, rows, fps)
+        except wallframes.TooBig as e:
+            wall["why"] = str(e)
+    if data is None:
+        print(f"frames.cells.gz skipped: {wall['why']}", file=sys.stderr)
+        return
+    if len(data) > wallframes.MAX_GZ:
+        print(f"frames.cells.gz skipped: {len(data)} bytes gzipped, over {wallframes.MAX_GZ}", file=sys.stderr)
+        return
+    (out / "frames.cells.gz").write_bytes(data)
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("piece_dir", type=Path)
@@ -310,7 +368,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {a.piece_dir}/piece.py not found", file=sys.stderr)
         return 2
     if a.worker:
-        return worker(a.piece_dir, a.out, a.cols, a.rows)
+        return worker(a.piece_dir, a.out, a.cols, a.rows, a.timeout)
     return run_with_timeout(a.piece_dir, a.out, a.timeout, a.cols, a.rows)
 
 

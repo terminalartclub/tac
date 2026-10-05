@@ -91,6 +91,27 @@ fly deploy -a tac-api
   3. If the probe shows routes or `"tcp": "OK"`, the job also fails with `network isolation unavailable`: the Fly kernel refused the namespace. Renders then fail closed (no untrusted code runs). Stop there and see SECURITY.md.
 - **Rotation:** run step 3 again, then `fly secrets set` the new token and `fly tokens revoke <old id>` (`fly tokens list -a tac-render`).
 
+## The wall's frames (0.1.3, `/tac:wall`)
+
+`render_piece.py` now also writes `frames.cells.gz` (the piece's frames as terminal cells, `wallframes.py`);
+the API checks it with the same code (`tac_platform/wallframes.py`, a byte-identical copy) and serves it at
+`GET /v1/pieces/{handle}/{slug}/frames`, with the playlist at `GET /v1/wall.json`. Nothing in
+`render-image/` changed: the image copies `plugins/tac-studio/lib/*.py`, which now include
+`wallframes.py` and the new `render_piece.py`, so it only needs a **rebuild and push** (step 2), then
+`TAC_FLY_RENDER_IMAGE` pointed at it and a `fly deploy -a tac-api` (the DB gets a `frames_json` column on
+boot). Then, once, frames for pieces published before:
+
+```bash
+printf 'x-admin-token: %s\n' "$TAC_ADMIN_TOKEN" |   # printf is a shell builtin: the token never shows in `ps`
+  curl -fsS -X POST https://<api host>/v1/admin/wall/backfill -H @- -H 'content-type: application/json' -d '{}'
+# -> {"queued": N, "force": false}; one render job per piece, in the background, one at a time.
+#    Audit rows: wall_backfill (admin, at start) and wall_backfill_done (system, "R rendered, F failed, of N").
+#    {"force": true} re-renders frames for every published piece. 409 while one runs.
+```
+
+Cost: one render job per piece (~30 s of a performance-1x VM each). Bandwidth: frames are 0.25–3.3 MB per
+piece (median ~2 MB, gzip); the plugin fetches one piece at a time plus one ahead, revalidates with ETags.
+
 ## Cost
 
 Rates verified from docs.fly.io/about/pricing (iad, 2026-10-04):

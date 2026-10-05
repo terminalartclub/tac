@@ -22,6 +22,7 @@ from .db import Database, now_iso
 from .models import HIGH_TOKENS
 from .publish import Publisher
 from .renderer import Renderer, make_renderer
+from . import wallframes
 from .storage import MediaStore
 
 log = logging.getLogger("tac.pipeline")
@@ -46,6 +47,7 @@ def _automod_summary(am, reasons: list[str]) -> str:
     return f"{head} cost=${am.cost_usd:.5f}"
 
 RENDER_FILES = {"preview.webp", "og.jpg", "stats.json"}
+FRAMES_FILE = "frames.cells.gz"  # optional: the wall's frames (wallframes.py); a piece renders without it
 PROCESS_RE = re.compile(r"^process/[A-Za-z0-9_-]{1,40}\.webp$")
 MAX_RENDER_FILE = 25 * 1024**2
 
@@ -57,6 +59,29 @@ class Rejected(Exception):
     def __init__(self, reasons: list[str], platform: bool = False) -> None:
         self.reasons = reasons
         self.platform = platform
+
+
+def check_frames(data: bytes) -> dict | None:
+    """frames.cells.gz as the render VM wrote it, checked with the same code the plugin plays it with: its
+    header + sha256 for the DB, or None (logged) when it isn't a well-formed file within the limits."""
+    import hashlib
+
+    try:
+        h, _ = wallframes.load(data)
+    except wallframes.BadFrames as e:
+        log.warning("render frames refused: %s", e)
+        return None
+    return {"sha256": hashlib.sha256(data).hexdigest(), "bytes": len(data), "cols": h.cols, "rows": h.rows,
+            "fps": h.fps, "frames": h.frames, "loop_ms": h.loop_ms}
+
+
+def _collect_frames(out_dir: Path) -> tuple[bytes, dict] | None:
+    p = out_dir / FRAMES_FILE
+    if not p.is_file() or p.is_symlink() or p.stat().st_size > wallframes.MAX_GZ:
+        return None
+    data = p.read_bytes()
+    info = check_frames(data)
+    return (data, info) if info else None
 
 
 def _collect_render(out_dir: Path) -> tuple[dict, dict[str, bytes], list[bytes]]:
@@ -282,7 +307,58 @@ class Pipeline:
             await self.store.put(f"{prefix}/{name}", data)
         for i, data in enumerate(process, 1):  # renumbered 01..04 so community.json can name them
             await self.store.put(f"{prefix}/process/{i:02d}.webp", data)
+        await self._store_frames(sub_id, await asyncio.to_thread(_collect_frames, out_dir))
         return stats, len(process)
+
+    async def _store_frames(self, sub_id: str, frames: tuple[bytes, dict] | None) -> None:
+        """Always sets frames_json: a render without frames clears what an earlier render of the row left."""
+        if frames is not None:
+            await self.store.put(f"submissions/{sub_id}/render/{FRAMES_FILE}", frames[0])
+        await self.db.execute("UPDATE submissions SET frames_json = ? WHERE id = ?",
+                              (json.dumps(frames[1]) if frames else None, sub_id))
+
+    # ------------------------------------------------------------ wall backfill
+
+    async def backfill_frames(self, force: bool = False) -> dict:
+        """Frames for published pieces that have none (all of them with force): each piece re-rendered in the
+        render backend (the same isolated job as a submission; the piece's code never runs here), only
+        frames.cells.gz kept. One piece at a time; the media lock and a re-check (still published, not hidden)
+        before its public copy is written, as backfill_cards. Returns counts; logs and audits them."""
+        rows = await self.db.fetchall(
+            "SELECT s.id FROM submissions s WHERE s.status = 'published' AND s.hidden = 0"
+            + ("" if force else " AND s.frames_json IS NULL") + " ORDER BY s.published_at DESC"
+        )
+        done = failed = 0
+        for r in rows:
+            sub_id = r["id"]
+            tmp = Path(await asyncio.to_thread(tempfile.mkdtemp, prefix="tac-frames-"))
+            try:
+                piece_dir, out_dir, work = tmp / "piece", tmp / "out", tmp / "work"
+                for d in (piece_dir, out_dir, work):
+                    await asyncio.to_thread(d.mkdir)
+                await self._materialize(sub_id, piece_dir)
+                job = await self.renderer.run_job(piece_dir, out_dir, work)
+                frames = None
+                if job.render is not None and not job.timed_out and not job.backend_error and job.render.returncode == 0:
+                    frames = await asyncio.to_thread(_collect_frames, out_dir)
+                if frames is None:
+                    failed += 1
+                    log.warning("frames backfill: no frames for %s", sub_id)
+                    continue
+                await self._store_frames(sub_id, frames)  # the old render's preview etc. are left as they are
+                if await self.publisher.copy_frames(sub_id):
+                    done += 1
+                else:
+                    failed += 1
+            except Exception:  # noqa: BLE001 - one piece never stops the rest
+                failed += 1
+                log.exception("frames backfill failed for %s", sub_id)
+            finally:
+                await asyncio.to_thread(shutil.rmtree, tmp, True)
+        async with self.db.tx() as tx:
+            await tx.audit("system", "wall_backfill_done", detail=f"{done} rendered, {failed} failed, of {len(rows)}")
+        log.info("frames backfill: %d rendered, %d failed, of %d", done, failed, len(rows))
+        return {"pieces": len(rows), "rendered": done, "failed": failed}
 
     async def _finish(self, sub_id: str, status: str, reasons: list[str], platform: bool = False) -> None:
         async with self.db.tx() as tx:

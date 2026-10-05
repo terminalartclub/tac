@@ -1155,6 +1155,73 @@ def cmd_play(a: argparse.Namespace) -> int:
     return 0
 
 
+def seconds_arg(v: str) -> float:
+    try:
+        s = float(v)
+    except ValueError:
+        s = -1.0
+    if not 0 <= s <= 3600:
+        raise argparse.ArgumentTypeError("seconds per piece: 0 (one loop) to 3600")
+    return s
+
+
+def cmd_wall(a: argparse.Namespace) -> int:
+    """/tac:wall: this week's wall (or the picks) in a pane beside Claude Code, else a window. Fetches only the
+    playlist here; the pane fetches each piece's frames as it comes up."""
+    import termwin
+    import wall
+
+    cache = wall.Cache()
+    base = api_base()
+    offline = False
+    try:
+        doc = wall.fetch_playlist(base, a.picks)
+        cache.save_playlist(doc, base)
+    except wall.WallError as e:
+        doc = cache.load_playlist()
+        cached = [p for p in (doc or {}).get("pieces", []) if cache.cached(p) is not None]
+        if not cached:
+            return die(f"can't fetch the wall ({safe(e)}), and nothing is cached yet. Try again when online.")
+        print(f"offline ({safe(e)}): playing the {len(cached)} cached piece{'s' * (len(cached) != 1)}.")
+        offline = True
+    if not doc["pieces"]:
+        print("the wall is empty this week, and there are no picks yet. Make something for it: /tac:create")
+        return 0
+    argv = [str(PLUGIN / "bin" / "tacctl"), "wall-play", "--seconds", f"{a.seconds:g}"] + (["--offline"] if offline else [])
+    what = "this week's wall" if doc["source"] == "week" else "the picks (nothing on this week's wall yet)"
+    n = len(doc["pieces"])
+    where = "window" if a.window else "tab" if a.tab else "split"
+    opened, why = (None, "--no-window") if a.no_window else termwin.open_play_window(argv, where=where)
+    if opened and opened.confirmed:
+        place = {"pane": f"a pane on the right ({opened.app})", "tab": f"a new {opened.app} tab"}.get(
+            opened.where, f"a new {opened.app} window")
+        print(f"playing {what}, {n} piece{'s' * (n != 1)}, {a.seconds:g} s each, in {place}. Ctrl-C there stops it.")
+    else:
+        if not a.no_window:
+            print(f"couldn't open a terminal ({safe(why or 'unconfirmed')}).")
+        print("watch it live — paste into a terminal (Ctrl-C quits):")
+        print(f"  {shlex.join(argv)}")
+    return 0
+
+
+def cmd_wall_play(a: argparse.Namespace) -> int:
+    """In the pane: plays the cached playlist (written by `tacctl wall`), fetching frames as it goes."""
+    import wall
+
+    cache = wall.Cache()
+    doc = cache.load_playlist()
+    if doc is None:
+        return die("no wall playlist yet: run /tac:wall (tacctl wall) first")
+    try:
+        base = checked_base(doc["api"]) if doc.get("api") else None
+    except ApiError:
+        base = None
+    try:
+        return wall.play(doc, base, cache, a.seconds, a.offline or base is None)
+    except wall.WallError as e:
+        return die(f"the wall stopped: {safe(e)}")
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="tacctl", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -1188,6 +1255,16 @@ def main(argv: list[str] | None = None) -> int:
             p.add_argument("--no-wait", action="store_true", help=argparse.SUPPRESS)  # pre-0.1.1: now the default
     ft = sp.add_parser("fit", help="does a run fit the spare weekly window? exit 3 = no")
     ft.add_argument("--sketch", action="store_true")
+    wl = sp.add_parser("wall", help="watch this week's wall (pre-rendered frames, nobody's code runs) in a pane")
+    wl.add_argument("--picks", action="store_true", help="the picks instead of this week's wall")
+    wl.add_argument("--seconds", type=seconds_arg, default=30.0, help="seconds per piece (0: one loop each); default 30")
+    ww = wl.add_mutually_exclusive_group()
+    ww.add_argument("--tab", action="store_true", help="a new tab instead of a pane on the right")
+    ww.add_argument("--window", action="store_true", help="a new window")
+    wl.add_argument("--no-window", action="store_true", help="just print the command to paste")
+    wp = sp.add_parser("wall-play", help=argparse.SUPPRESS)
+    wp.add_argument("--seconds", type=seconds_arg, default=30.0)
+    wp.add_argument("--offline", action="store_true")
     rt = sp.add_parser("root", help="print ~/tac-work (where new pieces go), or with a name, that piece's folder")
     rt.add_argument("name", nargs="?")
     sa = sp.add_parser("start", help="create <work folder>/<name>/ and record the run size")
@@ -1224,6 +1301,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return {"login": cmd_login, "logout": cmd_logout, "whoami": cmd_whoami, "prepare": cmd_prepare,
                 "submit": cmd_submit, "status": cmd_status, "play": cmd_play, "direct": cmd_direct, "style": cmd_style, "mine": cmd_mine,
+                "wall": cmd_wall, "wall-play": cmd_wall_play,
                 "fit": cmd_fit, "start": cmd_start, "gallery": cmd_gallery, "root": cmd_root}[a.cmd](a)
     except ApiError as e:
         return die(str(e))

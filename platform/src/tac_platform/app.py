@@ -13,7 +13,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from . import admin, auth, events, me, moderation, og, render_io, submissions, views, web_auth
+from . import admin, auth, events, me, moderation, og, render_io, submissions, views, wall, web_auth
 from .automod import Automod
 from .config import Settings
 from .db import Database
@@ -160,10 +160,11 @@ def create_app(settings: Settings | None = None, automod: Automod | None = None)
         try:
             yield
         finally:
-            purger.cancel()
-            regen.cancel()
-            backfill.cancel()
-            await asyncio.gather(purger, regen, backfill, return_exceptions=True)
+            wall_backfill = getattr(app.state, "wall_backfill", None)  # an admin's /tac:wall frames backfill
+            tasks = [t for t in (purger, regen, backfill, wall_backfill) if t is not None]
+            for t in tasks:
+                t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
             await pipeline.stop()
             await db.close()
 
@@ -191,7 +192,7 @@ def create_app(settings: Settings | None = None, automod: Automod | None = None)
         return {"ok": True}
 
     for r in (auth.router, web_auth.router, me.router, submissions.router, moderation.router, views.router, events.router, og.router,
-              render_io.router, admin.router):
+              render_io.router, admin.router, wall.router):
         app.include_router(r)
     app.mount("/media", StaticFiles(directory=public_dir), name="media")
     return app

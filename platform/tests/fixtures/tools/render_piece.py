@@ -44,7 +44,32 @@ def main() -> int:
             Image.open(p).convert("RGB").save(out / "process" / f"{i:02d}.webp")
     stats = {"motion_median": 0.027, "seam": "CLEAN", "void": 0.64, "loop_s": 30.0, "fps": 10, "frames": 300}
     (out / "stats.json").write_text(json.dumps(stats))
+    write_frames(src, out)
     return 0
+
+
+def write_frames(src: str, out: Path) -> None:
+    """frames.cells.gz for the wall, from the real format code: 3 frames of an 8x4 screen whose first cell
+    counts the frame. TEST:no-frames -> none; TEST:bad-frames -> garbage; TEST:bomb-frames -> a gzip bomb."""
+    import zlib
+    from types import SimpleNamespace
+
+    from tac_platform import wallframes
+
+    if "TEST:no-frames" in src:
+        return
+    if "TEST:bad-frames" in src:
+        (out / "frames.cells.gz").write_bytes(b"not frames at all")
+        return
+    if "TEST:bomb-frames" in src:
+        (out / "frames.cells.gz").write_bytes(zlib.compress(bytes(64 * 2**20), 9, wbits=31))  # 64 MiB of zeros
+        return
+    enc = wallframes.Encoder(8, 4, 10)
+    for k in range(3):
+        grid = [[SimpleNamespace(ch="0123456789"[k] if (x, y) == (0, 0) else "▀", fg=(230, 120, 30), bg=(8, 8, 15))
+                 for x in range(8)] for y in range(4)]
+        enc.sample(k / 10, grid)
+    (out / "frames.cells.gz").write_bytes(enc.finish(0.3))
 
 
 if __name__ == "__main__":

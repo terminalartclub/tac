@@ -26,6 +26,7 @@ labelled. `TAC_WORK` replaces both. `tacctl root` prints `~/tac-work`; `tacctl r
 | `/tac:login` | Device-code login to the TAC platform in your browser. The token goes in `~/.config/tac/credentials.json` (mode 600). It never touches your Claude credentials. |
 | `/tac:create [--sketch] [idea]` | Claude sketches 3 concepts, iterates on the virtual screen (renders, looks, critiques) and finishes `<name>.py` + `notes.md`. |
 | `/tac:play [name]` | Plays the piece live beside Claude Code: in iTerm2 a pane splits off to the right of the session Claude Code runs in, in Ghostty 1.3+ a split on the right; Ctrl-C stops it and closes the pane. `--tab` opens a tab instead (iTerm2 adds it at the end of the window's tabs), `--window` a new window (Ghostty's own in Ghostty; iTerm2 when installed, else Terminal, everywhere else on macOS; iTerm2 and Terminal windows open at the reel's 80×66). A pane or tab closes when the piece ends, and stays open with the error if it fails to start. Other terminals (Terminal.app, WezTerm, …) get a new window the same way, and Linux your terminal emulator's. Over SSH or without a display it prints the `tac play …` command to paste instead. No name lists your pieces. It also builds the local review page `~/tac-work/index.html` and prints its path (`--page` opens it). |
+| `/tac:wall [--picks] [--seconds N]` | **New in 0.1.3.** Watch this week's wall in your terminal like a screensaver: each published piece for N seconds (default 30) with a credit line (`title · @handle · model`), then the next, looping; no pieces this week → the picks. Same pane/tab/window as `/tac:play`; Ctrl-C stops it. Never runs anyone's code: see [The wall in your terminal](#the-wall-in-your-terminal-tacwall). |
 | `/tac:submit <name>` | Assembles `~/tac-work/<name>/submission/`, lints it locally (rejects never leave your machine), asks you to confirm you have the right to share it and that it copies no one else's characters, brands or logos, then uploads it and returns: the platform renders it (~1–2 min) and a person reviews it; `/tac:mine` shows where it is (`--wait` polls instead, up to `--wait-seconds N`, default 300). |
 | `/tac:mine` | Your submitted pieces: status (rendering · waiting for review · published with its link · rejected with the reasons, marked "not counted against your daily limit" when our side failed), total and 7-day views, a 28-day sparkline, the critique, and the reasons for any rejection. View totals are public on the site (anonymous, one per IP per piece per day). Unpublishing or deleting your account happens on the web only (terminalart.club/me). |
 | `/tac:logout` | Deletes the token. |
@@ -123,6 +124,26 @@ mkdir -p ~/.config/tac && echo '{"piece_pct": 6}' > ~/.config/tac/config.json   
 
 A Max plan typically needs a much smaller value than Pro. Measure, don't guess.
 
+### The wall in your terminal (`/tac:wall`)
+
+`/tac:wall` plays the club's wall, this week's published pieces newest first (none yet this week: the picks;
+`--picks` for them anyway), in the same pane beside Claude Code as `/tac:play`.
+
+- **Nobody's code runs on your machine.** The platform renders every piece in its sandboxed render VM, the
+  same one that makes the previews, and keeps its frames as terminal cells (glyph, 24-bit colours). The plugin
+  downloads those frames as data and draws them. It never fetches or runs a `piece.py`.
+- **One piece at a time.** `tacctl wall` fetches the playlist (`/v1/wall.json`). The pane fetches each piece's
+  frames when its turn comes, and only the next one ahead while it plays: a 30-second look costs about one or
+  two pieces (published pieces are 0.25–3.3 MB each, median about 2 MB), not the whole wall.
+- **Checked before it's played.** Only the API host is contacted (no redirects followed, no link from the
+  server fetched). Every response has a size cap (playlist 256 KiB, frames 8 MiB gzipped, 32 MiB inflated).
+  Every frame's counts and bounds are verified before the first one is drawn, so a broken or hostile file is
+  skipped with a note, never played past its end. Titles and names are shown only when they're plain text.
+- **Cache:** `~/.cache/tac/wall/` (private, 128 MB at most, least recently played dropped first; ETags so an
+  unchanged piece isn't downloaded twice). Offline, `/tac:wall` plays what's cached and says so.
+- **Size:** pieces are rendered at 80×66. A smaller pane shows the whole picture scaled down (nearest cell, the
+  same factor across and down); a bigger one centres it. Resize the pane any time.
+
 ### Token counts are honest
 
 `tokens` in the meta is an int or `null` ("unknown"). `/tac:submit` uses your number if you give one
@@ -146,10 +167,12 @@ plugins/tac-studio/
   bin/tac  bin/tacctl               launchers: uv run --no-project --isolated --no-config (no .venv or uv config from the cwd), rich/Pillow/fonttools pinned
   lib/vscreen.py                    bundled virtual screen (copy of TAC studio/vscreen.py + Linux fonts)
   lib/check_piece.py                lint (stdlib only)       ← tools/check_piece.py runs this
-  lib/render_piece.py               preview/og/stats/process ← tools/render_piece.py runs this
-  lib/tacctl.py  meta.py  notes.py  review.py
+  lib/render_piece.py               preview/og/stats/process/frames ← tools/render_piece.py runs this
+  lib/wallframes.py                 the wall's frames format (stdlib; byte-identical copy in platform/)
+  lib/wall.py                       /tac:wall: playlist, frames cache, the pane player
+  lib/tacctl.py  meta.py  notes.py  review.py  termwin.py  uvfind.py
   skills/tac-studio/SKILL.md, DNA.md
-  commands/{create,play,login,logout,submit}.md
+  commands/{create,play,wall,login,logout,submit,mine,style}.md
   hooks/hooks.json  scripts/nudge.py  scripts/statusline_cache.py
 pieces/<handle>/<slug>/             piece.py · meta.yaml · notes.md · process/≤4 PNG (≤600 KB each)
 tools/                              check_piece · render_piece · build_site · import_seeds
@@ -168,7 +191,8 @@ in skill, command and hook content. Persistent files go under `${CLAUDE_PLUGIN_D
 python tools/check_piece.py <piece_dir>
     stdout: {"ok": bool, "reasons": [str]} · exit 0 ok, 1 rejected
 python tools/render_piece.py <piece_dir> --out <dir> [--timeout 120]
-    writes preview.webp (540x960, native fps, q70), og.jpg, stats.json, process/NN.webp
+    writes preview.webp (540x960, native fps, q70), og.jpg, stats.json, process/NN.webp,
+    and frames.cells.gz (the wall's frames; optional: left out when over 32 MiB even at 5 fps)
     exit 0 ok · non-zero on failure · 124 = exceeded the wall-clock timeout (default 120 s)
 ```
 
