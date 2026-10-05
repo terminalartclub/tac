@@ -395,10 +395,62 @@ def test_a_one_cell_feature_survives_the_downscale(pane):
         assert len(rows_hit) >= int(46 * s)
     for y in range(66):
         sc = _screen(wall.frame_ansi(_scene(line_y=y), 80, 66, pc, pr, "c"), pc, pr)
-        rows = {r for r in range(pr - 1) if any(cell.bg == "0a080c" for cell in sc.buffer[r].values())}
-        assert len(rows) == 1, (y, rows)
-        r0 = next(iter(rows))
-        assert sum(cell.bg == "0a080c" for cell in sc.buffer[r0].values()) >= int(60 * s)
+        ink = [(r, h) for r in range(pr - 1) for h, attr in ((0, "fg"), (1, "bg"))
+               if sum(getattr(c, attr) == "0a080c" for c in sc.buffer[r].values()) >= int(60 * s)]
+        flat = [2 * r + h for r, h in ink]  # pixel rows: a cell-tall line is two of them, adjacent
+        assert len(flat) in (1, 2) and flat == list(range(flat[0], flat[0] + len(flat))), (y, ink)
+
+
+def _pixel_line(py, cols=80, rows=66, ground=(40, 30, 30), ink=(10, 8, 12), cp=0x2580, glyph_at=None, also=None):
+    """Half-block cells on a flat ground with a one-pixel line (half a cell, cols 10..69) at pixel row py; as
+    UPPER cells, or LOWER (colours swapped), and optionally one ordinary glyph at glyph_at (a mixed frame)."""
+    from array import array
+
+    g, k = wallframes.rgb(ground), wallframes.rgb(ink)
+    cur = array("I")
+    for y in range(rows):
+        for x in range(cols):
+            top = k if (2 * y in (py, also) and 10 <= x < 70) else g
+            bot = k if (2 * y + 1 in (py, also) and 10 <= x < 70) else g
+            if (x, y) == glyph_at:
+                cur.extend((ord("x"), wallframes.rgb((200, 200, 200)), g))
+            else:
+                cur.extend((cp, top, bot) if cp == 0x2580 else (cp, bot, top))
+    return cur
+
+
+@pytest.mark.parametrize("pane", [(107, 54), (60, 40)])
+@pytest.mark.parametrize("cp", [0x2580, 0x2584])
+def test_a_one_pixel_line_survives_the_downscale(pane, cp):
+    """A frame of half blocks is scaled by pixel rows (two a cell), not cell rows: a line half a cell tall, at
+    any of the 132 pixel rows, is still one pixel row, the whole run of it, after the scale."""
+    pc, pr = pane
+    s = min(pc / 80, (pr - 1) / 66)
+    for py in range(132):
+        cur = _pixel_line(py, cp=cp)
+        sc = _screen(wall.frame_ansi(cur, 80, 66, pc, pr, "c"), pc, pr)
+        hits = [(r, half) for r in range(pr - 1) for half, attr in ((0, "fg"), (1, "bg"))
+                if sum(getattr(c, attr) == "0a080c" and c.data == "▀" for c in sc.buffer[r].values()) >= int(60 * s)]
+        assert len(hits) == 1, (py, hits)
+        stray = sum((c.fg == "0a080c") + (c.bg == "0a080c") for r in range(pr - 1) for c in sc.buffer[r].values())
+        assert stray <= 60, py  # one pixel tall: nothing else drawn in its ink
+        if py + 3 < 132:  # two such lines a cell and a half apart: cell rows merged them into one, pixels keep both
+            sc = _screen(wall.frame_ansi(_pixel_line(py, cp=cp, also=py + 3), 80, 66, pc, pr, "c"), pc, pr)
+            two = [(r, half) for r in range(pr - 1) for half, attr in ((0, "fg"), (1, "bg"))
+                   if sum(getattr(c, attr) == "0a080c" for c in sc.buffer[r].values()) >= int(60 * s)]
+            assert len(two) == 2, (py, two)
+
+
+def test_a_mixed_frame_keeps_the_cell_path():
+    """One ordinary glyph and the frame is no longer pixels: scaled by cells (fit), the glyph kept as itself."""
+    mixed = _pixel_line(40, glyph_at=(0, 0))
+    assert wall.fit_pixels(mixed, 80, 66, 64, 53) is None
+    cells = wall.scaled(mixed, 80, 66, 64, 53)
+    by_cell = [[(mixed[3 * k], mixed[3 * k + 1], mixed[3 * k + 2]) for k in row] for row in wall.fit(mixed, 80, 66, 64, 53)]
+    assert cells == by_cell and cells[0][0][0] == ord("x")
+    halves = _pixel_line(40)
+    assert wall.fit_pixels(halves, 80, 66, 64, 53) is not None
+    assert {c[0] for row in wall.scaled(halves, 80, 66, 64, 53) for c in row} == {0x2580}
 
 
 def test_a_flat_ground_scales_to_itself():

@@ -370,16 +370,62 @@ def fit(cur: Any, cols: int, rows: int, ow: int, oh: int) -> list[list[int]]:
     return grid
 
 
+UPPER, LOWER, FULL = 0x2580, 0x2584, 0x2588
+HALVES = frozenset((UPPER, LOWER, FULL, wallframes.SPACE))  # cells that are just two pixels, top and bottom
+
+
+def _pix_lum(c: int) -> int:
+    return 2 * (3 * ((c >> 16) & 255) + 6 * ((c >> 8) & 255) + (c & 255))  # 2x: same units as _lum's cells
+
+
+def fit_pixels(cur: Any, cols: int, rows: int, ow: int, oh: int) -> list[list[tuple[int, int, int]]] | None:
+    """fit() at twice the vertical resolution, for a frame of half blocks (every cell UPPER, LOWER, FULL or a
+    space): the cells as a cols x 2*rows image, scaled down with the same _pick per pixel column and pixel row,
+    repacked as UPPER cells (fg the top pixel, bg the bottom one). A one-pixel line (half a cell) survives;
+    cell rows would have kept a whole cell or dropped it. None for any other frame (glyphs need fit())."""
+    cps = cur[0::3]
+    if not HALVES.issuperset(cps):
+        return None
+    fgs, bgs = cur[1::3], cur[2::3]
+    top = [f if cp in (UPPER, FULL) else b for cp, f, b in zip(cps, fgs, bgs)]
+    bot = [f if cp in (LOWER, FULL) else b for cp, f, b in zip(cps, fgs, bgs)]
+    img = []  # pixel rows
+    for y in range(rows):
+        img.append(top[y * cols:(y + 1) * cols])
+        img.append(bot[y * cols:(y + 1) * cols])
+    lum = [[_pix_lum(c) for c in row] for row in img]
+    bx, by = _blocks(cols, ow), _blocks(2 * rows, 2 * oh)
+    across = [[_pick(lrow, a, b) for a, b in bx] for lrow in lum]  # source column, per pixel row and target col
+    out = [[0] * ow for _ in range(2 * oh)]
+    for x in range(ow):
+        down = [lum[py][across[py][x]] for py in range(2 * rows)]
+        for t, (a, b) in enumerate(by):
+            py = _pick(down, a, b)
+            out[t][x] = img[py][across[py][x]]
+    return [[(UPPER, out[2 * t][x], out[2 * t + 1][x]) for x in range(ow)] for t in range(oh)]
+
+
+def scaled(cur: Any, cols: int, rows: int, ow: int, oh: int) -> list[list[tuple[int, int, int]]]:
+    """The oh x ow cells (codepoint, fg, bg) to draw: the frame itself at its own size; scaled down, by pixels
+    when it is all half blocks (fit_pixels), else by cells (fit)."""
+    if (ow, oh) == (cols, rows):
+        return [[(cur[3 * i], cur[3 * i + 1], cur[3 * i + 2]) for i in range(y * cols, (y + 1) * cols)]
+                for y in range(rows)]
+    pix = fit_pixels(cur, cols, rows, ow, oh)
+    if pix is not None:
+        return pix
+    return [[(cur[3 * k], cur[3 * k + 1], cur[3 * k + 2]) for k in row] for row in fit(cur, cols, rows, ow, oh)]
+
+
 def frame_ansi(cur: Any, cols: int, rows: int, pane_cols: int, pane_rows: int, credit: Credit | str) -> str:
-    """One whole frame for the pane: the picture scaled down (fit(): one factor on both axes, thin features
-    kept) to fit above the credit bar (the last row, always) when the pane is smaller, centred; every row by absolute address and
-    cleared to its end, so a resize or a terminal's reflow can never leave stale cells."""
+    """One whole frame for the pane: the picture scaled down (scaled(): one factor on both axes, thin features
+    kept) to fit above the credit bar (the last row, always) when the pane is smaller, centred; every row by
+    absolute address and cleared to its end, so a resize or a terminal's reflow can never leave stale cells."""
     pic_rows = max(1, pane_rows - 1)
     s = min(1.0, pane_cols / cols, pic_rows / rows)
     ow, oh = max(1, int(cols * s)), max(1, int(rows * s))
     x_off, y_off = max(0, (pane_cols - ow) // 2), max(0, (pic_rows - oh) // 2)
-    src = (fit(cur, cols, rows, ow, oh) if (ow, oh) != (cols, rows)
-           else [[y * cols + x for x in range(cols)] for y in range(rows)])
+    cells = scaled(cur, cols, rows, ow, oh)
     out = ["\x1b[H"]
     for r in range(pic_rows):
         out.append(f"\x1b[{r + 1};1H{GROUND_SGR}")
@@ -387,13 +433,11 @@ def frame_ansi(cur: Any, cols: int, rows: int, pane_cols: int, pane_rows: int, c
         if 0 <= y < oh:
             out.append(" " * x_off)
             last = None
-            for k in src[y]:
-                i = 3 * k
-                key = (cur[i + 1], cur[i + 2])
-                if key != last:
-                    out.append(_sgr(*key))
-                    last = key
-                out.append(wallframes.char(cur[i]))  # never chr() of a raw codepoint: no escapes on the terminal
+            for cp, fg, bg in cells[y]:
+                if (fg, bg) != last:
+                    out.append(_sgr(fg, bg))
+                    last = fg, bg
+                out.append(wallframes.char(cp))  # never chr() of a raw codepoint: no escapes on the terminal
             out.append(GROUND_SGR)
         out.append("\x1b[K")
     out.append(credit_row(credit, pane_cols, pane_rows))
