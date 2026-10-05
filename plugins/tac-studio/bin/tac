@@ -2,7 +2,18 @@
 # TAC virtual screen (bundled vscreen.py). Works from any cwd:  tac sheet piece.py --out dir/
 set -euo pipefail
 LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd)"
+# uv runs everything: find it on PATH, else where its own installer puts it (often off PATH in a non-login
+# shell); missing, say so in one line and exit 127 (command not found), never a bare "uv: command not found".
+UV="$(command -v uv 2>/dev/null || true)"
+for c in "${HOME:-/nonexistent}/.local/bin/uv" "${HOME:-/nonexistent}/.cargo/bin/uv"; do
+  if [ -z "$UV" ] && [ -x "$c" ]; then UV="$c"; fi
+done
+if [ -z "$UV" ]; then
+  echo "tac needs uv (a Python runner). Install it: brew install uv — or see https://docs.astral.sh/uv/getting-started/installation/ — then run the command again." >&2
+  exit 127
+fi
 # Pinned, and --no-project: run from a repo with its own pyproject.toml, uv would otherwise sync that
-# project (its deps and build hooks) first. Bump the pins together with render_piece.py's.
-exec uv run -q --no-project --with 'rich==15.0.0' --with 'Pillow==12.3.0' --with 'fonttools==4.66.1' \
+# project (its deps and build hooks) first. --python >=3.10: a uv-managed Python when the machine's is older.
+# Bump the pins together with render_piece.py's.
+exec "$UV" run -q --no-project --python '>=3.10' --with 'rich==15.0.0' --with 'Pillow==12.3.0' --with 'fonttools==4.66.1' \
   python3 "$LIB/vscreen.py" "$@"

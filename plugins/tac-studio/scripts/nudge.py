@@ -110,8 +110,19 @@ def sync_helper() -> str | None:
     return None
 
 
+def uv_line() -> str | None:
+    """The missing-uv line, once per session (this hook runs on startup only); a PATH lookup and two file
+    checks, nothing run. Without uv every /tac: command fails, so it comes first."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+    try:
+        import uvfind
+    except ImportError:
+        return None
+    return None if uvfind.find_uv() else uvfind.MISSING
+
+
 def main() -> int:
-    lines = [m for m in (sync_helper(), message(load_cache(), time.time(), piece_pct())) if m]
+    lines = [m for m in (uv_line(), sync_helper(), message(load_cache(), time.time(), piece_pct())) if m]
     if lines:
         print(json.dumps({"systemMessage": "\n".join(lines)}))  # shown to the user, not added to Claude's context
     return 0

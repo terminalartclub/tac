@@ -12,6 +12,8 @@ Arguments from the user (may be empty): $ARGUMENTS
 1. **Size.** `--sketch` → a sketch: at most 3 iterations, with the same quality rules. Otherwise a full piece.
 2. **Fit gate, before any work.** Run `"${CLAUDE_PLUGIN_ROOT}/bin/tacctl" fit` (add `--sketch` for a sketch).
    - Exit 0 → go ahead.
+   - Exit 127 → `uv` isn't installed ("tac needs uv …"). Tell the user that line verbatim and stop: don't retry
+     and don't try another way. Every tac command needs uv.
    - Exit 3 → it won't fit in the spare weekly window. Show the user the printed line and **don't start**.
      Offer the sketch if the line says one fits, or an override. Start anyway only if the arguments contain
      `--force` or the user explicitly says so.

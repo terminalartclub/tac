@@ -44,8 +44,12 @@ def test_piece_pct_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
 
 
 def run_hook(tmp_path: Path, data: dict | None) -> str:
+    uv_dir = tmp_path / "uvbin"  # uv is installed here (the missing-uv line has its own tests)
+    uv_dir.mkdir(exist_ok=True)
+    (uv_dir / "uv").write_text("#!/bin/sh\n")
+    (uv_dir / "uv").chmod(0o755)
     env = {"XDG_CACHE_HOME": str(tmp_path), "XDG_CONFIG_HOME": str(tmp_path / "cfg"), "HOME": str(tmp_path),
-           "PATH": "/usr/bin:/bin", "CLAUDE_PLUGIN_DATA": str(tmp_path / "data")}
+           "PATH": f"{uv_dir}:/usr/bin:/bin", "CLAUDE_PLUGIN_DATA": str(tmp_path / "data")}
     if data is not None:
         (tmp_path / "tac").mkdir(exist_ok=True)
         (tmp_path / "tac" / "usage.json").write_text(json.dumps(data))

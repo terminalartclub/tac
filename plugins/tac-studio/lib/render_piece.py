@@ -37,15 +37,29 @@ def _deps_ok() -> bool:
     return all(importlib.util.find_spec(m) for m in ("rich", "PIL", "fontTools"))
 
 
+class NoUv(RuntimeError):
+    pass
+
+
 def _worker_cmd() -> list[str]:
     if _deps_ok():
         return [sys.executable, str(Path(__file__).resolve())]
-    return ["uv", "run", "-q", "--no-project", *(a for d in UV_DEPS for a in ("--with", d)),
+    import uvfind
+
+    uv = uvfind.find_uv()
+    if uv is None:
+        raise NoUv(uvfind.MISSING)
+    return [uv, "run", "-q", "--no-project", "--python", uvfind.PYTHON, *(a for d in UV_DEPS for a in ("--with", d)),
             "python3", str(Path(__file__).resolve())]
 
 
 def run_with_timeout(piece_dir: Path, out: Path, timeout: float, cols: int, rows: int) -> int:
-    cmd = _worker_cmd() + ["--worker", str(piece_dir), "--out", str(out), "--cols", str(cols), "--rows", str(rows)]
+    try:
+        cmd = _worker_cmd()
+    except NoUv as e:
+        print(str(e), file=sys.stderr)
+        return 127
+    cmd = cmd + ["--worker", str(piece_dir), "--out", str(out), "--cols", str(cols), "--rows", str(rows)]
     proc = subprocess.Popen(cmd, start_new_session=True)
     try:
         return proc.wait(timeout=timeout)
