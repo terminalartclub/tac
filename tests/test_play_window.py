@@ -183,8 +183,9 @@ def work(tmp_path, monkeypatch):
     monkeypatch.setenv("TAC_WORK", str(root))
     calls = {"open": [], "local": [], "build": []}
 
-    def fake_open(argv):
+    def fake_open(argv, **kw):
         calls["open"].append(argv)
+        calls.setdefault("where", []).append(kw.get("where"))
         return termwin.Opened("Terminal", (80, 66)), ""
 
     monkeypatch.setattr(termwin, "open_play_window", fake_open)
@@ -206,7 +207,7 @@ def test_play_opens_a_window_and_not_the_browser(work, capsys):
 
 def test_play_falls_back_to_the_paste_command(work, monkeypatch, capsys):
     root, calls = work
-    monkeypatch.setattr(termwin, "open_play_window", lambda argv: (None, "this is an SSH session"))
+    monkeypatch.setattr(termwin, "open_play_window", lambda argv, **kw: (None, "this is an SSH session"))
     assert tacctl.main(["play", "kettle", "--no-page"]) == 0
     out = capsys.readouterr().out
     assert "couldn't open a terminal window (this is an SSH session)" in out
@@ -216,7 +217,7 @@ def test_play_falls_back_to_the_paste_command(work, monkeypatch, capsys):
 
 def test_play_unconfirmed_window_also_prints_the_paste_command(work, monkeypatch, capsys):
     monkeypatch.setattr(termwin, "open_play_window",
-                        lambda argv: (termwin.Opened("konsole", None, confirmed=False), ""))
+                        lambda argv, **kw: (termwin.Opened("konsole", None, confirmed=False), ""))
     assert tacctl.main(["play", "kettle", "--no-page"]) == 0
     out = capsys.readouterr().out
     assert "couldn't confirm the piece started" in out and "playing kettle" not in out
@@ -224,7 +225,7 @@ def test_play_unconfirmed_window_also_prints_the_paste_command(work, monkeypatch
 
 
 def test_play_reports_a_window_that_could_not_be_sized(work, monkeypatch, capsys):
-    monkeypatch.setattr(termwin, "open_play_window", lambda argv: (termwin.Opened("iTerm", (80, 48)), ""))
+    monkeypatch.setattr(termwin, "open_play_window", lambda argv, **kw: (termwin.Opened("iTerm", (80, 48)), ""))
     assert tacctl.main(["play", "kettle", "--no-page"]) == 0
     assert "the window is 80x48, not 80x66" in capsys.readouterr().out
 
@@ -261,3 +262,128 @@ def test_play_without_a_name_lists_pieces(work, capsys):
     assert tacctl.main(["play"]) == 0
     out = capsys.readouterr().out
     assert "kettle" in out and "empty-dir" not in out and calls["open"] == []
+
+
+# ── beside Claude Code: a pane on the right (iTerm2, Ghostty), a tab, or a window ───────────────────
+
+UUID = "0A1B2C3D-4E5F-6A7B-8C9D-0E1F2A3B4C5D"
+ITERM_ENV = {"TERM_PROGRAM": "iTerm.app", "ITERM_SESSION_ID": f"w0t2p1:{UUID}"}
+MACI = dict(platform="darwin", which=lambda n: f"/usr/bin/{n}", exists=lambda p: "iTerm" in p)
+
+
+def test_iterm_splits_right_of_the_session_that_ran_it():
+    run = FakeRun([(0, "60x50\n", "")])
+    opened, why = termwin.open_play_window(["tac", "play", "/p.py"], env=ITERM_ENV, run=run, **MACI)
+    assert opened == termwin.Opened("iTerm", (60, 50), where="pane") and why == ""
+    script = run.calls[0][2]
+    assert f'if (unique id of s) is "{UUID}" then' in script  # that session, not whichever window is current
+    assert "split vertically with default profile" in script and "create window" not in script
+    assert 'write text "exec tac play /p.py"' in script  # exec: the pane closes when the piece exits
+    assert "set columns" not in script  # a split isn't sized (it would resize the whole window)
+
+
+def test_iterm_tab_goes_in_that_sessions_window():
+    run = FakeRun([(0, "120x40", "")])
+    opened, _ = termwin.open_play_window(["tac", "play", "/p.py"], env=ITERM_ENV, run=run, where="tab", **MACI)
+    assert opened.where == "tab" and opened.app == "iTerm"
+    script = run.calls[0][2]
+    assert "tell w0" in script and "create tab with default profile" in script and "split" not in script
+
+
+@pytest.mark.parametrize("sid", ["", "w0t0p0", f"w0t0p0:{UUID}\" & do shell script \"id", f"x:{UUID}",
+                                 f"w0t0p0:{UUID}extra", "w0t0p0:not-a-uuid"])
+def test_an_odd_iterm_session_id_never_reaches_the_script(sid):
+    assert termwin.iterm_session({"ITERM_SESSION_ID": sid}) is None
+    run = FakeRun([(0, "60x50", "")])
+    termwin.open_play_window(["tac", "play", "/p.py"], env={"TERM_PROGRAM": "iTerm.app", "ITERM_SESSION_ID": sid},
+                             run=run, **MACI)
+    script = run.calls[0][2]
+    assert "unique id" not in script and "set s0 to current session of w0" in script  # the current session
+    assert "do shell script" not in script
+
+
+def test_a_refused_split_falls_back_to_a_window_and_says_why():
+    run = FakeRun([(1, "", "Not authorised to send Apple events to iTerm. (-1743)"), (0, "80x66", "")])
+    opened, _ = termwin.open_play_window(["tac", "play", "/p.py"], env=ITERM_ENV, run=run, **MACI)
+    assert opened.where == "window" and opened.app == "iTerm" and "-1743" in opened.note
+    assert "split vertically" in run.calls[0][2] and "create window" in run.calls[1][2]
+
+
+def test_window_flag_and_other_terminals_open_a_window():
+    run = FakeRun([(0, "80x66", "")])
+    opened, _ = termwin.open_play_window(["tac", "play", "/p.py"], env=ITERM_ENV, run=run, where="window", **MACI)
+    assert opened.where == "window" and "create window" in run.calls[0][2]
+    for term in ("Apple_Terminal", "WezTerm", ""):
+        run = FakeRun([(0, "80x66", "")])
+        opened, _ = termwin.open_play_window(["tac", "play", "/p.py"], env={"TERM_PROGRAM": term}, run=run,
+                                             platform="darwin", which=lambda n: "/usr/bin/osascript",
+                                             exists=lambda p: False)
+        assert opened.where == "window" and opened.app == "Terminal" and len(run.calls) == 1
+
+
+@pytest.mark.parametrize("where,shape", [("split", "split t0 direction right"),
+                                         ("tab", "new tab in front window")])
+def test_ghostty_splits_right_or_opens_a_tab(where, shape):
+    run = FakeRun([(0, "ok", "")])
+    opened, _ = termwin.open_play_window(["tac", "play", "/p.py"], env={"TERM_PROGRAM": "ghostty"}, run=run,
+                                         where=where, **MACI)
+    assert opened.app == "Ghostty" and opened.where == ("pane" if where == "split" else "tab") and opened.size is None
+    script = run.calls[0][2]
+    assert 'tell application "Ghostty"' in script and shape in script
+    assert 'input text "exec tac play /p.py" to t1' in script and 'send key "enter" to t1' in script
+
+
+def test_an_old_ghostty_without_applescript_gets_a_window():
+    run = FakeRun([(1, "", "execution error: Ghostty got an error: ... (-1708)"), (0, "80x66", "")])
+    opened, _ = termwin.open_play_window(["tac", "play", "/p.py"], env={"TERM_PROGRAM": "ghostty"}, run=run, **MACI)
+    assert opened.where == "window" and opened.app == "iTerm" and "Ghostty split" in opened.note
+
+
+@pytest.mark.parametrize("make", [lambda c: termwin.iterm_beside_script(c, "split", UUID),
+                                  lambda c: termwin.iterm_beside_script(c, "tab", None),
+                                  lambda c: termwin.ghostty_beside_script(c, "split"),
+                                  lambda c: termwin.ghostty_beside_script(c, "tab")])
+def test_beside_scripts_quote_adversarial_paths_as_one_literal(make):
+    """Defence in depth (the SAFE_ARG gate refuses these paths first): the command stays one literal."""
+    cmd = shlex.join(termwin.play_argv(Path("/plug ins/bin/tac"), Path(NASTY)))
+    lit = termwin.quote_applescript("exec " + cmd)
+    script = make(cmd)
+    assert script.count(lit) == 1 and _unquote_applescript(lit) == "exec " + cmd
+    assert shlex.split(cmd) == termwin.play_argv(Path("/plug ins/bin/tac"), Path(NASTY))
+
+
+def test_the_safe_arg_gate_comes_before_any_split():
+    run = FakeRun([])
+    opened, why = termwin.open_play_window(["tac", "play", "/a/$(id)/p.py"], env=ITERM_ENV, run=run, **MACI)
+    assert opened is None and "characters" in why and run.calls == []
+
+
+def test_linux_ignores_where():
+    run = FakeRun([])
+    opened, _ = termwin.open_play_window(["tac", "play", "/p.py"], platform="linux", env={"DISPLAY": ":0"},
+                                         which=lambda n: None, run=run, where="tab")
+    assert opened is None and run.calls == []
+
+
+def test_play_defaults_to_a_pane_and_passes_the_flags(work, monkeypatch, capsys):
+    root, calls = work
+    assert tacctl.main(["play", "kettle", "--no-page"]) == 0
+    assert tacctl.main(["play", "kettle", "--no-page", "--tab"]) == 0
+    assert tacctl.main(["play", "kettle", "--no-page", "--window"]) == 0
+    assert calls["where"] == ["split", "tab", "window"]
+    with pytest.raises(SystemExit):
+        tacctl.main(["play", "kettle", "--tab", "--window"])
+
+
+def test_play_says_where_it_plays(work, monkeypatch, capsys):
+    monkeypatch.setattr(termwin, "open_play_window", lambda argv, **kw: (termwin.Opened("iTerm", (60, 50), where="pane"), ""))
+    assert tacctl.main(["play", "kettle", "--no-page"]) == 0
+    out = capsys.readouterr().out
+    assert "playing kettle in a pane on the right (iTerm). Ctrl-C there stops it and closes the pane." in out
+    assert "the pane is 60x50, not 80x66" in out and "tacctl play kettle --window" in out
+    monkeypatch.setattr(termwin, "open_play_window",
+                        lambda argv, **kw: (termwin.Opened("Terminal", (80, 66), note="iTerm split: denied (-1743)"), ""))
+    assert tacctl.main(["play", "kettle", "--no-page"]) == 0
+    out = capsys.readouterr().out
+    assert "couldn't open a pane beside Claude Code (iTerm split: denied (-1743)); a window instead." in out
+    assert "playing kettle in a new Terminal window" in out

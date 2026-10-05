@@ -1118,12 +1118,24 @@ def cmd_play(a: argparse.Namespace) -> int:
     if not src.is_relative_to(root.resolve()):  # a symlink out of the work root: not the person's piece
         return die(f"{wd}/ points outside {root}/; not playing it")
     argv = termwin.play_argv(PLUGIN / "bin" / "tac", src)
-    opened, why = (None, "--no-window") if a.no_window else termwin.open_play_window(argv)
+    where = "window" if a.window else "tab" if a.tab else "split"
+    opened, why = (None, "--no-window") if a.no_window else termwin.open_play_window(argv, where=where)
     if opened and not opened.confirmed:
         print(f"opened a {opened.app} window, but couldn't confirm the piece started in it. If it isn't playing "
               "there, paste this into a terminal (Ctrl-C quits):")
         print(f"  {shlex.join(argv)}")
+    elif opened and opened.where == "pane":
+        print(f"playing {a.name} in a pane on the right ({opened.app}). Ctrl-C there stops it and closes the pane.")
+        if opened.size and opened.size != (termwin.COLS, termwin.ROWS):
+            c, r = opened.size
+            print(f"the pane is {c}x{r}, not {termwin.COLS}x{termwin.ROWS}: the piece fills what's there. For the "
+                  f"reel framing: tacctl play {a.name} --window")
+    elif opened and opened.where == "tab":
+        print(f"playing {a.name} in a new {opened.app} tab. Ctrl-C there stops it and closes the tab.")
     elif opened:
+        if where != "window" and opened.note:
+            print(f"couldn't open a {'pane' if where == 'split' else 'tab'} beside Claude Code ({safe(opened.note)}); "
+                  "a window instead.")
         print(f"playing {a.name} in a new {opened.app} window. Ctrl-C there stops it.")
         if opened.size and opened.size != (termwin.COLS, termwin.ROWS):
             c, r = opened.size
@@ -1194,8 +1206,12 @@ def main(argv: list[str] | None = None) -> int:
     st = sp.add_parser("status")
     st.add_argument("id")
     sp.add_parser("gallery", help="curated pieces (house artists, club picks) as handle/slug lines, nothing else")
-    pl = sp.add_parser("play", help="play a piece in a new terminal window; no name lists your pieces")
+    pl = sp.add_parser("play", help="play a piece in a pane beside Claude Code (iTerm2, Ghostty), else a new "
+                                    "terminal window; no name lists your pieces")
     pl.add_argument("name", nargs="?")
+    pw = pl.add_mutually_exclusive_group()
+    pw.add_argument("--tab", action="store_true", help="a new tab instead of a pane on the right")
+    pw.add_argument("--window", action="store_true", help="a new window (the 80x66 reel framing)")
     pl.add_argument("--no-window", action="store_true", help="just print the command to paste")
     pl.add_argument("--page", action="store_true", help="also open the review page in the browser")
     pl.add_argument("--no-page", action="store_true", help="don't build the review page")

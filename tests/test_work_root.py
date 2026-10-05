@@ -32,7 +32,7 @@ def _piece(root: Path, name: str) -> Path:
 def no_window(monkeypatch):
     opened = []
     monkeypatch.setattr(termwin, "open_play_window",
-                        lambda argv: opened.append(argv) or (termwin.Opened("Terminal", None), ""))
+                        lambda argv, **kw: opened.append(argv) or (termwin.Opened("Terminal", None), ""))
     monkeypatch.setattr(review, "build", lambda root, **kw: root / "index.html")
     return opened
 
