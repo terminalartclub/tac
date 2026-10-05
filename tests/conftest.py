@@ -38,6 +38,14 @@ def private_cache(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
 
 
 @pytest.fixture(autouse=True)
+def private_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """~/.config/tac holds the person's credentials and style: never the real one, nor anything else under the real
+    HOME. Tests that need their own set XDG_CONFIG_HOME or HOME again."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg-config"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+
+
+@pytest.fixture(autouse=True)
 def no_prod_platform(monkeypatch: pytest.MonkeyPatch) -> None:
     """The plugin defaults to the public platform. Tests start from a clean env: TAC_API is a dead loopback
     port (subprocesses inherit it, so a launcher test can't reach prod either) and TAC_SITE_URL is unset. Any

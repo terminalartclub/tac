@@ -40,6 +40,7 @@ LOGO_ID = 7303
 LOGO_COLS = 2
 GROUND = (8, 8, 15)
 JPEG_Q = 90  # iTerm2: JPEG (2 ms vs PNG's 8 ms at 952x1691); the site's previews are lossy WebP q70
+ITERM_MAX = 1_040_000  # iTerm2 drops an OSC 1337 over 1,048,576 bytes; base64 plus a < 100-byte header
 CHUNK = 4096  # kitty: base64 per escape, a multiple of 4
 
 
@@ -63,7 +64,8 @@ ITERM_PROBE = b"\x1b]1337;ReportCellSize\x07\x1b[c"
 DA1 = re.compile(rb"\x1b\[\?[0-9;]*c")
 KITTY_OK = re.compile(rb"\x1b_Gi=31;OK\x1b\\")
 CELL_PX = re.compile(rb"\x1b\[6;(\d+);(\d+)t")
-ITERM_CELL = re.compile(rb"\x1b\]1337;ReportCellSize=([0-9.]+);([0-9.]+)(?:;([0-9.]+))?(?:\x07|\x1b\\)")
+NUM = rb"(\d+(?:\.\d+)?)"
+ITERM_CELL = re.compile(rb"\x1b\]1337;ReportCellSize=" + NUM + b";" + NUM + b"(?:;" + NUM + rb")?(?:\x07|\x1b\\)")
 
 
 def ask(fd_in: int, fd_out: int, query: bytes, timeout: float = PROBE_S) -> bytes:
@@ -102,6 +104,13 @@ def winsize(fd: int) -> tuple[int, int, int, int]:
     return cols, rows, xp, yp
 
 
+def _px(w: float, h: float) -> tuple[float, float] | None:
+    """A cell size in device pixels, each side clamped to 1..512; None unless both are positive."""
+    if not (w > 0 and h > 0):
+        return None
+    return min(512.0, max(1.0, w)), min(512.0, max(1.0, h))
+
+
 def cell_px(proto: str, fd_in: int, fd_out: int) -> tuple[float, float] | None:
     """Device pixels a cell, confirming the protocol on the way, or None (not confirmed: cells). iTerm2: its
     ReportCellSize (points x scale: sharp on a Retina screen), else the window size's pixel fields; kitty: the
@@ -112,14 +121,14 @@ def cell_px(proto: str, fd_in: int, fd_out: int) -> tuple[float, float] | None:
         if not m:
             return None
         h, w, scale = float(m[1]), float(m[2]), float(m[3] or 1)
-        return (w * scale, h * scale) if w > 0 and h > 0 else None
+        return _px(w * scale, h * scale)
     reply = ask(fd_in, fd_out, KITTY_PROBE)
     if not KITTY_OK.search(reply):
         return None
     if xp and yp and cols and rows:
-        return xp / cols, yp / rows
+        return _px(xp / cols, yp / rows)
     m = CELL_PX.search(reply)
-    return (int(m[2]), int(m[1])) if m and int(m[1]) and int(m[2]) else None
+    return _px(int(m[2]), int(m[1])) if m else None
 
 
 # ── layout and raster ───────────────────────────────────────────────────────
@@ -232,13 +241,19 @@ def picture(cur: Any, cols: int, rows: int, lay: Layout) -> Any:
 
 
 def encode(proto: str, im: Any) -> str:
-    """The image as base64: JPEG for iTerm2, PNG (zlib level 1) for kitty (its protocol takes PNG or raw)."""
-    b = io.BytesIO()
-    if proto == ITERM:
-        im.save(b, "JPEG", quality=JPEG_Q)
-    else:
+    """The image as base64: JPEG for iTerm2 (lower quality until it fits ITERM_MAX; "" if none does: cells),
+    PNG (zlib level 1) for kitty (its protocol takes PNG or raw)."""
+    if proto != ITERM:
+        b = io.BytesIO()
         im.save(b, "PNG", compress_level=1)
-    return base64.standard_b64encode(b.getvalue()).decode("ascii")
+        return base64.standard_b64encode(b.getvalue()).decode("ascii")
+    for q in (JPEG_Q, 75, 55):
+        b = io.BytesIO()
+        im.save(b, "JPEG", quality=q)
+        s = base64.standard_b64encode(b.getvalue()).decode("ascii")
+        if len(s) <= ITERM_MAX:
+            return s
+    return ""
 
 
 def iterm_image(b64: str, ncols: int, nrows: int, aspect: bool = False) -> str:
@@ -304,12 +319,15 @@ class Pixels:
     def _remeasure(self, raw: tuple) -> None:
         """The cell size, again, when the window changed (a font size change changes it too)."""
         cols, rows, xp, yp = raw
+        cell = None
         if self.proto == KITTY and xp and yp and cols and rows:
-            self.cell = (xp / cols, yp / rows)
+            cell = _px(xp / cols, yp / rows)
         elif self.proto == ITERM and self.fd_in is not None and self.fd_out is not None:
             m = ITERM_CELL.search(ask(self.fd_in, self.fd_out, ITERM_PROBE, 0.2))
-            if m and float(m[1]) > 0 and float(m[2]) > 0:
-                self.cell = (float(m[2]) * float(m[3] or 1), float(m[1]) * float(m[3] or 1))
+            if m:
+                cell = _px(float(m[2]) * float(m[3] or 1), float(m[1]) * float(m[3] or 1))
+        if cell:
+            self.cell = cell
 
     def frame(self, cur: Any, cols: int, rows: int, index: int, piece: Any, credit: Any) -> str | None:
         import wall
@@ -321,10 +339,15 @@ class Pixels:
             return ""
         pc, pr = raw[0], max(2, raw[1])
         out = []
-        if self.drawn is not None and raw != self.drawn:
-            self._remeasure(raw)
-        if self.lay is None or raw != self.drawn or self.lay[0] != (cols, rows, self.cell):
-            lay = layout(cols, rows, pc, pr, *self.cell)
+        try:
+            if self.drawn is not None and raw != self.drawn:
+                self._remeasure(raw)
+            relay = self.lay is None or raw != self.drawn or self.lay[0] != (cols, rows, self.cell)
+            lay = layout(cols, rows, pc, pr, *self.cell) if relay else None
+        except Exception:  # noqa: BLE001 - an odd probe answer or tty: cells from now on
+            self.broken = True
+            return None
+        if relay:
             if lay is None:
                 return None
             out.append(self.clear(pr))
@@ -345,6 +368,8 @@ class Pixels:
             if self.cache_bytes + len(b64) <= CACHE_CAP:
                 self.cache[index] = b64
                 self.cache_bytes += len(b64)
+        if not b64:  # too big for iTerm2 even at the lowest quality: this frame as cells
+            return None
         out.append(f"\x1b[{lay.y + 1};{lay.x + 1}H")
         if self.proto == ITERM:
             out.append(iterm_image(b64, lay.ncols, lay.nrows))

@@ -325,6 +325,7 @@ GROUND_SGR = _sgr(wallframes.rgb(GROUND), wallframes.rgb(GROUND))
 CREDIT_SGR = _sgr(wallframes.rgb(CREDIT_FG), wallframes.rgb(GROUND))  # never GROUND_SGR's ink: that's invisible
 ENTER = "\x1b[?1049h\x1b[?25l\x1b[?7l\x1b[2J"
 LEAVE = "\x1b]8;;\x1b\\\x1b[0m\x1b[?7h\x1b[?25h\x1b[?1049l"  # closes any hyperlink first
+ST = "\x1b\\"  # ends an image escape a stop cut mid-frame (kitty APC, iTerm2 OSC 1337); alone, a no-op
 
 
 def _blocks(n: int, m: int) -> list[tuple[int, int]]:
@@ -763,7 +764,7 @@ def play(doc: dict, base: str | None, cache: Cache, seconds: float, offline: boo
     finally:
         for sig, h0 in old.items():
             signal.signal(sig, h0)
-        out.write((pixels.cleanup() if pixels else "") + LEAVE)
+        out.write(ST + (pixels.cleanup() if pixels else "") + LEAVE)
         out.flush()
         for t, _ in pending.values():  # a prefetch still running: give it a moment, never hold up the exit
             t.join(0.05)

@@ -179,6 +179,21 @@ def test_iterm_inline_image_is_well_formed():
     assert Image.open(io.BytesIO(data)).format == "JPEG" and Image.open(io.BytesIO(data)).size == (40, 60)
 
 
+def test_iterm_images_over_its_osc_limit_drop_quality_then_go_to_cells(monkeypatch):
+    """iTerm2 drops an OSC 1337 over 1,048,576 bytes; noise at the published size is ~1.9 MB at q90."""
+    def noise(w, h):
+        return Image.frombytes("RGB", (w, h), os.urandom(w * h * 3))
+
+    b64 = wallpix.encode(wallpix.ITERM, noise(952, 1691))
+    assert 0 < len(b64) <= wallpix.ITERM_MAX  # q90 and q75 too big: a lower quality fits
+    assert len(wallpix.iterm_image(b64, 68, 50)) < 1_048_576
+    assert wallpix.encode(wallpix.ITERM, noise(1040, 1848)) == ""  # too big even at the lowest: cells
+    monkeypatch.setattr(wallpix, "ITERM_MAX", 100)
+    px, _ = pixels(wallpix.ITERM, (68, 54, 0, 0))
+    assert px.frame(halves(), 80, 66, 0, "k", CREDIT) is None and not px.broken  # this frame as cells
+    assert px.cache == {0: ""}  # and not encoded again on the next loop
+
+
 def test_kitty_image_is_chunked_and_placed_by_id():
     im = Image.effect_noise((200, 200), 64).convert("RGB")  # big enough for several chunks
     b64 = wallpix.encode(wallpix.KITTY, im)
@@ -325,6 +340,47 @@ def test_a_stop_signal_mid_render_is_never_swallowed(monkeypatch):
     assert px.frame(halves(), 80, 66, 1, "k", CREDIT) is None and px.broken
 
 
+@pytest.mark.parametrize("answer, want", [
+    (b"\x1b]1337;ReportCellSize=1.2.3;7.0\x07", None),
+    (b"\x1b]1337;ReportCellSize=.;.\x07", None),
+    (b"\x1b]1337;ReportCellSize=17.0;7.0;0\x07", None),
+    (b"\x1b]1337;ReportCellSize=17;7;2\x07", (14.0, 34.0)),
+    (b"\x1b]1337;ReportCellSize=" + b"9" * 400 + b";0.001\x07", (1.0, 512.0)),  # clamped to 1..512 px
+], ids=["two-dots", "dots", "zero-scale", "ok", "huge"])
+def test_odd_iterm_cell_size_answers_are_parsed_strictly_and_clamped(monkeypatch, answer, want):
+    monkeypatch.setattr(wallpix, "winsize", lambda fd: (80, 24, 0, 0))
+    monkeypatch.setattr(wallpix, "ask", lambda *a: answer + b"\x1b[?62c")
+    assert wallpix.cell_px(wallpix.ITERM, 0, 1) == want
+
+
+def test_kitty_cell_sizes_are_clamped(monkeypatch):
+    monkeypatch.setattr(wallpix, "ask", lambda *a: b"\x1b_Gi=31;OK\x1b\\\x1b[6;99999;0t")
+    monkeypatch.setattr(wallpix, "winsize", lambda fd: (80, 24, 0, 0))
+    assert wallpix.cell_px(wallpix.KITTY, 0, 1) is None  # a zero side: not measured, cells
+    monkeypatch.setattr(wallpix, "winsize", lambda fd: (80, 24, 80 * 4000, 24 * 17))
+    assert wallpix.cell_px(wallpix.KITTY, 0, 1) == (512.0, 17.0)
+
+
+def test_a_malformed_remeasure_answer_or_a_layout_error_is_cells_never_a_crash(monkeypatch):
+    clock = Clock()
+    box = {"size": (68, 54, 0, 0)}
+    px = wallpix.Pixels(wallpix.ITERM, (14.0, 34.0), 0, 1, clock=clock, size=lambda: box["size"])
+    assert px.frame(halves(), 80, 66, 0, "k", CREDIT)
+    monkeypatch.setattr(wallpix, "ask", lambda *a: b"\x1b]1337;ReportCellSize=1.2.3;9.9.9\x07\x1b[?62c")
+    box["size"] = (100, 40, 0, 0)
+    assert px.frame(halves(), 80, 66, 1, "k", CREDIT) == ""  # settling
+    clock.t = 0.2
+    assert px.frame(halves(), 80, 66, 1, "k", CREDIT) and px.cell == (14.0, 34.0)  # kept the last good size
+    monkeypatch.setattr(wallpix, "ask", lambda *a: 1 / 0)  # the tty went away mid-probe
+    box["size"] = (90, 40, 0, 0)
+    assert px.frame(halves(), 80, 66, 2, "k", CREDIT) == ""
+    clock.t = 0.4
+    assert px.frame(halves(), 80, 66, 2, "k", CREDIT) is None and px.broken
+    px, _ = pixels(wallpix.KITTY, (68, 54, 0, 0))
+    monkeypatch.setattr(wallpix, "layout", lambda *a: 1 / 0)
+    assert px.frame(halves(), 80, 66, 0, "k", CREDIT) is None and px.broken
+
+
 def test_play_uses_pixels_and_cells_as_each_frame_allows(monkeypatch, tmp_path):
     """wall.play with a pixel drawer: the image for frames it can draw, frame_ansi for the rest, and its
     cleanup before the terminal is given back."""
@@ -366,6 +422,49 @@ def test_play_uses_pixels_and_cells_as_each_frame_allows(monkeypatch, tmp_path):
     s = out.getvalue()
     assert "<img 0>" in s and "<img 2>" in s and "<drop>" in s and calls[:3] == [0, 1, 2]
     assert s.endswith("<cleanup>" + wall.LEAVE)
+
+
+@pytest.mark.parametrize("proto", [wallpix.ITERM, wallpix.KITTY])
+def test_a_stop_mid_frame_ends_the_image_escape_before_the_cleanup(monkeypatch, proto):
+    """SIGTERM, SIGHUP or Ctrl-C during out.write(frame) drops the rest of the frame: without a terminator the
+    kitty deletes and LEAVE land inside the cut APC / OSC 1337 and the terminal swallows them as payload."""
+    from test_wall import film
+
+    gz = film(3, cols=80, rows=66)
+
+    class Cache:
+        def cached(self, p):
+            return gz
+
+        def touch(self, p):
+            pass
+
+        def fresh(self, p):
+            return True
+
+    class Cut(io.StringIO):
+        at = None
+
+        def write(self, s):
+            head = "a=T," if proto == wallpix.KITTY else "1337;File="
+            if self.at is None and head in s:
+                payload = s.index(";" if proto == wallpix.KITTY else ":", s.index(head) + len(head)) + 1
+                self.at = len(self.getvalue()) + payload + 100
+                super().write(s[:payload + 100])
+                raise wall._Stop
+            return super().write(s)
+
+    monkeypatch.setattr(wall, "pane_size", lambda: (68, 54))
+    px, _ = pixels(proto, (68, 54, 0, 0))
+    out = Cut()
+    doc = {"pieces": [{"handle": "alex", "slug": "a", "title": "A", "model": "", "bytes": len(gz), "etag": None}]}
+    assert wall.play(doc, None, Cache(), 1, True, out=out, sleep=lambda s: None, rounds=1, pixels=px) == 0
+    s = out.getvalue()
+    assert out.at and "\x1b" not in s[out.at - 100:out.at]  # cut inside the payload
+    rest = s[out.at:]
+    assert rest.startswith(wall.ST) and rest.endswith(wall.LEAVE)
+    if proto == wallpix.KITTY:
+        assert rest.index(wall.ST) < rest.index("\x1b_Ga=d")
 
 
 # ── a real pty: the whole pane player ───────────────────────────────────────
