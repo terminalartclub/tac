@@ -10,8 +10,9 @@ character means no window, and the caller prints the paste command instead.
 
 macOS, by default beside Claude Code: in iTerm2 (TERM_PROGRAM=iTerm.app) a split to the RIGHT of the session
 that ran tacctl (found by $ITERM_SESSION_ID), in Ghostty 1.3+ (TERM_PROGRAM=ghostty) a split right of the focused
-terminal (its AppleScript API, a preview); `exec` makes the pane close when the piece exits. where="tab": a new
-tab in that window instead. where="window", any other terminal, or a split that fails: a new window, iTerm2
+terminal (its AppleScript API, a preview); `exec` makes the pane close when the piece exits (held open on a
+failure: beside_command). where="tab": a new tab in that window instead. where="window": a new window, Ghostty's
+own in Ghostty. Any other terminal, or a split/tab/Ghostty window that fails: a new window, iTerm2
 when installed, else Terminal.app (tabs there need System Events and accessibility permission: not used). All
 via osascript; the command is one AppleScript string literal (quote_applescript). Linux: $TERMINAL, then common emulators, launched with an argv (no shell
 string) through each emulator's own "run this argv" flag. The launched `sh` touches a marker file first, so
@@ -75,16 +76,30 @@ def iterm_script(cmd: str, cols: int = COLS, rows: int = ROWS) -> str:
     ])
 
 
+# A pane or tab runs `exec sh -c HOLD tac play <piece>`: it closes when the piece ends, and holds open only on a
+# real failure (tac didn't start, the piece raised), so the error stays readable. Ctrl-C is not a failure: tac play
+# catches it and exits 0, and a child killed by SIGINT gives 130, both close the pane with no prompt. A fixed
+# literal, typed into the person's login shell inside single quotes: no single quote, backslash or `!` (tcsh
+# history) in it, so zsh, bash, fish and tcsh all pass it to sh unchanged.
+HOLD = ('"$0" "$@"; s=$?; if [ $s -ne 0 ] && [ $s -ne 130 ]; then echo; '
+        'printf "[tac play stopped with an error (exit %s): press Enter to close] " $s; read _; fi')
+
+
+def beside_command(argv: list[str]) -> str:
+    """The line typed into a new pane or tab: exec (it closes with the piece), held open only on a failure."""
+    return "exec sh -c '" + HOLD + "' " + shlex.join(argv)
+
+
 def iterm_session(env: Mapping[str, str]) -> str | None:
     """The UUID of the iTerm2 session that ran tacctl, from $ITERM_SESSION_ID; None when absent or odd."""
     m = ITERM_SESSION_RE.fullmatch(env.get("ITERM_SESSION_ID", ""))
     return m.group(1).upper() if m else None
 
 
-def iterm_beside_script(cmd: str, where: str, session: str | None) -> str:
+def iterm_beside_script(line: str, where: str, session: str | None) -> str:
     """A split to the right of `session` (else the current session of the current window), or a new tab in its
-    window, typing `exec <cmd>` into the new session's own shell (its PATH, so uv is found); the pane closes
-    when the piece exits. iTerm2 adds a new tab at the end of the window's tabs (no position in its API) and
+    window, typing `line` (beside_command) into the new session's own shell (its PATH, so uv is found). If the
+    typing fails, the new session is closed: no empty pane is left behind. iTerm2 adds a new tab at the end of the window's tabs (no position in its API) and
     sizes a split by halving the session (setting columns/rows would resize the whole window: not done)."""
     lines = ['tell application "iTerm"', "  set s0 to missing value", "  set w0 to missing value"]
     if session:
@@ -112,26 +127,35 @@ def iterm_beside_script(cmd: str, where: str, session: str | None) -> str:
         lines += ["  tell w0", "    set t1 to (create tab with default profile)", "  end tell",
                   "  set s1 to current session of t1"]
     lines += [
-        "  tell s1",
-        f"    write text {quote_applescript('exec ' + cmd)}",
-        '    return ((columns as text) & "x" & (rows as text))',
-        "  end tell",
+        "  try",
+        "    tell s1",
+        f"      write text {quote_applescript(line)}",
+        '      return ((columns as text) & "x" & (rows as text))',
+        "    end tell",
+        "  on error e number n",
+        "    tell s1 to close",
+        "    error e number n",
+        "  end try",
         "end tell",
     ]
     return "\n".join(lines)
 
 
-def ghostty_beside_script(cmd: str, where: str) -> str:
-    """Ghostty 1.3+ (AppleScript, a preview API): a split right of the focused terminal of the front window, or
-    a new tab in it, typing `exec <cmd>` and Enter into the new terminal's shell; it closes when the piece exits.
-    Ghostty reports no size here."""
-    lines = ['tell application "Ghostty"', "  set t0 to focused terminal of selected tab of front window"]
+def ghostty_script(line: str, where: str) -> str:
+    """Ghostty 1.3+ (its AppleScript API, a preview): a split right of the focused terminal of the front window,
+    a new tab in that window, or a new window. The command goes in as the new terminal's `initial input` (typed
+    into its own shell at launch), set before the terminal exists, so no step can fail after it opens and leave
+    an empty pane. Ghostty reports no size here."""
+    lines = ['tell application "Ghostty"', "  set cfg to new surface configuration",
+             f"  set initial input of cfg to {quote_applescript(line)} & linefeed"]
     if where == "split":
-        lines += ["  set t1 to split t0 direction right"]
+        lines += ["  set t0 to focused terminal of selected tab of front window",
+                  "  split t0 direction right with configuration cfg"]
+    elif where == "tab":
+        lines += ["  new tab in front window with configuration cfg"]
     else:
-        lines += ["  new tab in front window", "  set t1 to focused terminal of selected tab of front window"]
-    lines += [f"  input text {quote_applescript('exec ' + cmd)} to t1", '  send key "enter" to t1',
-              '  return "ok"', "end tell"]
+        lines += ["  new window with configuration cfg"]
+    lines += ['  return "ok"', "end tell"]
     return "\n".join(lines)
 
 
@@ -212,20 +236,23 @@ def open_play_window(
         if not which("osascript"):
             return None, "osascript not found"
         cmd = shlex.join(argv)
+        line = beside_command(argv)
         errors = []
         term = env.get("TERM_PROGRAM", "")
-        if where != "window" and term in ("iTerm.app", "ghostty"):
-            app = "iTerm" if term == "iTerm.app" else "Ghostty"
-            script = (iterm_beside_script(cmd, where, iterm_session(env)) if app == "iTerm"
-                      else ghostty_beside_script(cmd, where))
+        tries: list[tuple[str, str, str]] = []  # (app, where, script)
+        if term == "iTerm.app" and where != "window":
+            tries.append(("iTerm", where, iterm_beside_script(line, where, iterm_session(env))))
+        elif term == "ghostty":  # Ghostty's own window too, before any other app's
+            tries += [("Ghostty", w, ghostty_script(line, w)) for w in dict.fromkeys([where, "window"])]
+        for app, w, script in tries:
             try:
                 r = run(["osascript", "-e", script], capture_output=True, text=True, timeout=30)
             except (OSError, subprocess.TimeoutExpired) as e:
-                errors.append(f"{app} {where}: {type(e).__name__}")
-            else:
-                if r.returncode == 0:
-                    return Opened(app, _size(r.stdout), where="pane" if where == "split" else "tab"), ""
-                errors.append(f"{app} {where}: {(r.stderr or '').strip()[:120] or f'exit {r.returncode}'}")
+                errors.append(f"{app} {w}: {type(e).__name__}")
+                continue
+            if r.returncode == 0:
+                return Opened(app, _size(r.stdout), where="pane" if w == "split" else w, note="; ".join(errors)), ""
+            errors.append(f"{app} {w}: {(r.stderr or '').strip()[:120] or f'exit {r.returncode}'}")
         note = "; ".join(errors)  # why not a pane or tab, if one was tried
         apps = ([("iTerm", iterm_script)] if any(exists(p) for p in ITERM_PATHS) else []) + [("Terminal", terminal_script)]
         for app, script in apps:

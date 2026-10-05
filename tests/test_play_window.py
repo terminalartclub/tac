@@ -278,7 +278,8 @@ def test_iterm_splits_right_of_the_session_that_ran_it():
     script = run.calls[0][2]
     assert f'if (unique id of s) is "{UUID}" then' in script  # that session, not whichever window is current
     assert "split vertically with default profile" in script and "create window" not in script
-    assert 'write text "exec tac play /p.py"' in script  # exec: the pane closes when the piece exits
+    assert f"write text {termwin.quote_applescript(termwin.beside_command(['tac', 'play', '/p.py']))}" in script
+    assert "tell s1 to close" in script  # typing failed: the new pane is closed, not left empty
     assert "set columns" not in script  # a split isn't sized (it would resize the whole window)
 
 
@@ -321,35 +322,55 @@ def test_window_flag_and_other_terminals_open_a_window():
         assert opened.where == "window" and opened.app == "Terminal" and len(run.calls) == 1
 
 
-@pytest.mark.parametrize("where,shape", [("split", "split t0 direction right"),
-                                         ("tab", "new tab in front window")])
-def test_ghostty_splits_right_or_opens_a_tab(where, shape):
+@pytest.mark.parametrize("where,shape,kind", [("split", "split t0 direction right with configuration cfg", "pane"),
+                                              ("tab", "new tab in front window with configuration cfg", "tab"),
+                                              ("window", "new window with configuration cfg", "window")])
+def test_ghostty_splits_right_opens_a_tab_or_its_own_window(where, shape, kind):
     run = FakeRun([(0, "ok", "")])
     opened, _ = termwin.open_play_window(["tac", "play", "/p.py"], env={"TERM_PROGRAM": "ghostty"}, run=run,
                                          where=where, **MACI)
-    assert opened.app == "Ghostty" and opened.where == ("pane" if where == "split" else "tab") and opened.size is None
+    assert opened == termwin.Opened("Ghostty", None, where=kind) and len(run.calls) == 1
     script = run.calls[0][2]
     assert 'tell application "Ghostty"' in script and shape in script
-    assert 'input text "exec tac play /p.py" to t1' in script and 'send key "enter" to t1' in script
+    # the command is the new terminal's initial input, set before it exists: nothing can fail after it opens
+    line = termwin.quote_applescript(termwin.beside_command(["tac", "play", "/p.py"]))
+    assert f"set initial input of cfg to {line} & linefeed" in script
+    assert script.index("initial input") < script.index(shape)
+    assert "input text" not in script and "iTerm" not in script
 
 
-def test_an_old_ghostty_without_applescript_gets_a_window():
-    run = FakeRun([(1, "", "execution error: Ghostty got an error: ... (-1708)"), (0, "80x66", "")])
+def test_a_failed_ghostty_split_opens_a_ghostty_window_then_any_window():
+    run = FakeRun([(1, "", "Ghostty got an error: no front window (-1728)"), (0, "ok", "")])
     opened, _ = termwin.open_play_window(["tac", "play", "/p.py"], env={"TERM_PROGRAM": "ghostty"}, run=run, **MACI)
-    assert opened.where == "window" and opened.app == "iTerm" and "Ghostty split" in opened.note
+    assert opened.app == "Ghostty" and opened.where == "window" and "Ghostty split" in opened.note
+    assert "new window with configuration" in run.calls[1][2]
+    # an old Ghostty (no AppleScript): the split and its window both fail, then iTerm2's window
+    run = FakeRun([(1, "", "(-1708)"), (1, "", "(-1708)"), (0, "80x66", "")])
+    opened, _ = termwin.open_play_window(["tac", "play", "/p.py"], env={"TERM_PROGRAM": "ghostty"}, run=run, **MACI)
+    assert opened.app == "iTerm" and opened.where == "window" and "Ghostty split" in opened.note
+    assert "Ghostty window" in opened.note and 'tell application "iTerm"' in run.calls[2][2]
+
+
+def test_ghostty_window_flag_asks_ghostty_once():
+    run = FakeRun([(1, "", "(-1708)"), (0, "80x66", "")])
+    opened, _ = termwin.open_play_window(["tac", "play", "/p.py"], env={"TERM_PROGRAM": "ghostty"}, run=run,
+                                         where="window", **MACI)
+    assert opened.app == "iTerm" and len(run.calls) == 2 and "new window" in run.calls[0][2]
 
 
 @pytest.mark.parametrize("make", [lambda c: termwin.iterm_beside_script(c, "split", UUID),
                                   lambda c: termwin.iterm_beside_script(c, "tab", None),
-                                  lambda c: termwin.ghostty_beside_script(c, "split"),
-                                  lambda c: termwin.ghostty_beside_script(c, "tab")])
+                                  lambda c: termwin.ghostty_script(c, "split"),
+                                  lambda c: termwin.ghostty_script(c, "tab"),
+                                  lambda c: termwin.ghostty_script(c, "window")])
 def test_beside_scripts_quote_adversarial_paths_as_one_literal(make):
-    """Defence in depth (the SAFE_ARG gate refuses these paths first): the command stays one literal."""
-    cmd = shlex.join(termwin.play_argv(Path("/plug ins/bin/tac"), Path(NASTY)))
-    lit = termwin.quote_applescript("exec " + cmd)
-    script = make(cmd)
-    assert script.count(lit) == 1 and _unquote_applescript(lit) == "exec " + cmd
-    assert shlex.split(cmd) == termwin.play_argv(Path("/plug ins/bin/tac"), Path(NASTY))
+    """Defence in depth (the SAFE_ARG gate refuses these paths first): the line stays one literal."""
+    argv = termwin.play_argv(Path("/plug ins/bin/tac"), Path(NASTY))
+    line = termwin.beside_command(argv)
+    lit = termwin.quote_applescript(line)
+    script = make(line)
+    assert script.count(lit) == 1 and _unquote_applescript(lit) == line
+    assert shlex.split(line) == ["exec", "sh", "-c", termwin.HOLD, *argv]  # sh gets exactly these words
 
 
 def test_the_safe_arg_gate_comes_before_any_split():
@@ -387,3 +408,31 @@ def test_play_says_where_it_plays(work, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "couldn't open a pane beside Claude Code (iTerm split: denied (-1743)); a window instead." in out
     assert "playing kettle in a new Terminal window" in out
+
+
+# ── the hold: a failing piece's pane stays open with the error; a normal end or Ctrl-C closes it ────────────
+
+def test_the_hold_literal_survives_every_login_shell():
+    assert not set(termwin.HOLD) & {"'", "\\", "!", "\n"}  # safe inside single quotes in zsh, bash, fish, tcsh
+
+
+def _shells():
+    import shutil
+    return [s for s in ("zsh", "bash", "fish", "tcsh", "sh") if shutil.which(s)]
+
+
+@pytest.mark.parametrize("shell", _shells())
+@pytest.mark.parametrize("rc,held", [(0, False), (130, False), (1, True), (127, True)])
+def test_the_hold_holds_only_on_a_real_failure(shell, rc, held, tmp_path):
+    """The typed line, run by each login shell found here: `exec sh -c HOLD <prog> play <piece>`. 0 (tac play
+    exits 0 on Ctrl-C, it catches it) and 130 (killed by SIGINT) close; any other exit waits for Enter."""
+    prog = tmp_path / "fake tac"
+    prog.write_text(f"#!/bin/sh\necho \"ran $1 $2\"\nexit {rc}\n")
+    prog.chmod(0o755)
+    line = termwin.beside_command([str(prog), "play", "/p.py"]).replace("exec ", "", 1)  # no exec: keep the test's shell
+    r = subprocess.run([shell, "-c", line], input="\n", capture_output=True, text=True, timeout=30,
+                       env={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)})
+    assert "ran play /p.py" in r.stdout
+    assert ("press Enter to close" in r.stdout) is held
+    if held:
+        assert f"(exit {rc})" in r.stdout
