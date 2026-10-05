@@ -583,7 +583,8 @@ def credit_row(credit: Credit | str, pane_cols: int, pane_rows: int, reserve: in
     parts, mark = credit.layout(pane_cols)
     at = f"@{_clean(credit.handle)}" if credit.handle else None
     left = " · ".join(_osc8(credit.handle_url(), x) if x == at else x for x in parts)
-    out = [f"\x1b[{pane_rows};1H{GROUND_SGR}\x1b[K{CREDIT_SGR}{left}"]
+    erase = f"\x1b[{pane_cols}X" if reserve else "\x1b[K"  # ECH: the logo's cells kept, not redrawn each frame
+    out = [f"\x1b[{pane_rows};1H{GROUND_SGR}{erase}{CREDIT_SGR}{left}"]
     if mark:
         out.append(f"\x1b[{pane_rows};{pane_cols - len(_mark_text(mark)) + 1}H")
         url = credit.piece_url()

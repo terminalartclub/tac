@@ -285,6 +285,32 @@ def test_a_frame_is_one_image_over_the_picture_and_the_bar_stays_text(proto):
     assert {sc.buffer[53][x].bg for x in range(68)} == {"08080f"}
 
 
+@pytest.mark.parametrize("proto", [wallpix.ITERM, wallpix.KITTY])
+def test_the_logo_is_sent_once_a_layout_not_with_every_frame(proto):
+    """iTerm2 3.7.3: the logo resent with each of 247 frames in 25 s, one more image to decode a frame. Once a
+    layout now: the bar's row is erased up to the logo's cells only; a resize or a clear draws it again (kitty:
+    a placement of the image already sent, never the bytes again)."""
+    clock = Clock()
+    px, box = pixels(proto, (68, 54, 0, 0), clock)
+    logo = "width=2;height=1" if proto == wallpix.ITERM else "i=7303,"
+    sent = lambda s: s.count(logo) if proto == wallpix.ITERM else s.count("a=T,f=100,i=7303,")  # noqa: E731
+    frames = [px.frame(halves(mast_x=k), 80, 66, k, "a", CREDIT) for k in range(10)]
+    frames += [px.frame(halves(mast_x=k), 80, 66, k, "b", CREDIT) for k in range(10)]  # the next piece
+    assert sent("".join(frames)) == 1 and all(logo not in f for f in frames[1:])
+    assert all(f"\x1b[54;1H{wall.GROUND_SGR}\x1b[65X" in f and "\x1b[54;1H" + wall.GROUND_SGR + "\x1b[K" not in f
+               for f in frames[1:])  # ECH, not EL: the logo's cells untouched (frame 0 clears first)
+    box["size"] = (100, 40, 0, 0)
+    assert px.frame(halves(), 80, 66, 0, "b", CREDIT) == ""
+    clock.t = 0.2
+    again = "".join(px.frame(halves(mast_x=k), 80, 66, k, "b", CREDIT) for k in range(5))
+    if proto == wallpix.ITERM:
+        assert again.count(logo) == 1
+    else:
+        assert sent(again) == 0 and again.count(wallpix.kitty_place(7303, 2, 1)) == 1
+        assert wallpix.kitty_unplace(7303) in again and wallpix.kitty_delete(7303) not in again
+    assert px.cleanup().endswith(wallpix.kitty_delete(7303)) or proto == wallpix.ITERM  # on exit: the data too
+
+
 def test_kitty_double_buffers_and_frames_are_cached_per_size():
     px, _ = pixels(wallpix.KITTY, (68, 54, 0, 0), logo=False)
     a = px.frame(halves(), 80, 66, 0, "k", CREDIT)
@@ -320,7 +346,8 @@ def test_a_frame_pixels_cant_draw_falls_back_to_cells_and_clears_the_images():
     big[0] = ord("x")
     assert px.frame(big, 512, 256, 0, "big", CREDIT) is None
     gone = px.drop(40)
-    assert all(wallpix.kitty_delete(i) in gone for i in (7301, 7302, 7303)) and px.drop(40) == ""
+    assert all(wallpix.kitty_delete(i) in gone for i in (7301, 7302)) and wallpix.kitty_unplace(7303) in gone
+    assert px.drop(40) == ""
     px.broken = True
     assert px.frame(halves(), 80, 66, 0, "k", CREDIT) is None
 

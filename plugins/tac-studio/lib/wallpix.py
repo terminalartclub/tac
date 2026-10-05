@@ -283,6 +283,10 @@ def kitty_delete(image_id: int) -> str:
     return f"\x1b_Ga=d,d=I,i={image_id},q=2\x1b\\"  # I: the placements and the image data
 
 
+def kitty_unplace(image_id: int) -> str:
+    return f"\x1b_Ga=d,d=i,i={image_id},q=2\x1b\\"  # i: the placements only; the data stays for a=p
+
+
 # ── the player's side ───────────────────────────────────────────────────────
 
 
@@ -303,7 +307,8 @@ class Pixels:
         self.cache_bytes = 0
         self.cache_for: Any = None
         self.flip = 0
-        self.logo: tuple | None = None  # (cell size, base64)
+        self.logo: tuple | None = None  # (cell size, base64, transmitted to kitty)
+        self.logo_on = False  # on screen now: drawn once a layout, the credit row leaves its cells alone
         self.broken = False
 
     def _settled(self) -> tuple | None:
@@ -394,6 +399,8 @@ class Pixels:
         """The round tac logo, LOGO_COLS x 1 cells at the bar's right end, square in the middle of them."""
         from PIL import Image
 
+        if self.logo_on:
+            return ""
         if self.logo is None or self.logo[0] != self.cell:
             cw, ch = self.cell
             w, h = max(2, round(LOGO_COLS * cw)), max(2, round(ch))
@@ -403,6 +410,7 @@ class Pixels:
             box.paste(mark, ((w - side) // 2, (h - side) // 2), mark)
             self.logo = (self.cell, encode(self.proto, box), False)
         place = f"\x1b[{pr};{pc - LOGO_COLS + 1}H"
+        self.logo_on = True
         if self.proto == ITERM:
             return place + iterm_image(self.logo[1], LOGO_COLS, 1)
         if not self.logo[2]:
@@ -414,10 +422,9 @@ class Pixels:
         """The picture rows back to the ground (a new piece, a new size), our images gone."""
         import wall
 
-        out = [self.cleanup()]
+        out = ["".join(kitty_delete(i) for i in KITTY_IDS) + kitty_unplace(LOGO_ID) if self.proto == KITTY else ""]
         out.extend(f"\x1b[{r + 1};1H{wall.GROUND_SGR}\x1b[K" for r in range(max(1, pane_rows)))
-        if self.logo is not None:
-            self.logo = (self.logo[0], self.logo[1], False)
+        self.logo_on = False
         return "".join(out)
 
     def cleanup(self) -> str:
