@@ -630,7 +630,7 @@ RESIZE_SETTLE_S = 0.1  # a drag sends a burst of SIGWINCH: redraw once the size 
 FAST_FORWARD_S = 0.3  # after a resize, catch the restarted piece up to where it was, for at most this long
 
 
-class _Resized(Exception):
+class _Resized(BaseException):  # a piece's own `except Exception:` around sleep() must not swallow it
     pass
 
 
@@ -694,7 +694,7 @@ async def cmd_play(code: str, cols: int | None, rows: int | None) -> None:
                     # restart at the new size, from where it was; a full repaint on a cleared screen
                     state["target"], state["t"] = state["t"], 0.0
                     state["deadline"] = time.monotonic() + FAST_FORWARD_S
-                    console.file.write("\x1b[2J\x1b[3J\x1b[H")
+                    console.file.write("\x1b[2J\x1b[H")  # not 3J: some terminals wipe the scrollback with it
                     console.file.flush()
                     live.update(Group(), refresh=True)
                     continue
@@ -709,7 +709,7 @@ async def cmd_play(code: str, cols: int | None, rows: int | None) -> None:
                         await asyncio.sleep(0.05)
                     state["winch"] = 0.0
                     state["t"] = state["target"] = 0.0
-                    console.file.write("\x1b[2J\x1b[3J\x1b[H")
+                    console.file.write("\x1b[2J\x1b[H")  # not 3J: some terminals wipe the scrollback with it
                     console.file.flush()
                     continue
                 resized = False

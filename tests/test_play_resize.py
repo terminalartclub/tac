@@ -124,3 +124,23 @@ def test_a_piece_that_fails_at_the_new_size_says_so_and_recovers_when_widened(tm
         assert drawn(p.lines()) == box(56, 20)
     finally:
         p.close()
+
+
+def test_a_piece_that_catches_exception_around_sleep_still_follows_a_resize(tmp_path):
+    piece = tmp_path / "guarded.py"
+    piece.write_text(BOX.replace("    await sleep(0.05)\n",
+                                 "    try:\n        await sleep(0.05)\n    except Exception:\n        pass\n"))
+    p = Pty(piece, 60, 20)
+    try:
+        p.pump(2.5)
+        assert drawn(p.lines()) == box(60, 20)
+        p.resize(44, 16)
+        p.pump(1.0)
+        assert drawn(p.lines()) == box(44, 16)
+    finally:
+        p.close()
+
+
+def test_the_repaint_never_clears_the_scrollback():
+    src = (LIB / "vscreen.py").read_text()
+    assert "\\x1b[3J" not in src  # ESC[3J wipes the scrollback in some terminals (the paste fallback runs in yours)
