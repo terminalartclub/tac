@@ -73,8 +73,8 @@ def glyph(ch: str) -> int:
     cp = ord(ch)
     if cp > 0xFFFF or unicodedata.category(ch)[0] in "CZ" and ch != " ":
         return FALLBACK
-    if unicodedata.east_asian_width(ch) in ("W", "F") or unicodedata.combining(ch):
-        return FALLBACK
+    if unicodedata.east_asian_width(ch) in ("W", "F") or unicodedata.category(ch)[0] == "M":
+        return FALLBACK  # wide, or a mark (Mn/Mc/Me) that draws onto its neighbour
     return cp
 
 

@@ -322,8 +322,8 @@ class Pipeline:
     async def backfill_frames(self, force: bool = False) -> dict:
         """Frames for published pieces that have none (all of them with force): each piece re-rendered in the
         render backend (the same isolated job as a submission; the piece's code never runs here), only
-        frames.cells.gz kept. One piece at a time; the media lock and a re-check (still published, not hidden)
-        before its public copy is written, as backfill_cards. Returns counts; logs and audits them."""
+        frames.cells.gz kept, stored with the submission (never public/: the frames endpoint serves it only while
+        the piece is published and not hidden). One piece at a time. Returns counts; logs and audits them."""
         rows = await self.db.fetchall(
             "SELECT s.id FROM submissions s WHERE s.status = 'published' AND s.hidden = 0"
             + ("" if force else " AND s.frames_json IS NULL") + " ORDER BY s.published_at DESC"
@@ -346,10 +346,7 @@ class Pipeline:
                     log.warning("frames backfill: no frames for %s", sub_id)
                     continue
                 await self._store_frames(sub_id, frames)  # the old render's preview etc. are left as they are
-                if await self.publisher.copy_frames(sub_id):
-                    done += 1
-                else:
-                    failed += 1
+                done += 1  # served from the submission, gated on the DB: nothing to copy (wall.py)
             except Exception:  # noqa: BLE001 - one piece never stops the rest
                 failed += 1
                 log.exception("frames backfill failed for %s", sub_id)

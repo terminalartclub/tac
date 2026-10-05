@@ -1,7 +1,6 @@
 """/tac:wall: the frames format, the network and cache, the player, and the commands. A fake platform on
 loopback; no prod host, no window, no one's code."""
 
-import gzip
 import http.server
 import io
 import json
@@ -9,7 +8,6 @@ import os
 import struct
 import threading
 import zlib
-from array import array
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -183,6 +181,18 @@ class Platform:
         return [r for r in self.requests if r.endswith("/frames")]
 
 
+@pytest.fixture(autouse=True)
+def short_timeouts_and_no_stray_threads(monkeypatch):
+    """Fast network timeouts here, and every thread a test started (prefetch, the fake platform) finished before
+    the next test: the pty tests then fork from a single-threaded process (no forkpty warning)."""
+    monkeypatch.setattr(wall, "TIMEOUT_S", 1)
+    monkeypatch.setattr(wall, "DEADLINE_S", 3)
+    before = set(threading.enumerate())
+    yield
+    for t in set(threading.enumerate()) - before:
+        t.join(5)
+
+
 @pytest.fixture
 def plat(monkeypatch, tmp_path):
     p = Platform()
@@ -190,6 +200,7 @@ def plat(monkeypatch, tmp_path):
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
     yield p
     p.server.shutdown()
+    p.server.server_close()
 
 
 # ── playlist, network, cache ────────────────────────────────────────────────
@@ -320,7 +331,7 @@ def test_a_piece_that_fails_is_skipped_not_fatal(plat, tmp_path, monkeypatch):
     out, clock = io.StringIO(), Clock()
     assert wall.play(doc, plat.base, wall.Cache(tmp_path / "c"), 0.5, False, out=out, clock=clock,
                      sleep=clock.sleep, rounds=1) == 0
-    assert "couldn't load A Piece · @alex; skipping" in out.getvalue() and "Still Plays" in out.getvalue()
+    assert "A Piece · @alex: taken off the wall" in out.getvalue() and "Still Plays" in out.getvalue()
 
 
 def test_frames_scale_down_to_fit_and_are_written_by_address():
@@ -379,7 +390,7 @@ def test_tac_wall_offline_uses_the_cache_and_says_so(plat, opened, capsys, tmp_p
 def test_tac_wall_offline_with_nothing_cached_is_an_error(plat, opened, capsys):
     plat.down = True
     assert tacctl.main(["wall"]) == 1
-    assert "nothing is cached yet" in capsys.readouterr().err + "".join(capsys.readouterr())
+    assert "nothing is cached from the last 7 days" in capsys.readouterr().err
 
 
 def test_an_empty_wall_says_so(plat, opened, capsys):
@@ -397,7 +408,6 @@ def test_seconds_are_checked(plat, bad):
 def test_the_pane_player_gives_the_terminal_back_on_every_stop(plat, tmp_path, sig):
     """`tacctl wall-play` in a real pty, offline from its cache: plays, then Ctrl-C / kill / a closed pane each
     exit 0 with the main screen, autowrap and cursor restored."""
-    import pty
     import select
     import signal as sigmod
     import sys
@@ -410,10 +420,14 @@ def test_the_pane_player_gives_the_terminal_back_on_every_stop(plat, tmp_path, s
     cache.fetch(plat.base, doc["pieces"][0])
     plat.server.shutdown()  # offline (refused, not hung), and no thread alive in this process when it forks
     plat.server.server_close()
+    for t in threading.enumerate():
+        if t is not threading.main_thread():
+            t.join(5)
+    import ptyspawn
+
     lib = Path(tacctl.__file__).parent
-    pid, fd = pty.fork()
-    if pid == 0:
-        os.execve(sys.executable, [sys.executable, str(lib / "tacctl.py"), "wall-play", "--seconds", "5"], dict(os.environ))
+    proc, fd = ptyspawn.spawn([sys.executable, str(lib / "tacctl.py"), "wall-play", "--seconds", "5"], 80, 30)
+    pid = proc.pid
     raw = b""
     try:
         end = time.monotonic() + 3
@@ -483,3 +497,120 @@ def test_a_hostile_codepoint_never_reaches_the_terminal():
     screen = pyte.Screen(40, 3)
     pyte.ByteStream(screen).feed(s.encode())
     assert screen.display[0].strip() == "·" * len(bad)  # centred in the 40-column pane
+
+
+# ── takedowns stick ────────────────────────────────────────────────────────
+
+
+def test_a_fresh_playlist_deletes_cached_pieces_it_no_longer_lists(plat, opened, capsys):
+    plat.add("alex", "kept", film(), title="Kept")
+    plat.add("alex", "taken", film(), title="Taken Down")
+    assert tacctl.main(["wall", "--no-window"]) == 0
+    cache = wall.Cache()
+    for p in wall.fetch_playlist(plat.base, False)["pieces"]:
+        cache.fetch(plat.base, p)
+    assert cache.cached({"handle": "alex", "slug": "taken"}) is not None
+    plat.order = [e for e in plat.order if e["slug"] != "taken"]  # hidden for copyright
+    assert tacctl.main(["wall", "--no-window"]) == 0
+    assert cache.cached({"handle": "alex", "slug": "taken"}) is None
+    assert not list(cache.root.glob("alex--taken*"))
+    assert cache.cached({"handle": "alex", "slug": "kept"}) is not None
+
+
+def test_a_404_on_revalidation_deletes_the_cached_copy(plat, tmp_path):
+    plat.add("alex", "x", film())
+    cache = wall.Cache(tmp_path / "c")
+    cache.fetch(plat.base, {"handle": "alex", "slug": "x"})
+    del plat.pieces["alex/x"]
+    with pytest.raises(wall.Gone):
+        cache.fetch(plat.base, {"handle": "alex", "slug": "x"})
+    assert cache.cached({"handle": "alex", "slug": "x"}) is None
+
+
+def test_a_piece_delisted_mid_session_leaves_after_the_lap(plat, tmp_path, monkeypatch):
+    plat.add("alex", "a", film(3), title="Stays")
+    plat.add("alex", "b", film(3), title="Goes")
+    doc = wall.fetch_playlist(plat.base, False)
+    cache = wall.Cache(tmp_path / "c")
+    monkeypatch.setattr(wall, "pane_size", lambda: (100, 10))
+    plat.order = [e for e in plat.order if e["slug"] != "b"]  # taken down while lap 1 plays
+    out, clock = io.StringIO(), Clock()
+    assert wall.play(doc, plat.base, cache, 0.3, False, out=out, clock=clock, sleep=clock.sleep, rounds=3) == 0
+    text = out.getvalue()
+    assert text.count("Goes · @alex") >= 1 and "Stays · @alex · Opus 5.5 · 1/1" in text  # lap 2 on: one piece
+    assert cache.cached({"handle": "alex", "slug": "b"}) is None
+
+
+def test_offline_never_replays_a_piece_not_confirmed_for_a_week(plat, tmp_path, monkeypatch):
+    plat.add("alex", "old", film(3), title="Old")
+    plat.add("alex", "new", film(3), title="New")
+    doc = wall.fetch_playlist(plat.base, False)
+    cache = wall.Cache(tmp_path / "c")
+    for p in doc["pieces"]:
+        cache.fetch(plat.base, p)
+    meta = tmp_path / "c" / "alex--old.json"
+    m = json.loads(meta.read_text())
+    meta.write_text(json.dumps({**m, "checked": m["checked"] - 8 * 86400}))
+    assert [p["slug"] for p in wall.playable_offline(doc, cache)] == ["new"]
+
+
+def test_each_piece_is_revalidated_once_a_session(plat, tmp_path, monkeypatch):
+    plat.add("alex", "a", film(3))
+    plat.add("alex", "b", film(3))
+    doc = wall.fetch_playlist(plat.base, False)
+    monkeypatch.setattr(wall, "pane_size", lambda: (100, 10))
+    clock = Clock()
+    wall.play(doc, plat.base, wall.Cache(tmp_path / "c"), 0.3, False, out=io.StringIO(), clock=clock,
+              sleep=clock.sleep, rounds=4)
+    assert sorted(plat.frames_requests()) == ["/v1/pieces/alex/a/frames", "/v1/pieces/alex/b/frames"]
+
+
+def test_a_dripping_server_is_cut_off_at_the_deadline(monkeypatch):
+    import socket
+    import time
+
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    stop = threading.Event()
+
+    def drip():
+        conn, _ = srv.accept()
+        conn.recv(4096)
+        conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 1000000\r\n\r\n")
+        while not stop.is_set():
+            try:
+                conn.sendall(b"x")
+            except OSError:
+                break
+            time.sleep(0.2)
+        conn.close()
+
+    t = threading.Thread(target=drip, daemon=True)
+    t.start()
+    t0 = time.monotonic()
+    try:
+        with pytest.raises(wall.WallError, match="too slow"):
+            wall.get(f"http://127.0.0.1:{srv.getsockname()[1]}/v1/wall.json", wall.MAX_PLAYLIST)
+        assert time.monotonic() - t0 < wall.DEADLINE_S + 2
+    finally:
+        stop.set()
+        srv.close()
+        t.join(5)
+
+
+def test_prune_clears_stale_temp_files(tmp_path):
+    import time
+
+    cache = wall.Cache(tmp_path / "c")
+    old, new = cache.root / ".alex--x.cells.gz.1.2.tmp", cache.root / ".alex--y.cells.gz.1.2.tmp"
+    old.write_bytes(b"half")
+    new.write_bytes(b"in flight")
+    os.utime(old, (time.time() - 3600, time.time() - 3600))
+    cache.prune()
+    assert not old.exists() and new.exists()
+
+
+def test_marks_are_drawn_as_the_fallback():
+    for cp in (0x0301, 0x0903, 0x20DD):  # Mn, Mc, Me
+        assert wallframes.char(cp) == "·"

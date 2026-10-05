@@ -4,10 +4,11 @@
                                         frames; none this week (or ?picks=1) -> the picks
   GET /v1/pieces/{handle}/{slug}/frames the piece's frames.cells.gz (wallframes.py), as the render VM made it
 
-Both public and read-only: only published, not hidden pieces of a not-suspended owner, cache- and CDN-friendly
-(Cache-Control public, a strong ETag, 304 on If-None-Match), rate-limited per client. The frames are served as
-stored bytes with Content-Type application/gzip and no Content-Encoding: the client inflates them itself, with
-its own size cap.
+Both read-only, rate-limited per client, with a strong ETag (304 on If-None-Match). Takedowns stick: the frames
+live only with the submission (never under public/, so no /media URL and no CDN copy), are served only while
+the DB says published, not hidden, owner not suspended, and are cached privately for 5 minutes at most (no
+stale-while-revalidate). The playlist is public but short-lived. Frames go out as stored bytes with Content-Type
+application/gzip and no Content-Encoding: the client inflates them itself, with its own size cap.
 """
 
 import hashlib
@@ -28,7 +29,7 @@ MAX_ENTRIES = 200
 PLAYLIST_PER_HOUR = 120
 FRAMES_PER_HOUR = 600
 PLAYLIST_CACHE = "public, max-age=300, stale-while-revalidate=600"
-FRAMES_CACHE = "public, max-age=3600, stale-while-revalidate=86400"
+FRAMES_CACHE = "private, max-age=300"  # a hidden piece is gone from every client within 5 minutes
 
 
 def week_start(now: datetime | None = None) -> str:
@@ -97,7 +98,7 @@ async def frames(handle: str, slug: str, request: Request) -> Response:
     await _limited(request, "frames", FRAMES_PER_HOUR)
     st = request.app.state
     row = await st.db.fetchone(
-        "SELECT s.frames_json FROM submissions s JOIN users u ON u.id = s.user_id"
+        "SELECT s.id, s.frames_json FROM submissions s JOIN users u ON u.id = s.user_id"
         " WHERE u.handle = ? AND s.slug = ? AND " + VISIBLE, (handle, slug))
     if row is None:
         raise ApiError(404, "not_found")
@@ -105,8 +106,8 @@ async def frames(handle: str, slug: str, request: Request) -> Response:
     headers = {"Cache-Control": FRAMES_CACHE, "ETag": etag}
     if _not_modified(request, etag):
         return Response(status_code=304, headers=headers)
-    data = await st.store.get(f"public/{handle}/{slug}/frames.cells.gz")
-    if data is None:  # in the DB but not (yet) public: a hide/unhide in flight
+    data = await st.store.get(f"submissions/{row['id']}/render/frames.cells.gz")
+    if data is None:  # in the DB but gone from the store (an unpublish in flight)
         raise ApiError(404, "not_found")
     if '"' + hashlib.sha256(data).hexdigest()[:32] + '"' != etag:  # a re-render landed: serve what is there
         headers["ETag"] = _etag(data)

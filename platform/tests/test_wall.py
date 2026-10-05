@@ -58,13 +58,24 @@ async def test_a_piece_without_good_frames_still_publishes_but_is_not_on_the_wal
     assert await ctx.app.state.store.get(f"public/{h}/{s}/frames.cells.gz") is None
 
 
+async def test_frames_never_go_public_and_are_cached_privately_for_minutes(ctx):
+    _, sub_id, h, s = await _published(ctx)
+    assert await ctx.app.state.store.get(f"public/{h}/{s}/frames.cells.gz") is None
+    async with ctx.client() as c:
+        f = await c.get(f"/v1/pieces/{h}/{s}/frames")
+        assert f.status_code == 200 and f.headers["cache-control"] == "private, max-age=300"
+        assert (await c.get(f"/media/{h}/{s}/frames.cells.gz")).status_code == 404  # no way round the endpoint
+        assert (await c.get(f"/media/{h}/{s}/preview.webp")).status_code == 200
+
+
 async def test_hidden_and_suspended_pieces_leave_the_wall_and_their_frames_404(ctx):
     _, _, h, s = await _published(ctx)
     async with ctx.admin() as a:
         assert (await a.post(f"/v1/admin/pieces/{h}/{s}/hide", json={"reason": "DMCA"})).status_code == 200
     async with ctx.client() as c:
         assert (await c.get("/v1/wall.json")).json()["pieces"] == []
-        assert (await c.get(f"/v1/pieces/{h}/{s}/frames")).status_code == 404
+        assert (await c.get(f"/v1/pieces/{h}/{s}/frames")).status_code == 404  # at once: no CDN, no public copy
+        assert (await c.get(f"/media/{h}/{s}/frames.cells.gz")).status_code == 404
     async with ctx.admin() as a:
         assert (await a.post(f"/v1/admin/pieces/{h}/{s}/unhide")).status_code == 200
     async with ctx.client() as c:

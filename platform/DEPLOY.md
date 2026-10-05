@@ -95,7 +95,11 @@ fly deploy -a tac-api
 
 `render_piece.py` now also writes `frames.cells.gz` (the piece's frames as terminal cells, `wallframes.py`);
 the API checks it with the same code (`tac_platform/wallframes.py`, a byte-identical copy) and serves it at
-`GET /v1/pieces/{handle}/{slug}/frames`, with the playlist at `GET /v1/wall.json`. Nothing in
+`GET /v1/pieces/{handle}/{slug}/frames`, with the playlist at `GET /v1/wall.json`. The frames stay with the
+submission (never under `public/`, so `/media` can't serve them and no CDN holds a copy), are served only while
+the piece is published and not hidden, and are cached privately for 5 minutes at most: a takedown is immediate
+at the API and gone from every client within 5 minutes (the plugin also drops a cached piece the playlist no
+longer lists, and won't replay offline pieces older than 7 days). Nothing in
 `render-image/` changed: the image copies `plugins/tac-studio/lib/*.py`, which now include
 `wallframes.py` and the new `render_piece.py`, so it only needs a **rebuild and push** (step 2), then
 `TAC_FLY_RENDER_IMAGE` pointed at it and a `fly deploy -a tac-api` (the DB gets a `frames_json` column on

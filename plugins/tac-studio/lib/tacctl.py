@@ -1176,12 +1176,13 @@ def cmd_wall(a: argparse.Namespace) -> int:
     offline = False
     try:
         doc = wall.fetch_playlist(base, a.picks)
-        cache.save_playlist(doc, base)
+        cache.save_playlist(doc, base, a.picks)  # also drops cached pieces no longer on the wall
     except wall.WallError as e:
         doc = cache.load_playlist()
-        cached = [p for p in (doc or {}).get("pieces", []) if cache.cached(p) is not None]
+        cached = wall.playable_offline(doc, cache) if doc else []
         if not cached:
-            return die(f"can't fetch the wall ({safe(e)}), and nothing is cached yet. Try again when online.")
+            return die(f"can't fetch the wall ({safe(e)}), and nothing is cached from the last 7 days. "
+                       "Try again when online.")
         print(f"offline ({safe(e)}): playing the {len(cached)} cached piece{'s' * (len(cached) != 1)}.")
         offline = True
     if not doc["pieces"]:
@@ -1217,7 +1218,7 @@ def cmd_wall_play(a: argparse.Namespace) -> int:
     except ApiError:
         base = None
     try:
-        return wall.play(doc, base, cache, a.seconds, a.offline or base is None)
+        return wall.play(doc, base, cache, a.seconds, a.offline or base is None, picks=doc.get("picks", False))
     except wall.WallError as e:
         return die(f"the wall stopped: {safe(e)}")
 

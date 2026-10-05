@@ -301,23 +301,10 @@ class Publisher:
             raise RuntimeError("piece.py missing")
         await self.store.put(f"{dst}/piece.py", piece)
         await self.store.copy_prefix(f"{src}/render/process", f"{dst}/process")
-        frames = await self.store.get(f"{src}/render/frames.cells.gz")
-        if frames is not None:  # optional: the wall's frames (a piece without them just isn't on /tac:wall)
-            await self.store.put(f"{dst}/frames.cells.gz", frames)
+        # Not frames.cells.gz: the wall's frames never go under public/ (no /media URL, no CDN copy). The frames
+        # endpoint serves them from the submission, and only while the DB says published + not hidden, so a
+        # takedown is immediate (wall.py).
         await self.write_cards(handle, slug)
-
-    async def copy_frames(self, sub_id: str) -> bool:
-        """The frames backfill: frames.cells.gz to the public copy of a piece that is still published and not
-        hidden, checked under the media lock (a hide in between must not get its public files written back)."""
-        async with self._media_lock:
-            row = await self._row(sub_id)
-            if row is None or row["status"] != "published" or row["hidden"] or row["suspended_at"]:
-                return False
-            data = await self.store.get(f"submissions/{sub_id}/render/frames.cells.gz")
-            if data is None:
-                return False
-            await self.store.put(f"public/{row['handle']}/{row['slug']}/frames.cells.gz", data)
-            return True
 
     async def write_cards(self, handle: str, slug: str) -> bool:
         """share.jpg (og:image) + card.jpg (twitter:image) from the public og.jpg. Any failure (render,

@@ -35,7 +35,10 @@ TEXT_RE = re.compile(r"[^\x00-\x1f\x7f-\x9f­؜᠎​-‏ -‮⁠-⁩﻿]{0,12
 MAX_PLAYLIST = 256 * 1024
 MAX_PIECES = 200
 CACHE_CAP = 128 * 1024 * 1024
-TIMEOUT_S = 10
+TIMEOUT_S = 10  # per socket operation
+DEADLINE_S = 30  # per request, whole: a server dripping bytes can't hold a piece up longer
+OFFLINE_MAX_AGE_S = 7 * 86400  # offline, a cached piece last confirmed by the platform longer ago isn't replayed
+STALE_TMP_S = 600
 GROUND = (8, 8, 15)
 FG = (204, 204, 204)
 
@@ -55,19 +58,35 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 _OPENER = urllib.request.build_opener(_NoRedirect)
 
 
+class Gone(WallError):
+    """404/410: the piece is no longer on the wall (unpublished, hidden, taken down)."""
+
+
 def get(url: str, cap: int, etag: str | None = None) -> tuple[int, bytes, str | None]:
-    """(status, body, etag). 304 when etag still matches. Reads at most cap + 1 bytes: more is an error."""
+    """(status, body, etag). 304 when etag still matches. Reads at most cap + 1 bytes (more is an error) within
+    DEADLINE_S overall, in chunks, each socket operation at most TIMEOUT_S."""
     headers = {"Accept": "application/json, application/gzip", "User-Agent": "tac-wall"}
     if etag:
         headers["If-None-Match"] = etag
     req = urllib.request.Request(url, headers=headers)
+    deadline = time.monotonic() + DEADLINE_S
     try:
         with _OPENER.open(req, timeout=TIMEOUT_S) as r:
-            body = r.read(cap + 1)
             status, tag = r.status, r.headers.get("ETag")
+            body = bytearray()
+            while len(body) <= cap:
+                if time.monotonic() > deadline:
+                    raise WallError(f"too slow: over {DEADLINE_S} s")
+                chunk = r.read1(min(65536, cap + 1 - len(body)))  # what has arrived: read() would wait for all n
+                if not chunk:
+                    break
+                body += chunk
+            body = bytes(body)
     except urllib.error.HTTPError as e:
         if e.code == 304:
             return 304, b"", etag
+        if e.code in (404, 410):
+            raise Gone(f"HTTP {e.code}") from None
         raise WallError(f"HTTP {e.code}") from None
     except (urllib.error.URLError, OSError, TimeoutError) as e:
         raise WallError(f"cannot reach the platform ({getattr(e, 'reason', e)})") from None
@@ -161,12 +180,14 @@ class Cache:
         stem = f"{p['handle']}--{p['slug']}"  # both validated: no separator or dot can get in
         return self.root / f"{stem}.cells.gz", self.root / f"{stem}.json"
 
-    def save_playlist(self, doc: dict, base: str) -> None:
-        """In the server's own shape, so reading it back goes through the same parse_playlist checks."""
+    def save_playlist(self, doc: dict, base: str, picks: bool = False) -> None:
+        """In the server's own shape, so reading it back goes through the same parse_playlist checks. A fresh
+        playlist is also the takedown list: every cached piece it no longer lists is deleted now."""
         pieces = [{"handle": p["handle"], "slug": p["slug"], "title": p["title"], "model_label": p["model"],
                    "frames": {"bytes": p["bytes"]}, "etag": p["etag"]} for p in doc["pieces"]]
         _write(self.root / "playlist.json", json.dumps({"week": doc["week"], "source": doc["source"],
-                                                        "pieces": pieces, "api": base}).encode())
+                                                        "pieces": pieces, "api": base, "picks": picks}).encode())
+        self.drop_unlisted(doc["pieces"])
 
     def load_playlist(self) -> dict | None:
         raw = _read(self.root / "playlist.json", MAX_PLAYLIST)
@@ -174,10 +195,43 @@ class Cache:
             return None
         try:
             doc = parse_playlist(raw)
-            api = json.loads(raw).get("api")
+            extra = json.loads(raw)
+            api, picks = extra.get("api"), extra.get("picks")
         except (WallError, ValueError, AttributeError):
             return None
-        return {**doc, "api": api if isinstance(api, str) else None}
+        return {**doc, "api": api if isinstance(api, str) else None, "picks": picks is True}
+
+    def drop_unlisted(self, listed: list[dict]) -> int:
+        """Delete every cached piece not in `listed` (it left the wall: unpublished, hidden, taken down)."""
+        keep = {self._paths(p)[0].name for p in listed}
+        n = 0
+        with self.lock:
+            for f in self.root.glob("*.cells.gz"):
+                if f.name not in keep:
+                    self._remove(f)
+                    n += 1
+        return n
+
+    def drop(self, p: dict) -> None:
+        with self.lock:
+            self._remove(self._paths(p)[0])
+
+    @staticmethod
+    def _remove(f: Path) -> None:
+        f.unlink(missing_ok=True)
+        f.with_name(f.name.replace(".cells.gz", ".json")).unlink(missing_ok=True)
+
+    def fresh(self, p: dict, max_age: float = OFFLINE_MAX_AGE_S) -> bool:
+        """Confirmed by the platform (downloaded or revalidated) within max_age seconds."""
+        raw = _read(self._paths(p)[1], 4096)
+        try:
+            at = json.loads(raw or b"null").get("checked")
+        except (ValueError, AttributeError):
+            return False
+        return isinstance(at, (int, float)) and 0 <= time.time() - at <= max_age
+
+    def _note(self, p: dict, etag: str | None, size: int) -> None:
+        _write(self._paths(p)[1], json.dumps({"etag": etag, "bytes": size, "checked": time.time()}).encode())
 
     def cached(self, p: dict) -> bytes | None:
         data, meta = self._paths(p)
@@ -199,11 +253,18 @@ class Cache:
         return tag if isinstance(tag, str) and ETAG_RE.fullmatch(tag) else None
 
     def fetch(self, base: str, p: dict) -> bytes:
-        """The piece's frames: revalidated (If-None-Match) when cached, else downloaded; checked before saved."""
+        """The piece's frames: revalidated (If-None-Match) when cached, else downloaded; checked before saved. A
+        404/410 (taken down) deletes the cached copy and raises Gone."""
         have = self.cached(p)
-        status, body, tag = get(f"{base}/v1/pieces/{p['handle']}/{p['slug']}/frames", wallframes.MAX_GZ,
-                                self.etag(p) if have else None)
+        try:
+            status, body, tag = get(f"{base}/v1/pieces/{p['handle']}/{p['slug']}/frames", wallframes.MAX_GZ,
+                                    self.etag(p) if have else None)
+        except Gone:
+            self.drop(p)
+            raise
         if status == 304 and have is not None:
+            with self.lock:
+                self._note(p, self.etag(p), len(have))
             self.touch(p)
             return have
         if status != 200:
@@ -212,11 +273,10 @@ class Cache:
             wallframes.load(body)
         except wallframes.BadFrames as e:
             raise WallError(f"the frames are not playable: {e}") from None
-        data, meta = self._paths(p)
+        data, _ = self._paths(p)
         with self.lock:
             _write(data, body)
-            _write(meta, json.dumps({"etag": tag if isinstance(tag, str) and ETAG_RE.fullmatch(tag) else None,
-                                     "bytes": len(body)}).encode())
+            self._note(p, tag if isinstance(tag, str) and ETAG_RE.fullmatch(tag) else None, len(body))
             self.prune(keep={data})
         return body
 
@@ -227,7 +287,14 @@ class Cache:
             pass
 
     def prune(self, keep: set[Path] = frozenset()) -> None:  # type: ignore[assignment]
-        """Least recently played first, until the cache is under its cap; `keep` never goes."""
+        """Least recently played first, until the cache is under its cap; `keep` never goes. Also leftover
+        temp files of an interrupted write."""
+        for t in self.root.glob(".*.tmp"):
+            try:
+                if time.time() - t.lstat().st_mtime > STALE_TMP_S:
+                    t.unlink()
+            except OSError:
+                pass
         files = []
         for f in self.root.glob("*.cells.gz"):
             st = f.lstat()
@@ -239,8 +306,7 @@ class Cache:
                 break
             if f in keep:
                 continue
-            f.unlink(missing_ok=True)
-            f.with_name(f.name.replace(".cells.gz", ".json")).unlink(missing_ok=True)
+            self._remove(f)
             total -= size
 
 
@@ -307,50 +373,96 @@ class _Stop(Exception):
     pass
 
 
+def playable_offline(doc: dict, cache: Cache) -> list[dict]:
+    """Offline: only pieces cached and confirmed by the platform within the last OFFLINE_MAX_AGE_S (a piece
+    taken down while we were offline stops replaying within a week)."""
+    return [p for p in doc["pieces"] if cache.cached(p) is not None and cache.fresh(p)]
+
+
 def play(doc: dict, base: str | None, cache: Cache, seconds: float, offline: bool,
-         out: Any = None, clock: Any = time.monotonic, sleep: Any = time.sleep, rounds: int | None = None) -> int:
+         out: Any = None, clock: Any = time.monotonic, sleep: Any = time.sleep, rounds: int | None = None,
+         picks: bool = False) -> int:
     """Plays the playlist until Ctrl-C (or `rounds` passes, for tests). Each piece: its frames from the cache or
     the platform (the next one fetched in the background meanwhile), `seconds` of it (0: one loop), then the
-    next. A piece that can't be fetched or played is skipped with a note; none playable at all: exit 1."""
+    next. Each piece is revalidated at most once a session; the playlist is fetched again every lap, and a
+    piece it no longer lists (or that answers 404) is dropped from the session and the cache. A piece that
+    can't be fetched or played is skipped with a note; none playable at all: exit 1."""
     out = out or sys.stdout
-    pieces = doc["pieces"] if not offline else [p for p in doc["pieces"] if cache.cached(p) is not None]
+    pieces = list(doc["pieces"]) if not offline else playable_offline(doc, cache)
     if not pieces:
-        print("tac: nothing on the wall to play" + (" (offline, and nothing cached)" if offline else ""),
-              file=sys.stderr)
+        print("tac: nothing on the wall to play" + (" (offline, and nothing cached from the last 7 days)"
+                                                    if offline else ""), file=sys.stderr)
         return 1
 
-    pending: dict[int, Any] = {}
     online = bool(base) and not offline
+    pending: dict[tuple[str, str], Any] = {}  # the one piece fetching ahead, by (handle, slug)
+    checked: set[tuple[str, str]] = set()  # revalidated with the platform this session
+    gone: set[tuple[str, str]] = set()  # answered 404/410: taken down, skipped for the rest of the session
 
-    def load(i: int) -> bytes | None:
-        """From the platform (revalidating a cached copy), else whatever the cache holds."""
-        p = pieces[i % len(pieces)]
-        if online:
+    def key(p: dict) -> tuple[str, str]:
+        return p["handle"], p["slug"]
+
+    def load(p: dict) -> bytes | None:
+        """From the platform (once a session per piece), else whatever the cache holds. None when gone."""
+        if online and key(p) not in checked:
             try:
-                return cache.fetch(base, p)
+                data = cache.fetch(base, p)
+                checked.add(key(p))
+                return data
+            except Gone:
+                gone.add(key(p))
+                return None
             except WallError:
                 pass  # the network failed: whatever we have
-        return cache.cached(p)
+        return None if key(p) in gone else cache.cached(p)
 
-    def prefetch(i: int) -> None:
-        if i in pending:
+    def prefetch(p: dict) -> None:
+        if key(p) in pending or key(p) in gone:
             return
         box: dict = {}
-        t = threading.Thread(target=lambda: box.update(data=load(i)), daemon=True)
+        t = threading.Thread(target=lambda: box.update(data=load(p)), daemon=True)
         t.start()
-        pending[i] = (t, box)
+        pending[key(p)] = (t, box)
 
-    def take(i: int) -> bytes | None:
-        """The piece now: its prefetch if done; a cached copy rather than waiting on a slow network; else
-        fetched now (at most the request timeout)."""
-        have = cache.cached(pieces[i % len(pieces)])
-        if i in pending:
-            t, box = pending.pop(i)
-            t.join(None if have is None else 0.5)
-            if not t.is_alive():
-                return box.get("data") or have
-            return have
-        return have if have is not None else load(i)
+    def take(p: dict) -> bytes | None:
+        """The piece now: its prefetch if done; a cached copy rather than waiting on a slow network; else fetched
+        now. Never longer than one request's DEADLINE_S."""
+        if key(p) in gone:
+            return None
+        have = cache.cached(p)
+        if key(p) in pending:
+            t, box = pending.pop(key(p))
+            t.join(DEADLINE_S + 1 if have is None else 0.5)
+            if t.is_alive():
+                return have
+            return None if key(p) in gone else box.get("data") or have
+        return have if have is not None else load(p)
+
+    def start_refresh() -> tuple[threading.Thread, dict] | None:
+        """The playlist again, in the background while the lap plays (never a pause on a slow network)."""
+        if not online:
+            return None
+        box: dict = {}
+
+        def run() -> None:
+            try:
+                box["doc"] = fetch_playlist(base, picks)
+            except WallError:
+                pass
+
+        t = threading.Thread(target=run, daemon=True)
+        t.start()
+        return t, box
+
+    def next_lap(job: tuple[threading.Thread, dict] | None) -> list[dict]:
+        """A lap is done: the fresh playlist if it arrived (pieces it no longer lists leave the session and the
+        cache: save_playlist drops them), else this one; taken-down pieces (gone) leave either way."""
+        current = [p for p in pieces if key(p) not in gone]
+        if job is None or job[0].is_alive() or "doc" not in job[1]:
+            return current
+        fresh = job[1]["doc"]
+        cache.save_playlist(fresh, base, picks)
+        return [p for p in fresh["pieces"] if key(p) not in gone]
 
     def on_stop(signum: int, frame: Any) -> None:  # noqa: ARG001
         raise _Stop
@@ -360,47 +472,51 @@ def play(doc: dict, base: str | None, cache: Cache, seconds: float, offline: boo
     out.write(ENTER)
     out.flush()
     try:
-        i = 0
-        while rounds is None or i < rounds * len(pieces):
-            p = pieces[i % len(pieces)]
-            data = take(i)
-            prefetch(i + 1)  # the next piece downloads while this one plays: never more than one ahead
-            try:
-                h, w = wallframes.load(data) if data is not None else (None, None)
-            except wallframes.BadFrames:
-                h = None
-            if h is None:
-                failed += 1
-                pc, pr = pane_size()
-                out.write(f"\x1b[H{GROUND_SGR}\x1b[2J\x1b[{pr};1H\x1b[2mcouldn't load {p['title']} · @{p['handle']};"
-                          f" skipping\x1b[0m")
-                out.flush()
-                if failed >= len(pieces) and played == 0:
-                    raise WallError("no piece on the wall could be loaded")
-                sleep(1.5)
-                i += 1
-                continue
-            played += 1
-            cache.touch(p)
-            credit = credit_line(p, i % len(pieces), len(pieces), offline)
-            length = seconds if seconds > 0 else h.frames / h.fps
-            start = clock()
-            k = 0
-            it = wallframes.frames(h, w)
-            while clock() - start < length:
+        lap = 0
+        while rounds is None or lap < rounds:
+            if not pieces:
+                raise WallError("no piece left on the wall")
+            job = start_refresh()
+            for j, p in enumerate(pieces):
+                data = take(p)
+                prefetch(pieces[(j + 1) % len(pieces)])  # downloads while this one plays: never more than one ahead
                 try:
-                    cur = next(it)
-                except StopIteration:
-                    it = wallframes.frames(h, w)  # loop the piece
-                    cur = next(it)
-                pc, pr = pane_size()
-                out.write(frame_ansi(cur, h.cols, h.rows, pc, pr, credit))
-                out.flush()
-                k += 1
-                delay = start + k / h.fps - clock()
-                if delay > 0:
-                    sleep(min(delay, max(0.0, length - (clock() - start))))
-            i += 1
+                    h, w = wallframes.load(data) if data is not None else (None, None)
+                except wallframes.BadFrames:
+                    h = None
+                if h is None:
+                    failed += 1
+                    pc, pr = pane_size()
+                    note = "taken off the wall" if key(p) in gone else "couldn't load it; skipping"
+                    out.write(f"\x1b[H{GROUND_SGR}\x1b[2J\x1b[{pr};1H\x1b[2m{p['title']} · @{p['handle']}: {note}"
+                              "\x1b[0m")
+                    out.flush()
+                    if failed >= len(pieces) and played == 0:
+                        raise WallError("no piece on the wall could be loaded")
+                    sleep(1.5)
+                    continue
+                played += 1
+                cache.touch(p)
+                credit = credit_line(p, j, len(pieces), offline)
+                length = seconds if seconds > 0 else h.frames / h.fps
+                start = clock()
+                k = 0
+                it = wallframes.frames(h, w)
+                while clock() - start < length:
+                    try:
+                        cur = next(it)
+                    except StopIteration:
+                        it = wallframes.frames(h, w)  # loop the piece
+                        cur = next(it)
+                    pc, pr = pane_size()
+                    out.write(frame_ansi(cur, h.cols, h.rows, pc, pr, credit))
+                    out.flush()
+                    k += 1
+                    delay = start + k / h.fps - clock()
+                    if delay > 0:
+                        sleep(min(delay, max(0.0, length - (clock() - start))))
+            lap += 1
+            pieces = next_lap(job)
         return 0
     except (KeyboardInterrupt, _Stop):
         return 0
@@ -409,3 +525,5 @@ def play(doc: dict, base: str | None, cache: Cache, seconds: float, offline: boo
             signal.signal(sig, h0)
         out.write(LEAVE)
         out.flush()
+        for t, _ in pending.values():  # a prefetch still running: give it a moment, never hold up the exit
+            t.join(0.05)
