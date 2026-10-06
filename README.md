@@ -250,8 +250,6 @@ push to `main`.
 
 ### Open TODOs
 
-- **Network-isolate renders.** Uploaded piece code renders on the platform with network. Wrap the
-  render step in `unshare -n` or a `--network none` container.
 - **Runtime builtins.** vscreen `exec`s pieces with full builtins. Pass a minimal `__builtins__` with a
   gated `__import__` as defence in depth. This is not a sandbox; isolation is the real control.
 - **Deploy.** `publish.yml` uploads `build/` as an artifact; pushing it to the gallery host is not built yet.

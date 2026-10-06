@@ -59,7 +59,7 @@ One throwaway Firecracker microVM per job, in the `tac-render` app (recommended:
   - Verified locally: the real image + real `fly_bootstrap.py` + the real seed `laps` ran as the "Machine". Docker stood in for the VM as root + CAP_SYS_ADMIN with a normal network. (`tests/test_fly_machine.py::test_real_bootstrap_drops_network_for_piece`)
   - In that run the bootstrap reached the API over the presigned URLs. The untrusted child, as uid 65534, could not reach the same host ("Network is unreachable"), and the probe saw zero routes.
   - Without CAP_SYS_ADMIN the probe fails and the job fails closed.
-  - **Not verified on a real Fly Machine:** no Fly resources were created. Fly Machines boot a full Linux kernel with the process as root, and network namespaces are standard there (Docker-in-Machine setups depend on them). This is expected to work, but it is unproven until the first smoke render (DEPLOY.md checklist).
+  - **Verified on a real Fly Machine (3 Oct 2026):** the prod smoke render logged `isolation {"routes": [], "tcp": "OSError"}` from a `tac-render` Machine. Prod runs `TAC_RENDERER=fly-machine`, and every render repeats the same probe before any submitted code runs; a failed probe rejects the submission (`pipeline.py`, `backend_error`).
   - Because the bootstrap fails closed, an unsupported kernel produces failed renders, never unisolated ones. That is why `fly-machine` is in `ISOLATED_RENDERERS`.
 - **Fallback** if Fly's kernel refuses the namespace:
   - The closest equivalent is an egress firewall applied by the bootstrap before step 3: nftables/iptables drop all output except loopback, then drop CAP_NET_ADMIN by switching to uid 65534. That needs `nftables` in the image and has the same fail-closed probe.

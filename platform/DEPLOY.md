@@ -154,7 +154,7 @@ Machines bill per second while running.
 
 ## Before going public: checklist
 
-- [ ] Steps 0–6 above. Smoke test shows `pipeline <id>: isolation {"routes": [], "tcp": "OSError"}` in the tac-api log from a real Fly Machine.
+- [x] Steps 0–6 above. Smoke test shows `pipeline <id>: isolation {"routes": [], "tcp": "OSError"}` in the tac-api log from a real Fly Machine. (Done 3 Oct 2026.)
 - [ ] Dockerfile + fly.toml for `tac-api` (`uv sync --frozen`, `tac-platform`, `/healthz` check, `auto_stop_machines = "off"`, volume at `/data`).
 - [ ] GitHub OAuth tested end to end; pick-a-handle step for invalid or taken logins.
 - [ ] Token expiry + revoke; admin via a GitHub allow-list instead of a shared token.
